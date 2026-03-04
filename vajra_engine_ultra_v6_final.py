@@ -542,23 +542,36 @@ def _fvg_flags(h, l):
 
 @njit(cache=True)
 def _find_ob_zones_strict(o, c, h, l, bos_up, bos_dn):
-    n = len(c); obt = np.zeros(n); obb = np.zeros(n); lbu = 0.0; lbe = 0.0
+    n = len(c); obt = np.zeros(n); obb = np.zeros(n)
+    lbu_top = 0.0; lbu_bot = 0.0
+    lbe_bot = 0.0; lbe_top = 0.0
     for i in range(2, n - 1):
         if bos_up[i] == 1 and bos_up[i-1] == 0:
             for j in range(i-1, max(0, i-10), -1):
                 if c[j] < o[j]: 
                     if j+1 < n:
                         body_ob = o[j] - c[j]; next_body = c[j+1] - o[j+1]
-                        if c[j+1] > o[j+1] and next_body > 1.5 * body_ob: lbu = float(h[j])
+                        if c[j+1] > o[j+1] and next_body > 1.5 * body_ob:
+                            lbu_top = float(h[j])
+                            lbu_bot = float(l[j])
                     break
         if bos_dn[i] == 1 and bos_dn[i-1] == 0:
             for j in range(i-1, max(0, i-10), -1):
                 if c[j] > o[j]: 
                     if j+1 < n:
                         body_ob = c[j] - o[j]; next_body = o[j+1] - c[j+1]
-                        if c[j+1] < o[j+1] and next_body > 1.5 * body_ob: lbe = float(l[j])
+                        if c[j+1] < o[j+1] and next_body > 1.5 * body_ob:
+                            lbe_bot = float(l[j])
+                            lbe_top = float(h[j])
                     break
-        obt[i]=lbu; obb[i]=lbe
+
+        # Mitigation / Invalidation logic to prevent stale limit orders
+        if lbu_top > 0 and c[i] < lbu_bot:
+            lbu_top = 0.0; lbu_bot = 0.0
+        if lbe_bot > 0 and c[i] > lbe_top:
+            lbe_bot = 0.0; lbe_top = 0.0
+
+        obt[i] = lbu_top; obb[i] = lbe_bot
     return obt, obb
 
 class Precomp:
@@ -1058,6 +1071,11 @@ class TradeManager:
                 else:
                     trade['next_safety_price'] = 0.0
 
+                # PREVENT INTRA-BAR LEAKAGE: A trade cannot hit TP on the same bar it triggers
+                # because we do not know if the high/low occurred before or after the trigger.
+                # However, it CAN hit SL (pessimistic outcome).
+                trade['can_tp_this_bar'] = False
+
                 self.open_trades.append(trade)
                 self.mem.record_fill(trade)
             else:
@@ -1072,6 +1090,11 @@ class TradeManager:
             sl = t['sl']
             tp = t['tp']
             
+            can_tp = t.get('can_tp_this_bar', True)
+            if not can_tp:
+                # Reset for the next bar
+                t['can_tp_this_bar'] = True
+
             # Real-time PnL calc for Management
             risk = t.get('initial_risk_unit', abs(t['entry'] - t['sl'])) 
             if risk == 0: risk = entry * 0.01
@@ -1085,10 +1108,10 @@ class TradeManager:
             
             if side == 'long':
                 if l <= sl: hit_sl = True; exit_reason = 'sl'
-                elif h >= tp: hit_tp = True; exit_reason = 'tp'
+                elif h >= tp and can_tp: hit_tp = True; exit_reason = 'tp'
             else:
                 if h >= sl: hit_sl = True; exit_reason = 'sl'
-                elif l <= tp: hit_tp = True; exit_reason = 'tp'
+                elif l <= tp and can_tp: hit_tp = True; exit_reason = 'tp'
 
             # TIME-IN-FORCE DECAY (Institutional Capital Velocity)
             if not hit_sl and not hit_tp:
@@ -1287,20 +1310,24 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                     "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.25, "type": "limit"
                 })
 
-    # DELTA (VWAP Trend Retest - Market) - Explicit Exact Entry
+    # DELTA (VWAP Trend Retest - Predictive Limit)
     if getattr(cfg, 'strat_delta_enabled', True):
         avwap_bull = base.get("avwap_bull", 0.0)
         avwap_bear = base.get("avwap_bear", 0.0)
-        if can_long and base.get("fvg_bull", 0) > 0 and abs(px - avwap_bull) < current_atr * 0.5:
-            candidates.append({
-                "strat": "DELTA_LONG", "priority": 1.1, "side": "long",
-                "entry": px, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "market"
-            })
-        if can_short and base.get("fvg_bear", 0) > 0 and abs(px - avwap_bear) < current_atr * 0.5:
-            candidates.append({
-                "strat": "DELTA_SHORT", "priority": 1.1, "side": "short",
-                "entry": px, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "market"
-            })
+        if can_long and base.get("fvg_bull", 0) > 0:
+            entry_target = avwap_bull
+            if px >= entry_target + current_atr * 0.1:
+                candidates.append({
+                    "strat": "DELTA_LONG", "priority": 1.1, "side": "long",
+                    "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "limit"
+                })
+        if can_short and base.get("fvg_bear", 0) > 0:
+            entry_target = avwap_bear
+            if px <= entry_target - current_atr * 0.1:
+                candidates.append({
+                    "strat": "DELTA_SHORT", "priority": 1.1, "side": "short",
+                    "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "limit"
+                })
 
     # ALPHA (Momentum Breakout - Market) - Explicit Exact Entry
     if getattr(cfg, 'strat_alpha_enabled', True):
@@ -1420,29 +1447,36 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 score *= 0.5
                 risk_factor *= 0.5
 
+        # ELITE QUANT FILTER: Structural Stop Loss & Dynamic Risk Bounds
+        if 'sl_override' in cand:
+            sl = cand['sl_override']
+        else:
+            # Default all limit strategies to a structural swing low/high
+            if side == 'long':
+                sl = base.get("last_swing_low", entry - current_atr) - (current_atr * 0.2)
+            else:
+                sl = base.get("last_swing_high", entry + current_atr) + (current_atr * 0.2)
+
+        dynamic_risk = abs(entry - sl)
+
+        # If risk is too wide, a 3R target is statistically improbable intraday.
+        # If risk is too narrow, it gets stopped by noise.
+        if dynamic_risk > current_atr * 2.5 or dynamic_risk < current_atr * 0.2:
+            continue
+
+        # STRICT 1:3 GEOMETRY LOCK
+        tp_dist = dynamic_risk * (cfg.atr_mult_tp / cfg.atr_mult_sl)
+
+        if side == 'long':
+            tp = entry + tp_dist
+            # Sanity check: SL must be below entry
+            if sl >= entry: continue
+        else:
+            tp = entry - tp_dist
+            if sl <= entry: continue
+
         if score > best_score:
             best_score = score
-            
-            # STRICT 1:3 GEOMETRY LOCK
-            if 'sl_override' in cand:
-                sl = cand['sl_override']
-                dynamic_risk = abs(entry - sl)
-                tp_dist = (cfg.atr_mult_tp / cfg.atr_mult_sl) * dynamic_risk
-                if side == 'long':
-                    tp = entry + tp_dist
-                else:
-                    tp = entry - tp_dist
-            else:
-                # Normal Atr Based Logic (Strictly Enforced)
-                sl_dist = current_atr * cfg.atr_mult_sl
-                tp_dist = current_atr * cfg.atr_mult_tp
-
-                if side == 'long':
-                    sl = entry - sl_dist
-                    tp = entry + tp_dist
-                else:
-                    sl = entry + sl_dist
-                    tp = entry - tp_dist
             
             rr = abs(tp - entry) / max(1e-12, abs(entry - sl))
             
