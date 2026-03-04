@@ -1253,31 +1253,39 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     if getattr(cfg, 'strat_gamma_enabled', True):
         if can_long and base.get("ob_bull_price", 0) > 0 and base.get("ob_bull_dist", 99) < 1.0:
             if base.get("engulf_bull", 0) > 0 or base.get("pin_bull", 0) > 0:
-                candidates.append({
-                    "strat": "GAMMA_LONG", "priority": 1.5, "side": "long",
-                    "entry": base.get("ob_bull_price", px), "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "limit"
-                })
+                entry_target = base.get("ob_bull_price", px)
+                if px >= entry_target + current_atr * 0.1:
+                    candidates.append({
+                        "strat": "GAMMA_LONG", "priority": 1.5, "side": "long",
+                        "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "limit"
+                    })
         if can_short and base.get("ob_bear_price", 0) > 0 and base.get("ob_bear_dist", 99) < 1.0:
             if base.get("engulf_bear", 0) > 0 or base.get("pin_bear", 0) > 0:
-                candidates.append({
-                    "strat": "GAMMA_SHORT", "priority": 1.5, "side": "short",
-                    "entry": base.get("ob_bear_price", px), "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "limit"
-                })
+                entry_target = base.get("ob_bear_price", px)
+                if px <= entry_target - current_atr * 0.1:
+                    candidates.append({
+                        "strat": "GAMMA_SHORT", "priority": 1.5, "side": "short",
+                        "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "limit"
+                    })
 
     # EPSILON (Fractal Liquidity Sweep - Limit) - Explicit Exact Entry
     if getattr(cfg, 'strat_epsilon_enabled', True):
         is_fractal_bull = (abs(px - htf_sl) < current_atr * 0.5) or (abs(px - mtf_sl) < current_atr * 0.5)
         is_fractal_bear = (abs(px - htf_sh) < current_atr * 0.5) or (abs(px - mtf_sh) < current_atr * 0.5)
         if can_long and sweep_bull > 0 and is_fractal_bull:
-            candidates.append({
-                "strat": "EPSILON_LONG", "priority": 2.0, "side": "long",
-                "entry": base.get("last_swing_low", px), "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.25, "type": "limit"
-            })
+            entry_target = base.get("last_swing_low", px)
+            if px >= entry_target + current_atr * 0.1:
+                candidates.append({
+                    "strat": "EPSILON_LONG", "priority": 2.0, "side": "long",
+                    "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.25, "type": "limit"
+                })
         if can_short and sweep_bear > 0 and is_fractal_bear:
-            candidates.append({
-                "strat": "EPSILON_SHORT", "priority": 2.0, "side": "short",
-                "entry": base.get("last_swing_high", px), "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.25, "type": "limit"
-            })
+            entry_target = base.get("last_swing_high", px)
+            if px <= entry_target - current_atr * 0.1:
+                candidates.append({
+                    "strat": "EPSILON_SHORT", "priority": 2.0, "side": "short",
+                    "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.25, "type": "limit"
+                })
 
     # DELTA (VWAP Trend Retest - Market) - Explicit Exact Entry
     if getattr(cfg, 'strat_delta_enabled', True):
@@ -1310,15 +1318,19 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     # OMEGA (AVWAP Mean Reversion - Limit) - Explicit Exact Entry
     if getattr(cfg, 'strat_omega_enabled', True) and getattr(cfg, 'allow_mean_reversion', True):
         if can_long and (w_pattern > 0 or sweep_bull > 0) and rsi < 40:
-            candidates.append({
-                "strat": "OMEGA_LONG", "priority": 1.0 * reversion_penalty, "side": "long",
-                "entry": px, "sl_offset": sl_atr, "tp_target": base.get("avwap_bear", px + tp_atr_dist), "risk_mult": 1.0, "type": "limit"
-            })
+            entry_target = base.get("bb_lower", px)
+            if px >= entry_target + current_atr * 0.1:
+                candidates.append({
+                    "strat": "OMEGA_LONG", "priority": 1.0 * reversion_penalty, "side": "long",
+                    "entry": entry_target, "sl_offset": sl_atr, "tp_target": base.get("avwap_bear", px + tp_atr_dist), "risk_mult": 1.0, "type": "limit"
+                })
         if can_short and (m_pattern > 0 or sweep_bear > 0) and rsi > 60:
-            candidates.append({
-                "strat": "OMEGA_SHORT", "priority": 1.0 * reversion_penalty, "side": "short",
-                "entry": px, "sl_offset": sl_atr, "tp_target": base.get("avwap_bull", px - tp_atr_dist), "risk_mult": 1.0, "type": "limit"
-            })
+            entry_target = base.get("bb_upper", px)
+            if px <= entry_target - current_atr * 0.1:
+                candidates.append({
+                    "strat": "OMEGA_SHORT", "priority": 1.0 * reversion_penalty, "side": "short",
+                    "entry": entry_target, "sl_offset": sl_atr, "tp_target": base.get("avwap_bull", px - tp_atr_dist), "risk_mult": 1.0, "type": "limit"
+                })
 
     # SMC_WICK_SNIPER (Fibonacci + OB Confluence - Limit)
     if can_long and sweep_bull > 0:
@@ -1327,7 +1339,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         if ob_bull > 0 and abs(fib_zone - ob_bull) < current_atr * 0.5:
             smart_entry = max(fib_zone, ob_bull)
             smart_sl = base.get("last_swing_low", px - sl_atr) - (current_atr * 0.2)
-            if smart_entry - smart_sl > current_atr * 0.1:
+            if smart_entry - smart_sl > current_atr * 0.1 and px >= smart_entry + current_atr * 0.1:
                 candidates.append({
                     "strat": "SMC_WICK_SNIPER_LONG", "priority": 3.0, "side": "long",
                     "entry": smart_entry, "sl_override": smart_sl, "risk_mult": 1.5, "type": "limit"
@@ -1339,7 +1351,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         if ob_bear > 0 and abs(fib_zone - ob_bear) < current_atr * 0.5:
             smart_entry = min(fib_zone, ob_bear)
             smart_sl = base.get("last_swing_high", px + sl_atr) + (current_atr * 0.2)
-            if smart_sl - smart_entry > current_atr * 0.1:
+            if smart_sl - smart_entry > current_atr * 0.1 and px <= smart_entry - current_atr * 0.1:
                 candidates.append({
                     "strat": "SMC_WICK_SNIPER_SHORT", "priority": 3.0, "side": "short",
                     "entry": smart_entry, "sl_override": smart_sl, "risk_mult": 1.5, "type": "limit"
@@ -1348,15 +1360,19 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     # ICT_SWEEP (Asian Range Sweeps during Killzones - Limit)
     if hour in [7, 8, 9, 10, 13, 14, 15, 16]:
         if base.get("asian_range_swept_up", 0) > 0 and base.get("pin_bear", 0) > 0:
-            candidates.append({
-                "strat": "ICT_SWEEP_SHORT", "priority": 2.5, "side": "short",
-                "entry": px, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.5, "type": "limit"
-            })
+            entry_target = base.get("asian_high", px)
+            if px <= entry_target - current_atr * 0.1:
+                candidates.append({
+                    "strat": "ICT_SWEEP_SHORT", "priority": 2.5, "side": "short",
+                    "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.5, "type": "limit"
+                })
         if base.get("asian_range_swept_dn", 0) > 0 and base.get("pin_bull", 0) > 0:
-            candidates.append({
-                "strat": "ICT_SWEEP_LONG", "priority": 2.5, "side": "long",
-                "entry": px, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.5, "type": "limit"
-            })
+            entry_target = base.get("asian_low", px)
+            if px >= entry_target + current_atr * 0.1:
+                candidates.append({
+                    "strat": "ICT_SWEEP_LONG", "priority": 2.5, "side": "long",
+                    "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.5, "type": "limit"
+                })
 
     # EVALUATE ALL CANDIDATES
     best_plan = None

@@ -152,7 +152,7 @@ class RealExecutionManager:
         log.info(f"⚡ REAL EXECUTION: {c_side.upper()} {qty:.4f} {symbol}...")
         
         # BREAKOUT CONFIRMATION (TRIGGER ORDER)
-        if self.cfg.execution_style == 'breakout':
+        if plan_type == 'breakout':
             curr_px = self.get_best_book_price(symbol, c_side)
             if not curr_px: curr_px = price
             
@@ -171,54 +171,35 @@ class RealExecutionManager:
                     log.error(f"Stop Order Failed: {e}. Falling back to monitor...")
                     return None
 
-        # STANDARD LIMIT CHASE
-        current_limit_px = self.get_best_book_price(symbol, c_side)
-        if not current_limit_px: current_limit_px = price
-
-        for i in range(self.max_retries):
+        # TRUE LIMIT EXECUTION (PREDICTIVE SNIPING)
+        elif plan_type == 'limit':
             try:
                 params = {'timeInForce': 'PostOnly'}
-                price_r = self.client.price_to_precision(symbol, current_limit_px)
+                price_r = self.client.price_to_precision(symbol, price)
                 amount_r = self.client.amount_to_precision(symbol, qty)
                 
-                log.info(f"👉 Attempt {i+1}/{self.max_retries}: Post-Limit {c_side} @ {price_r}")
+                log.info(f"👉 TRUE LIMIT: Placing predictive resting order for {c_side} @ {price_r}")
                 order = self.client.create_order(symbol, 'limit', c_side, amount_r, price_r, params)
-                order_id = order['id']
-                time.sleep(self.wait_time)
-                order = self.client.fetch_order(order_id, symbol)
-                status = order.get('status', 'unknown')
-
-                if status in ['closed', 'filled']:
-                    avg_px = float(order.get('average', current_limit_px))
-                    log.info(f"✅ FILLED (Limit) @ {avg_px}")
-                    return avg_px
-                
-                if status == 'open':
-                    log.info("Order unfilled. Cancelling to chase...")
-                    try: self.client.cancel_order(order_id, symbol)
-                    except: pass
-                
-                new_book = self.get_best_book_price(symbol, c_side)
-                if new_book: current_limit_px = new_book
-
-            except ccxt.InvalidOrder:
-                log.warning(f"Invalid Order (PostOnly?). Retrying...")
-                time.sleep(1)
+                log.info(f"✅ RESTING LIMIT PLACED: ID {order['id']}")
+                return price
             except Exception as e:
-                log.error(f"Execution Error: {e}")
-                time.sleep(1)
+                log.error(f"Execution Error (True Limit): {e}")
+                return None
 
-        # FALLBACK: MARKET ORDER
-        log.warning("⚠️ Limit Chase Failed. FORCING MARKET ORDER.")
-        try:
-            amount_r = self.client.amount_to_precision(symbol, qty)
-            order = self.client.create_order(symbol, 'market', c_side, amount_r)
-            avg_px = float(order.get('average', current_limit_px))
-            log.info(f"✅ FILLED (Market) @ {avg_px}")
-            return avg_px
-        except Exception as e:
-            log.error(f"CRITICAL: Market Order Failed: {e}")
-            return None
+        # STANDARD MARKET ORDER
+        else:
+            log.info("⚡ Executing INSTANT MARKET ORDER.")
+            try:
+                amount_r = self.client.amount_to_precision(symbol, qty)
+                order = self.client.create_order(symbol, 'market', c_side, amount_r)
+
+                current_limit_px = self.get_best_book_price(symbol, c_side)
+                avg_px = float(order.get('average', current_limit_px))
+                log.info(f"✅ FILLED (Market) @ {avg_px}")
+                return avg_px
+            except Exception as e:
+                log.error(f"CRITICAL: Market Order Failed: {e}")
+                return None
 
     def place_stop_loss(self, symbol, side, qty, stop_price):
         """
@@ -436,6 +417,14 @@ def run_bot(args):
             for symbol in cfg.symbols:
                 cfg.symbol = symbol 
                 
+                # --- STALE ORDER CLEANUP ---
+                if not cfg.paper_mode:
+                    try:
+                        ex.client.cancel_all_orders(symbol)
+                        log.debug(f"🧹 Cleaned up stale open orders for {symbol}")
+                    except Exception as e:
+                        log.warning(f"⚠️ Failed to cancel open orders for {symbol}: {e}")
+
                 # Fetch incremental update and apply to cache (Protect Rate Limits)
                 new_htf = ex.fetch_ohlcv_df(symbol, cfg.htf, limit=5)
                 market_cache[symbol]["htf"] = pd.concat([market_cache[symbol]["htf"], new_htf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
