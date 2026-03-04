@@ -198,17 +198,19 @@ def main():
     log.info(f"Processing {len(ltf_iter)} bars...")
     
     len_ltf = len(ltf); len_mtf = len(mtf); len_htf = len(htf)
+    htf_ts_vals = htf['timestamp'].values
+    mtf_ts_vals = mtf['timestamp'].values
     
-    for original_idx, row in ltf_iter.iterrows():
-        ts = int(row["timestamp"])
+    for row in ltf_iter.itertuples():
+        ts = int(row.timestamp)
         
-        iH = np.searchsorted(htf['timestamp'].values, ts, side='right') - 1
-        iM = np.searchsorted(mtf['timestamp'].values, ts, side='right') - 1
-        iL = int(original_idx)
+        iH = np.searchsorted(htf_ts_vals, ts, side='right') - 1
+        iM = np.searchsorted(mtf_ts_vals, ts, side='right') - 1
+        iL = int(row.Index)
         
         if iH < 0 or iM < 0: continue
 
-        bar = {"o": row["open"], "h": row["high"], "l": row["low"], "c": row["close"]}
+        bar = {"o": row.open, "h": row.high, "l": row.low, "c": row.close}
         exits = tm.step_bar(bar["o"], bar["h"], bar["l"], bar["c"])
         
         for cl in exits:
