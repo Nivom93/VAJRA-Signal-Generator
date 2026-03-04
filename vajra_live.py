@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse, time, logging, traceback, os, requests, json, csv, sqlite3, threading, subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 import pandas as pd
 import numpy as np
 import ccxt # Explicit import for network exception handling
@@ -100,7 +101,7 @@ class RealExecutionManager:
             log.error(f"Ticker Fetch Fail: {e}")
             return None
 
-    def execute_entry(self, symbol, side, qty, price, is_paper=True, rvol=1.0):
+    def execute_entry(self, symbol, side, qty, price, is_paper=True, rvol=1.0, plan_type='limit'):
         """
         Executes an entry order.
         LEVEL 14: Quadratic Impact Simulation for Paper Mode.
@@ -109,7 +110,7 @@ class RealExecutionManager:
         
         # --- PAPER MODE ---
         if is_paper:
-            log.info(f"📝 SIMULATION: Signal @ {price:.2f}. Mode: {self.cfg.execution_style} | RVOL: {rvol:.2f}")
+            log.info(f"📝 SIMULATION: Signal @ {price:.2f}. Mode: {plan_type.upper()} | RVOL: {rvol:.2f}")
             
             curr_px = self.get_best_book_price(symbol, c_side) or price
             
@@ -127,7 +128,10 @@ class RealExecutionManager:
             if impact > 0:
                 log.warning(f"📉 Quadratic Impact! RVOL {rvol:.1f} caused {impact:.2f} ({penalty_pct*100:.3f}%) slippage.")
 
-            if self.cfg.execution_style == 'breakout':
+            if plan_type == 'market':
+                log.info(f"📝 SIMULATION: Market Order Filled Instantly @ {curr_px:.2f} (Incl. Impact)")
+                return curr_px
+            elif plan_type == 'breakout':
                 # Long: Enter if Price >= Trigger. Short: Enter if Price <= Trigger
                 triggered = (c_side == 'buy' and curr_px >= price) or (c_side == 'sell' and curr_px <= price)
                 
@@ -530,8 +534,9 @@ def run_bot(args):
                             
                             # Extract RVOL for Impact Calculation
                             rvol = plan['features'].get('rvol', 1.0)
+                            plan_type = plan.get('type', cfg.execution_style)
                             
-                            fill_price = executor.execute_entry(symbol, plan['side'], qty, plan['entry'], is_paper=cfg.paper_mode, rvol=rvol)
+                            fill_price = executor.execute_entry(symbol, plan['side'], qty, plan['entry'], is_paper=cfg.paper_mode, rvol=rvol, plan_type=plan_type)
                             
                             if fill_price:
                                 plan['entry'] = fill_price 
@@ -543,7 +548,7 @@ def run_bot(args):
                         else:
                             log.warning(f"[{symbol}] Risk Distance is 0. Skipping.")
                     else:
-                        log.info(f"[{symbol}] Skipping duplicate {unique_id}")
+                        log.debug(f"[{symbol}] Skipping duplicate {unique_id}")
                 
                 else:
                     # Near Miss Logging
@@ -552,7 +557,7 @@ def run_bot(args):
                     if ls >= 0.1 or ss >= 0.1:
                          adx = base.get('adx', 0); bbw = base.get('bb_width', 99)
                          if adx < 20 and bbw < 5.0:
-                             log.info(f"[{symbol}] ⚠️  CHOP FILTER ACTIVE (ADX={adx:.1f}, BBW={bbw:.1f}). Sleeping.")
+                             log.debug(f"[{symbol}] ⚠️  CHOP FILTER ACTIVE (ADX={adx:.1f}, BBW={bbw:.1f}). Sleeping.")
 
         except KeyboardInterrupt:
             log.info("Manual Stop triggered.")
