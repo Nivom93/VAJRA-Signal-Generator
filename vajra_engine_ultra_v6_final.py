@@ -874,6 +874,10 @@ def precompute_v6_features(ph, pm, pl, htf, mtf, ltf, btc_close_arr=None):
             squeeze_mom[i] = 0.0
     f['squeeze_momentum'] = squeeze_mom
 
+    # Volatility Expansion Filter: ATR Percentile (100-period)
+    atr14_series = pd.Series(pl.atr14)
+    f['atr_percentile_100'] = atr14_series.rolling(100, min_periods=1).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1]).fillna(0.5).to_numpy()
+
     # ---------------------------------------------------------
     # DIRECTIVE 2: ICT & MICROSTRUCTURE PROXIES
     # ---------------------------------------------------------
@@ -1114,12 +1118,13 @@ class TradeManager:
                 elif l <= tp and can_tp: hit_tp = True; exit_reason = 'tp'
 
             # TIME-IN-FORCE DECAY (Institutional Capital Velocity)
-            if not hit_sl and not hit_tp:
-                decay_limit = getattr(self.cfg, 'time_in_force_decay', 8)
-                if t['bars_open'] > decay_limit and t['pnl_r'] <= 0:
-                    hit_sl = True
-                    t['sl'] = c  # Force execution at close
-                    exit_reason = 'time_decay'
+            # DIRECTIVE 4: Disabled to allow macro structures to play out without arbitrary time limits.
+            # if not hit_sl and not hit_tp:
+            #     decay_limit = getattr(self.cfg, 'time_in_force_decay', 8)
+            #     if t['bars_open'] > decay_limit and t['pnl_r'] <= 0:
+            #         hit_sl = True
+            #         t['sl'] = c  # Force execution at close
+            #         exit_reason = 'time_decay'
 
             if hit_sl or hit_tp:
                 if hit_sl:
@@ -1276,39 +1281,48 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     if getattr(cfg, 'strat_gamma_enabled', True):
         if can_long and base.get("ob_bull_price", 0) > 0 and base.get("ob_bull_dist", 99) < 1.0:
             if base.get("engulf_bull", 0) > 0 or base.get("pin_bull", 0) > 0:
-                entry_target = base.get("ob_bull_price", px)
-                if px >= entry_target + current_atr * 0.1:
-                    candidates.append({
-                        "strat": "GAMMA_LONG", "priority": 1.5, "side": "long",
-                        "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "limit"
-                    })
+                # Imbalance Confluence Gateway: require FVG resting above or overlapping
+                fvg_p = base.get("fvg_bull", 0)
+                if fvg_p > 0 and fvg_p >= base.get("ob_bull_price", px) - current_atr * 0.5:
+                    entry_target = base.get("ob_bull_price", px)
+                    if px >= entry_target + current_atr * 0.1:
+                        candidates.append({
+                            "strat": "GAMMA_LONG", "priority": 1.5, "side": "long",
+                            "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "limit"
+                        })
         if can_short and base.get("ob_bear_price", 0) > 0 and base.get("ob_bear_dist", 99) < 1.0:
             if base.get("engulf_bear", 0) > 0 or base.get("pin_bear", 0) > 0:
-                entry_target = base.get("ob_bear_price", px)
-                if px <= entry_target - current_atr * 0.1:
-                    candidates.append({
-                        "strat": "GAMMA_SHORT", "priority": 1.5, "side": "short",
-                        "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "limit"
-                    })
+                fvg_p = base.get("fvg_bear", 0)
+                if fvg_p > 0 and fvg_p <= base.get("ob_bear_price", px) + current_atr * 0.5:
+                    entry_target = base.get("ob_bear_price", px)
+                    if px <= entry_target - current_atr * 0.1:
+                        candidates.append({
+                            "strat": "GAMMA_SHORT", "priority": 1.5, "side": "short",
+                            "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "limit"
+                        })
 
     # EPSILON (Fractal Liquidity Sweep - Limit) - Explicit Exact Entry
     if getattr(cfg, 'strat_epsilon_enabled', True):
         is_fractal_bull = (abs(px - htf_sl) < current_atr * 0.5) or (abs(px - mtf_sl) < current_atr * 0.5)
         is_fractal_bear = (abs(px - htf_sh) < current_atr * 0.5) or (abs(px - mtf_sh) < current_atr * 0.5)
         if can_long and sweep_bull > 0 and is_fractal_bull:
+            fvg_p = base.get("fvg_bull", 0)
             entry_target = base.get("last_swing_low", px)
-            if px >= entry_target + current_atr * 0.1:
-                candidates.append({
-                    "strat": "EPSILON_LONG", "priority": 2.0, "side": "long",
-                    "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.25, "type": "limit"
-                })
+            if fvg_p > 0 and fvg_p >= entry_target - current_atr * 0.5:
+                if px >= entry_target + current_atr * 0.1:
+                    candidates.append({
+                        "strat": "EPSILON_LONG", "priority": 2.0, "side": "long",
+                        "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.25, "type": "limit"
+                    })
         if can_short and sweep_bear > 0 and is_fractal_bear:
+            fvg_p = base.get("fvg_bear", 0)
             entry_target = base.get("last_swing_high", px)
-            if px <= entry_target - current_atr * 0.1:
-                candidates.append({
-                    "strat": "EPSILON_SHORT", "priority": 2.0, "side": "short",
-                    "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.25, "type": "limit"
-                })
+            if fvg_p > 0 and fvg_p <= entry_target + current_atr * 0.5:
+                if px <= entry_target - current_atr * 0.1:
+                    candidates.append({
+                        "strat": "EPSILON_SHORT", "priority": 2.0, "side": "short",
+                        "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.25, "type": "limit"
+                    })
 
     # DELTA (VWAP Trend Retest - Predictive Limit)
     if getattr(cfg, 'strat_delta_enabled', True):
@@ -1364,25 +1378,27 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         fib_zone = base.get("fib_786_long", px)
         ob_bull = base.get("ob_bull_price", 0.0)
         if ob_bull > 0 and abs(fib_zone - ob_bull) < current_atr * 0.5:
+            fvg_p = base.get("fvg_bull", 0)
             smart_entry = max(fib_zone, ob_bull)
-            smart_sl = base.get("last_swing_low", px - sl_atr) - (current_atr * 0.2)
-            if smart_entry - smart_sl > current_atr * 0.1 and px >= smart_entry + current_atr * 0.1:
-                candidates.append({
-                    "strat": "SMC_WICK_SNIPER_LONG", "priority": 3.0, "side": "long",
-                    "entry": smart_entry, "sl_override": smart_sl, "risk_mult": 1.5, "type": "limit"
-                })
+            if fvg_p > 0 and fvg_p >= smart_entry - current_atr * 0.5:
+                if px >= smart_entry + current_atr * 0.1:
+                    candidates.append({
+                        "strat": "SMC_WICK_SNIPER_LONG", "priority": 3.0, "side": "long",
+                        "entry": smart_entry, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.5, "type": "limit"
+                    })
 
     if can_short and sweep_bear > 0:
         fib_zone = base.get("fib_786_short", px)
         ob_bear = base.get("ob_bear_price", 0.0)
         if ob_bear > 0 and abs(fib_zone - ob_bear) < current_atr * 0.5:
+            fvg_p = base.get("fvg_bear", 0)
             smart_entry = min(fib_zone, ob_bear)
-            smart_sl = base.get("last_swing_high", px + sl_atr) + (current_atr * 0.2)
-            if smart_sl - smart_entry > current_atr * 0.1 and px <= smart_entry - current_atr * 0.1:
-                candidates.append({
-                    "strat": "SMC_WICK_SNIPER_SHORT", "priority": 3.0, "side": "short",
-                    "entry": smart_entry, "sl_override": smart_sl, "risk_mult": 1.5, "type": "limit"
-                })
+            if fvg_p > 0 and fvg_p <= smart_entry + current_atr * 0.5:
+                if px <= smart_entry - current_atr * 0.1:
+                    candidates.append({
+                        "strat": "SMC_WICK_SNIPER_SHORT", "priority": 3.0, "side": "short",
+                        "entry": smart_entry, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.5, "type": "limit"
+                    })
 
     # ICT_SWEEP (Asian Range Sweeps during Killzones - Limit)
     if hour in [7, 8, 9, 10, 13, 14, 15, 16]:
@@ -1447,22 +1463,14 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 score *= 0.5
                 risk_factor *= 0.5
 
-        # ELITE QUANT FILTER: Structural Stop Loss & Dynamic Risk Bounds
-        if 'sl_override' in cand:
-            sl = cand['sl_override']
+        # DIRECTIVE 3: DYNAMIC RISK COMPRESSION
+        # Mathematically force the SL to exactly 1.5 ATR to guarantee achievable 4.5 ATR (3R) Take Profits
+        if side == 'long':
+            sl = entry - (current_atr * 1.5)
         else:
-            # Default all limit strategies to a structural swing low/high
-            if side == 'long':
-                sl = base.get("last_swing_low", entry - current_atr) - (current_atr * 0.2)
-            else:
-                sl = base.get("last_swing_high", entry + current_atr) + (current_atr * 0.2)
+            sl = entry + (current_atr * 1.5)
 
         dynamic_risk = abs(entry - sl)
-
-        # If risk is too wide, a 3R target is statistically improbable intraday.
-        # If risk is too narrow, it gets stopped by noise.
-        if dynamic_risk > current_atr * 2.5 or dynamic_risk < current_atr * 0.2:
-            continue
 
         # STRICT 1:3 GEOMETRY LOCK
         tp_dist = dynamic_risk * (cfg.atr_mult_tp / cfg.atr_mult_sl)
