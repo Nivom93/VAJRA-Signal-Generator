@@ -388,6 +388,39 @@ def _bars_since_change(arr):
         out[i] = count
     return out
 
+@njit(cache=True)
+def _rolling_percentile_np(arr, window=100):
+    n = len(arr)
+    out = np.full(n, 0.5, dtype=np.float64)
+    if n == 0: return out
+    for i in range(n):
+        start_idx = max(0, i - window + 1)
+        chunk = arr[start_idx:i+1]
+        val = arr[i]
+        count_less = 0
+        for v in chunk:
+            if v <= val:
+                count_less += 1
+        out[i] = count_less / len(chunk)
+    return out
+
+@njit(cache=True)
+def _rolling_vwap_np(typical_price, volume, window=20):
+    n = len(typical_price)
+    vwap = np.zeros(n, dtype=np.float64)
+    if n == 0: return vwap
+    for i in range(n):
+        start_idx = max(0, i - window + 1)
+        chunk_tp = typical_price[start_idx:i+1]
+        chunk_v = volume[start_idx:i+1]
+        cum_vol = np.sum(chunk_v)
+        cum_pv = np.sum(chunk_tp * chunk_v)
+        if cum_vol > 1e-12:
+            vwap[i] = cum_pv / cum_vol
+        else:
+            vwap[i] = typical_price[i]
+    return vwap
+
 # ==============================================================================
 # 5. CONFIG & CLASSES
 # ==============================================================================
@@ -625,6 +658,9 @@ class Precomp:
         days = pd.to_datetime(df.timestamp, unit='ms', utc=True).dt.dayofyear.values
         self.asian_high, self.asian_low = _asian_range_np(self.h, self.l, hours, days)
 
+        self.atr_percentile_100 = _rolling_percentile_np(self.atr14, 100)
+        self.rolling_vwap_20 = _rolling_vwap_np(typical_price, self.v, 20)
+
 def _trend_flags(e50, e200): return (1.0, 0.0) if e50>e200 else ((0.0, 1.0) if e50<e200 else (0.0, 0.0))
 def _ensure_precomp(df, pre): return pre if isinstance(pre, Precomp) else Precomp(df)
 
@@ -763,6 +799,33 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     f["trend_align_up_3tf"] = f.get("htf_up",0) + f.get("mtf_up",0) + ema20_gt
     f["trend_align_down_3tf"] = f.get("htf_down",0) + f.get("mtf_down",0) + (1.0 - ema20_gt)
 
+    # ---------------------------------------------------------
+    # DIRECTIVE 1: THE REGIME DETECTION MATRIX
+    # ---------------------------------------------------------
+    adx_val = f["adx"]
+    atr_p = pl.atr_percentile_100[idx_L] * 100.0
+    htf_trend = "UP" if f["htf_up"] > 0 else ("DOWN" if f["htf_down"] > 0 else "NEUTRAL")
+
+    is_bb_outside = (px > f["bb_upper"]) or (px < f["bb_lower"])
+    has_cvd_div = (f["cvd_div_bull"] > 0) or (f["cvd_div_bear"] > 0)
+
+    market_regime = "CONSOLIDATION"
+
+    if is_bb_outside and has_cvd_div:
+        market_regime = "REVERSAL_WARNING"
+    elif htf_trend == "UP" and f["price"] < pl.rolling_vwap_20[idx_L]:
+        market_regime = "RETRACEMENT"
+    elif htf_trend == "DOWN" and f["price"] > pl.rolling_vwap_20[idx_L]:
+        market_regime = "RETRACEMENT"
+    elif adx_val >= 25 and atr_p >= 50:
+        market_regime = "EXPANSION"
+    elif adx_val < 20 and atr_p < 40:
+        market_regime = "CONSOLIDATION"
+    else:
+        market_regime = "CONSOLIDATION" # Default
+
+    f["market_regime"] = market_regime
+
     return f
 
 def precompute_v6_features(ph, pm, pl, htf, mtf, ltf, btc_close_arr=None):
@@ -875,8 +938,7 @@ def precompute_v6_features(ph, pm, pl, htf, mtf, ltf, btc_close_arr=None):
     f['squeeze_momentum'] = squeeze_mom
 
     # Volatility Expansion Filter: ATR Percentile (100-period)
-    atr14_series = pd.Series(pl.atr14)
-    f['atr_percentile_100'] = atr14_series.rolling(100, min_periods=1).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1]).fillna(0.5).to_numpy()
+    f['atr_percentile_100'] = pl.atr_percentile_100 * 100.0
 
     # ---------------------------------------------------------
     # DIRECTIVE 2: ICT & MICROSTRUCTURE PROXIES
@@ -906,13 +968,7 @@ def precompute_v6_features(ph, pm, pl, htf, mtf, ltf, btc_close_arr=None):
     # ---------------------------------------------------------
     # DIRECTIVE 3: VWAP & MEAN REVERSION EXTREMES
     # ---------------------------------------------------------
-    typical_price = (pl.h + pl.l + cl) / 3.0
-    # Create a unified rolling VWAP across 20 bars instead of anchored VWAP to get distance
-    cum_vol_20 = pd.Series(pl.v).rolling(20, min_periods=1).sum().to_numpy()
-    cum_pv_20 = pd.Series(typical_price * pl.v).rolling(20, min_periods=1).sum().to_numpy()
-    rolling_vwap = np.where(cum_vol_20 > 1e-12, cum_pv_20 / cum_vol_20, typical_price)
-
-    f['vwap_z_score'] = (cl - rolling_vwap) / atr_safe
+    f['vwap_z_score'] = (cl - pl.rolling_vwap_20) / atr_safe
 
     # ---------------------------------------------------------
     # DIRECTIVE 4: STRIP COLLINEAR NOISE
@@ -1274,147 +1330,84 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     candidates = []
 
     # ==========================================================
-    # STRATEGY ARSENAL (Restored and Un-truncated)
+    # REGIME-LOCKED STRATEGY ALLOCATION (DIRECTIVE 2)
     # ==========================================================
+    market_regime = base.get("market_regime", "CONSOLIDATION")
 
-    # GAMMA (Order Block Snipe - Limit) - Explicit Exact Entry
-    if getattr(cfg, 'strat_gamma_enabled', True):
-        if can_long and base.get("ob_bull_price", 0) > 0 and base.get("ob_bull_dist", 99) < 1.0:
-            if base.get("engulf_bull", 0) > 0 or base.get("pin_bull", 0) > 0:
-                # Imbalance Confluence Gateway: require FVG resting above or overlapping
-                fvg_p = base.get("fvg_bull", 0)
-                if fvg_p > 0 and fvg_p >= base.get("ob_bull_price", px) - current_atr * 0.5:
-                    entry_target = base.get("ob_bull_price", px)
-                    if px >= entry_target + current_atr * 0.1:
-                        candidates.append({
-                            "strat": "GAMMA_LONG", "priority": 1.5, "side": "long",
-                            "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "limit"
-                        })
-        if can_short and base.get("ob_bear_price", 0) > 0 and base.get("ob_bear_dist", 99) < 1.0:
-            if base.get("engulf_bear", 0) > 0 or base.get("pin_bear", 0) > 0:
-                fvg_p = base.get("fvg_bear", 0)
-                if fvg_p > 0 and fvg_p <= base.get("ob_bear_price", px) + current_atr * 0.5:
-                    entry_target = base.get("ob_bear_price", px)
-                    if px <= entry_target - current_atr * 0.1:
-                        candidates.append({
-                            "strat": "GAMMA_SHORT", "priority": 1.5, "side": "short",
-                            "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "limit"
-                        })
-
-    # EPSILON (Fractal Liquidity Sweep - Limit) - Explicit Exact Entry
-    if getattr(cfg, 'strat_epsilon_enabled', True):
-        is_fractal_bull = (abs(px - htf_sl) < current_atr * 0.5) or (abs(px - mtf_sl) < current_atr * 0.5)
-        is_fractal_bear = (abs(px - htf_sh) < current_atr * 0.5) or (abs(px - mtf_sh) < current_atr * 0.5)
-        if can_long and sweep_bull > 0 and is_fractal_bull:
-            fvg_p = base.get("fvg_bull", 0)
-            entry_target = base.get("last_swing_low", px)
-            if fvg_p > 0 and fvg_p >= entry_target - current_atr * 0.5:
-                if px >= entry_target + current_atr * 0.1:
-                    candidates.append({
-                        "strat": "EPSILON_LONG", "priority": 2.0, "side": "long",
-                        "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.25, "type": "limit"
-                    })
-        if can_short and sweep_bear > 0 and is_fractal_bear:
-            fvg_p = base.get("fvg_bear", 0)
+    if market_regime == "EXPANSION":
+        # Unlock SIGMA_CONTINUATION
+        if can_long and base.get("bos_up", 0) > 0:
             entry_target = base.get("last_swing_high", px)
-            if fvg_p > 0 and fvg_p <= entry_target + current_atr * 0.5:
-                if px <= entry_target - current_atr * 0.1:
-                    candidates.append({
-                        "strat": "EPSILON_SHORT", "priority": 2.0, "side": "short",
-                        "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.25, "type": "limit"
-                    })
-
-    # DELTA (VWAP Trend Retest - Predictive Limit)
-    if getattr(cfg, 'strat_delta_enabled', True):
-        avwap_bull = base.get("avwap_bull", 0.0)
-        avwap_bear = base.get("avwap_bear", 0.0)
-        if can_long and base.get("fvg_bull", 0) > 0:
-            entry_target = avwap_bull
             if px >= entry_target + current_atr * 0.1:
                 candidates.append({
-                    "strat": "DELTA_LONG", "priority": 1.1, "side": "long",
-                    "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "limit"
+                    "strat": "SIGMA_CONTINUATION_LONG", "priority": 2.0, "side": "long",
+                    "entry": entry_target, "sl_dist_atr": 1.5, "risk_mult": 1.0, "type": "limit"
                 })
-        if can_short and base.get("fvg_bear", 0) > 0:
-            entry_target = avwap_bear
+        if can_short and base.get("bos_down", 0) > 0:
+            entry_target = base.get("last_swing_low", px)
             if px <= entry_target - current_atr * 0.1:
                 candidates.append({
-                    "strat": "DELTA_SHORT", "priority": 1.1, "side": "short",
-                    "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "limit"
+                    "strat": "SIGMA_CONTINUATION_SHORT", "priority": 2.0, "side": "short",
+                    "entry": entry_target, "sl_dist_atr": 1.5, "risk_mult": 1.0, "type": "limit"
                 })
 
-    # ALPHA (Momentum Breakout - Market) - Explicit Exact Entry
-    if getattr(cfg, 'strat_alpha_enabled', True):
-        if can_long and base.get("squeeze_fired", 0) > 0 and cvd_roc > 0 and base.get("bos_up", 0) > 0:
-            candidates.append({
-                "strat": "ALPHA_LONG", "priority": 1.25, "side": "long",
-                "entry": px, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "market"
-            })
-        if can_short and base.get("squeeze_fired", 0) > 0 and cvd_roc < 0 and base.get("bos_down", 0) > 0:
-            candidates.append({
-                "strat": "ALPHA_SHORT", "priority": 1.25, "side": "short",
-                "entry": px, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "market"
-            })
+    elif market_regime == "RETRACEMENT":
+        # Unlock GAMMA_PULLBACK
+        if can_long:
+            ob_bull = base.get("ob_bull_price", 0.0)
+            fvg_p = base.get("fvg_bull", 0)
+            fib_zone = base.get("fib_786_long", px)
+            # FVG must directly align with OB (or be just above it)
+            if ob_bull > 0 and fvg_p > 0 and fvg_p >= ob_bull - current_atr * 0.5:
+                # Require price to be in OTE zone (using 0.786 as proxy for zone)
+                if px >= ob_bull + current_atr * 0.1 and abs(ob_bull - fib_zone) < current_atr * 1.0:
+                    candidates.append({
+                        "strat": "GAMMA_PULLBACK_LONG", "priority": 2.5, "side": "long",
+                        "entry": ob_bull, "sl_dist_atr": 1.5, "risk_mult": 1.25, "type": "limit"
+                    })
+        if can_short:
+            ob_bear = base.get("ob_bear_price", 0.0)
+            fvg_p = base.get("fvg_bear", 0)
+            fib_zone = base.get("fib_786_short", px)
+            if ob_bear > 0 and fvg_p > 0 and fvg_p <= ob_bear + current_atr * 0.5:
+                if px <= ob_bear - current_atr * 0.1 and abs(ob_bear - fib_zone) < current_atr * 1.0:
+                    candidates.append({
+                        "strat": "GAMMA_PULLBACK_SHORT", "priority": 2.5, "side": "short",
+                        "entry": ob_bear, "sl_dist_atr": 1.5, "risk_mult": 1.25, "type": "limit"
+                    })
 
-    # OMEGA (AVWAP Mean Reversion - Limit) - Explicit Exact Entry
-    if getattr(cfg, 'strat_omega_enabled', True) and getattr(cfg, 'allow_mean_reversion', True):
-        if can_long and (w_pattern > 0 or sweep_bull > 0) and rsi < 40:
+    elif market_regime == "CONSOLIDATION":
+        # Unlock OMEGA_RANGE
+        if can_long:
             entry_target = base.get("bb_lower", px)
             if px >= entry_target + current_atr * 0.1:
                 candidates.append({
-                    "strat": "OMEGA_LONG", "priority": 1.0 * reversion_penalty, "side": "long",
-                    "entry": entry_target, "sl_offset": sl_atr, "tp_target": base.get("avwap_bear", px + tp_atr_dist), "risk_mult": 1.0, "type": "limit"
+                    "strat": "OMEGA_RANGE_LONG", "priority": 1.0, "side": "long",
+                    "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.0, "type": "limit"
                 })
-        if can_short and (m_pattern > 0 or sweep_bear > 0) and rsi > 60:
+        if can_short:
             entry_target = base.get("bb_upper", px)
             if px <= entry_target - current_atr * 0.1:
                 candidates.append({
-                    "strat": "OMEGA_SHORT", "priority": 1.0 * reversion_penalty, "side": "short",
-                    "entry": entry_target, "sl_offset": sl_atr, "tp_target": base.get("avwap_bull", px - tp_atr_dist), "risk_mult": 1.0, "type": "limit"
+                    "strat": "OMEGA_RANGE_SHORT", "priority": 1.0, "side": "short",
+                    "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.0, "type": "limit"
                 })
 
-    # SMC_WICK_SNIPER (Fibonacci + OB Confluence - Limit)
-    if can_long and sweep_bull > 0:
-        fib_zone = base.get("fib_786_long", px)
-        ob_bull = base.get("ob_bull_price", 0.0)
-        if ob_bull > 0 and abs(fib_zone - ob_bull) < current_atr * 0.5:
-            fvg_p = base.get("fvg_bull", 0)
-            smart_entry = max(fib_zone, ob_bull)
-            if fvg_p > 0 and fvg_p >= smart_entry - current_atr * 0.5:
-                if px >= smart_entry + current_atr * 0.1:
-                    candidates.append({
-                        "strat": "SMC_WICK_SNIPER_LONG", "priority": 3.0, "side": "long",
-                        "entry": smart_entry, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.5, "type": "limit"
-                    })
-
-    if can_short and sweep_bear > 0:
-        fib_zone = base.get("fib_786_short", px)
-        ob_bear = base.get("ob_bear_price", 0.0)
-        if ob_bear > 0 and abs(fib_zone - ob_bear) < current_atr * 0.5:
-            fvg_p = base.get("fvg_bear", 0)
-            smart_entry = min(fib_zone, ob_bear)
-            if fvg_p > 0 and fvg_p <= smart_entry + current_atr * 0.5:
-                if px <= smart_entry - current_atr * 0.1:
-                    candidates.append({
-                        "strat": "SMC_WICK_SNIPER_SHORT", "priority": 3.0, "side": "short",
-                        "entry": smart_entry, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.5, "type": "limit"
-                    })
-
-    # ICT_SWEEP (Asian Range Sweeps during Killzones - Limit)
-    if hour in [7, 8, 9, 10, 13, 14, 15, 16]:
-        if base.get("asian_range_swept_up", 0) > 0 and base.get("pin_bear", 0) > 0:
-            entry_target = base.get("asian_high", px)
-            if px <= entry_target - current_atr * 0.1:
-                candidates.append({
-                    "strat": "ICT_SWEEP_SHORT", "priority": 2.5, "side": "short",
-                    "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.5, "type": "limit"
-                })
-        if base.get("asian_range_swept_dn", 0) > 0 and base.get("pin_bull", 0) > 0:
-            entry_target = base.get("asian_low", px)
+    elif market_regime == "REVERSAL_WARNING":
+        # Unlock ZETA_LIQUIDITY_SWEEP
+        if can_long:
+            entry_target = base.get("last_swing_low", px) - current_atr * 0.25
             if px >= entry_target + current_atr * 0.1:
                 candidates.append({
-                    "strat": "ICT_SWEEP_LONG", "priority": 2.5, "side": "long",
-                    "entry": entry_target, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.5, "type": "limit"
+                    "strat": "ZETA_LIQUIDITY_SWEEP_LONG", "priority": 3.0, "side": "long",
+                    "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.5, "type": "limit"
+                })
+        if can_short:
+            entry_target = base.get("last_swing_high", px) + current_atr * 0.25
+            if px <= entry_target - current_atr * 0.1:
+                candidates.append({
+                    "strat": "ZETA_LIQUIDITY_SWEEP_SHORT", "priority": 3.0, "side": "short",
+                    "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.5, "type": "limit"
                 })
 
     # EVALUATE ALL CANDIDATES
@@ -1463,21 +1456,22 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 score *= 0.5
                 risk_factor *= 0.5
 
-        # DIRECTIVE 3: DYNAMIC RISK COMPRESSION
-        # Mathematically force the SL to exactly 1.5 ATR to guarantee achievable 4.5 ATR (3R) Take Profits
+        # DIRECTIVE 3: STRICT 1:3 GEOMETRIC ENFORCEMENT & RISK COMPRESSION
+        # Mathematically force the SL to exactly the candidate's sl_dist_atr to guarantee achievable Take Profits
+        sl_dist_atr = cand.get('sl_dist_atr', 1.5)
+
         if side == 'long':
-            sl = entry - (current_atr * 1.5)
+            sl = entry - (current_atr * sl_dist_atr)
         else:
-            sl = entry + (current_atr * 1.5)
+            sl = entry + (current_atr * sl_dist_atr)
 
         dynamic_risk = abs(entry - sl)
 
-        # STRICT 1:3 GEOMETRY LOCK
-        tp_dist = dynamic_risk * (cfg.atr_mult_tp / cfg.atr_mult_sl)
+        # Strictly lock TP to mathematically exactly 3x the calculated risk distance.
+        tp_dist = dynamic_risk * 3.0
 
         if side == 'long':
             tp = entry + tp_dist
-            # Sanity check: SL must be below entry
             if sl >= entry: continue
         else:
             tp = entry - tp_dist
