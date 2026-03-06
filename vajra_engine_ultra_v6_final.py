@@ -965,6 +965,11 @@ def precompute_v6_features(ph, pm, pl, htf, mtf, ltf, btc_close_arr=None):
     f['is_ny_killzone'] = np.where((hours >= 13) & (hours <= 16), 1.0, 0.0)
     f['is_asian_range'] = np.where((hours >= 0) & (hours <= 6), 1.0, 0.0)
 
+    # Wyckoff Volume Absorption (Directive 3)
+    candle_spread = pl.h - pl.l
+    body_size = np.abs(cl - pl.o)
+    f['vol_absorption'] = np.where((pl.rvol > 1.5) & ((body_size / (candle_spread + 1e-9)) < 0.3), 1.0, 0.0)
+
     # ---------------------------------------------------------
     # DIRECTIVE 3: VWAP & MEAN REVERSION EXTREMES
     # ---------------------------------------------------------
@@ -1334,7 +1339,12 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     # ==========================================================
     market_regime = base.get("market_regime", "CONSOLIDATION")
 
-    if market_regime == "EXPANSION":
+    # Algorithmic Temporal Gating (Killzones)
+    killzone_active = False
+    if (0 <= hour <= 3) or (7 <= hour <= 10) or (13 <= hour <= 16):
+        killzone_active = True
+
+    if market_regime == "EXPANSION" and killzone_active:
         # Unlock SIGMA_CONTINUATION
         if can_long and base.get("bos_up", 0) > 0:
             entry_target = base.get("last_swing_high", px)
@@ -1357,24 +1367,28 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
             ob_bull = base.get("ob_bull_price", 0.0)
             fvg_p = base.get("fvg_bull", 0)
             fib_zone = base.get("fib_786_long", px)
-            # FVG must directly align with OB (or be just above it)
-            if ob_bull > 0 and fvg_p > 0 and fvg_p >= ob_bull - current_atr * 0.5:
-                # Require price to be in OTE zone (using 0.786 as proxy for zone)
-                if px >= ob_bull + current_atr * 0.1 and abs(ob_bull - fib_zone) < current_atr * 1.0:
-                    candidates.append({
-                        "strat": "GAMMA_PULLBACK_LONG", "priority": 2.5, "side": "long",
-                        "entry": ob_bull, "sl_dist_atr": 1.5, "risk_mult": 1.25, "type": "limit"
-                    })
+            # Fractal Alignment: 1H OB must be within 1.0 ATR of 4H Swing Low
+            if ob_bull > 0 and abs(ob_bull - mtf_sl) <= current_atr * 1.0:
+                # FVG must directly align with OB (or be just above it)
+                if fvg_p > 0 and fvg_p >= ob_bull - current_atr * 0.5:
+                    # Require price to be in OTE zone (using 0.786 as proxy for zone)
+                    if px >= ob_bull + current_atr * 0.1 and abs(ob_bull - fib_zone) < current_atr * 1.0:
+                        candidates.append({
+                            "strat": "GAMMA_PULLBACK_LONG", "priority": 2.5, "side": "long",
+                            "entry": ob_bull, "sl_dist_atr": 1.5, "risk_mult": 1.25, "type": "limit"
+                        })
         if can_short:
             ob_bear = base.get("ob_bear_price", 0.0)
             fvg_p = base.get("fvg_bear", 0)
             fib_zone = base.get("fib_786_short", px)
-            if ob_bear > 0 and fvg_p > 0 and fvg_p <= ob_bear + current_atr * 0.5:
-                if px <= ob_bear - current_atr * 0.1 and abs(ob_bear - fib_zone) < current_atr * 1.0:
-                    candidates.append({
-                        "strat": "GAMMA_PULLBACK_SHORT", "priority": 2.5, "side": "short",
-                        "entry": ob_bear, "sl_dist_atr": 1.5, "risk_mult": 1.25, "type": "limit"
-                    })
+            # Fractal Alignment: 1H OB must be within 1.0 ATR of 4H Swing High
+            if ob_bear > 0 and abs(ob_bear - mtf_sh) <= current_atr * 1.0:
+                if fvg_p > 0 and fvg_p <= ob_bear + current_atr * 0.5:
+                    if px <= ob_bear - current_atr * 0.1 and abs(ob_bear - fib_zone) < current_atr * 1.0:
+                        candidates.append({
+                            "strat": "GAMMA_PULLBACK_SHORT", "priority": 2.5, "side": "short",
+                            "entry": ob_bear, "sl_dist_atr": 1.5, "risk_mult": 1.25, "type": "limit"
+                        })
 
     elif market_regime == "CONSOLIDATION":
         # Unlock OMEGA_RANGE
@@ -1393,17 +1407,19 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                     "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.0, "type": "limit"
                 })
 
-    elif market_regime == "REVERSAL_WARNING":
+    elif market_regime == "REVERSAL_WARNING" and killzone_active:
         # Unlock ZETA_LIQUIDITY_SWEEP
         if can_long:
-            entry_target = base.get("last_swing_low", px) - current_atr * 0.25
+            # Deep Liquidity Penetration (ZETA Upgrade)
+            entry_target = base.get("last_swing_low", px) - (current_atr * 0.75)
             if px >= entry_target + current_atr * 0.1:
                 candidates.append({
                     "strat": "ZETA_LIQUIDITY_SWEEP_LONG", "priority": 3.0, "side": "long",
                     "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.5, "type": "limit"
                 })
         if can_short:
-            entry_target = base.get("last_swing_high", px) + current_atr * 0.25
+            # Deep Liquidity Penetration (ZETA Upgrade)
+            entry_target = base.get("last_swing_high", px) + (current_atr * 0.75)
             if px <= entry_target - current_atr * 0.1:
                 candidates.append({
                     "strat": "ZETA_LIQUIDITY_SWEEP_SHORT", "priority": 3.0, "side": "short",
