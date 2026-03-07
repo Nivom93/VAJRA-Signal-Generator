@@ -690,6 +690,7 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     f={}
     f["htf_up"], f["htf_down"] = _trend_flags(ph.ema50[idx_H], ph.ema200[idx_H])
     f["mtf_up"], f["mtf_down"] = _trend_flags(pm.ema50[idx_M], pm.ema200[idx_M])
+    f["htf_ema50"] = float(ph.ema50[idx_H])
     
     px = pl.c[idx_L]; f["price"]=float(px); 
     
@@ -738,6 +739,8 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     f["rvol"] = float(pl.rvol[idx_L]) 
     f["bb_upper"] = float(pl.bb_upper[idx_L])
     f["bb_lower"] = float(pl.bb_lower[idx_L])
+    f["kc_upper"] = float(pl.kc_upper[idx_L])
+    f["kc_lower"] = float(pl.kc_lower[idx_L])
 
     f["dist_bb_upper_pct"] = (px - f["bb_upper"]) / px_safe * 100
     f["dist_bb_lower_pct"] = (px - f["bb_lower"]) / px_safe * 100
@@ -1379,16 +1382,22 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     # Removed the hard killzone_active constraint. The XGBoost model sees hour_of_day
     # and will natively learn to penalize low-probability off-hours without manual blinding.
 
+    # UPGRADE 4: Macro Momentum Alignment (The 50 EMA Gate)
+    # We will instantly veto pullbacks if they oppose the macro 4H EMA50 trend.
+    htf_ema50 = base.get("htf_ema50", px)
+    macro_long_ok = px > htf_ema50
+    macro_short_ok = px < htf_ema50
+
     if market_regime == "EXPANSION":
         # Unlock SIGMA_CONTINUATION
-        if can_long and base.get("bos_up", 0) > 0:
+        if can_long and macro_long_ok and base.get("bos_up", 0) > 0:
             entry_target = base.get("last_swing_high", px)
             if px >= entry_target + current_atr * 0.1:
                 candidates.append({
                     "strat": "SIGMA_CONTINUATION_LONG", "priority": 2.0, "side": "long",
                     "entry": entry_target, "sl_dist_atr": 1.5, "risk_mult": 1.0, "type": "limit"
                 })
-        if can_short and base.get("bos_down", 0) > 0:
+        if can_short and macro_short_ok and base.get("bos_down", 0) > 0:
             entry_target = base.get("last_swing_low", px)
             if px <= entry_target - current_atr * 0.1:
                 candidates.append({
@@ -1398,27 +1407,25 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
 
     elif market_regime == "RETRACEMENT":
         # Unlock GAMMA_PULLBACK
-        if can_long:
+        # UPGRADE 2: Structural Validation Requirement (BOS/ChoCh Gate)
+        # OB must be accompanied by a structural break
+        if can_long and macro_long_ok and (base.get("bos_up", 0) > 0 or base.get("choch_up", 0) > 0):
             ob_bull = base.get("ob_bull_price", 0.0)
             fvg_p = base.get("fvg_bull", 0)
             fib_zone = base.get("fib_786_long", px)
             bars_since = base.get("bars_since_ob_bull", 0)
-            # Smart Trade Invalidation: reject if structure is older than 20 bars (stale)
             if ob_bull > 0 and bars_since <= 20 and abs(ob_bull - mtf_sl) <= current_atr * 1.0:
-                # FVG must directly align with OB (or be just above it)
                 if fvg_p > 0 and fvg_p >= ob_bull - current_atr * 0.5:
-                    # Require price to be in OTE zone (using 0.786 as proxy for zone)
                     if px >= ob_bull + current_atr * 0.1 and abs(ob_bull - fib_zone) < current_atr * 1.0:
                         candidates.append({
                             "strat": "GAMMA_PULLBACK_LONG", "priority": 2.5, "side": "long",
                             "entry": ob_bull, "sl_dist_atr": 1.5, "risk_mult": 1.25, "type": "limit"
                         })
-        if can_short:
+        if can_short and macro_short_ok and (base.get("bos_down", 0) > 0 or base.get("choch_down", 0) > 0):
             ob_bear = base.get("ob_bear_price", 0.0)
             fvg_p = base.get("fvg_bear", 0)
             fib_zone = base.get("fib_786_short", px)
             bars_since = base.get("bars_since_ob_bear", 0)
-            # Smart Trade Invalidation: reject if structure is older than 20 bars (stale)
             if ob_bear > 0 and bars_since <= 20 and abs(ob_bear - mtf_sh) <= current_atr * 1.0:
                 if fvg_p > 0 and fvg_p <= ob_bear + current_atr * 0.5:
                     if px <= ob_bear - current_atr * 0.1 and abs(ob_bear - fib_zone) < current_atr * 1.0:
@@ -1445,17 +1452,22 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 })
 
     elif market_regime == "REVERSAL_WARNING":
+        # UPGRADE 3: The "Exhaustion Sweep" Confluence
+        # Only take sweeps if we are strictly piercing outside Keltner Channels
+        kc_upper = base.get("kc_upper", px)
+        kc_lower = base.get("kc_lower", px)
+        has_cvd_div_bull = base.get("cvd_div_bull", 0) > 0
+        has_cvd_div_bear = base.get("cvd_div_bear", 0) > 0
+
         # Unlock ZETA_LIQUIDITY_SWEEP
-        if can_long:
-            # Deep Liquidity Penetration (ZETA Upgrade)
+        if can_long and has_cvd_div_bull and px < kc_lower:
             entry_target = base.get("last_swing_low", px) - (current_atr * 0.75)
             if px >= entry_target + current_atr * 0.1:
                 candidates.append({
                     "strat": "ZETA_LIQUIDITY_SWEEP_LONG", "priority": 3.0, "side": "long",
                     "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.5, "type": "limit"
                 })
-        if can_short:
-            # Deep Liquidity Penetration (ZETA Upgrade)
+        if can_short and has_cvd_div_bear and px > kc_upper:
             entry_target = base.get("last_swing_high", px) + (current_atr * 0.75)
             if px <= entry_target - current_atr * 0.1:
                 candidates.append({
@@ -1473,21 +1485,9 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         
         entry = cand['entry']
 
-        # STAGE 2: THE "RUBBER BAND" ENTRY MODEL
-        # We front-run structural levels if MTF ADX is screaming, and fade deeper into wicks if the trend is weak.
-        if order_type == 'limit':
-            mtf_adx = adv.get('trend_strength_mtf_aligned', [0.0])[iL] if 'trend_strength_mtf_aligned' in adv else 0.0
-            # Wait, trend_strength_mtf_aligned is EMA distance. Let's use local adx for momentum.
-            local_adx = base.get("adx", 25.0)
-
-            if local_adx > 35:
-                # Strong trend, front-run the entry to ensure fill
-                offset = current_atr * 0.25
-                entry = entry + offset if side == 'long' else entry - offset
-            elif local_adx < 25:
-                # Weak trend, fade deep into the wick
-                offset = current_atr * 0.50
-                entry = entry - offset if side == 'long' else entry + offset
+        # UPGRADE 1: Abolish Artificial Offsets
+        # Limit orders must sit exactly on the pure structural level to guarantee institutional support.
+        # (Rubber Band offset logic completely removed).
 
         # DEFAULT BASELINE VARIABLES (If no brain is present)
         prob = 1.0
