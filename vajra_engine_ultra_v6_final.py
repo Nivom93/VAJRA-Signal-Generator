@@ -1600,7 +1600,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                     "entry": entry,
                     "sl": sl,
                     "tp": tp,
-                    "rr": rr,
+                    "rr": implied_rr,
                     "prob": prob,
                     "key": f"{cand['strat']}_{side}",
                     "features": base,
