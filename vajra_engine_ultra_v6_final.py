@@ -576,8 +576,11 @@ def _fvg_flags(h, l):
 @njit(cache=True)
 def _find_ob_zones_strict(o, c, h, l, bos_up, bos_dn):
     n = len(c); obt = np.zeros(n); obb = np.zeros(n)
+    bars_since_ob_bull = np.zeros(n); bars_since_ob_bear = np.zeros(n)
     lbu_top = 0.0; lbu_bot = 0.0
     lbe_bot = 0.0; lbe_top = 0.0
+    bull_age = 0; bear_age = 0
+
     for i in range(2, n - 1):
         if bos_up[i] == 1 and bos_up[i-1] == 0:
             for j in range(i-1, max(0, i-10), -1):
@@ -587,6 +590,7 @@ def _find_ob_zones_strict(o, c, h, l, bos_up, bos_dn):
                         if c[j+1] > o[j+1] and next_body > 1.5 * body_ob:
                             lbu_top = float(h[j])
                             lbu_bot = float(l[j])
+                            bull_age = 0
                     break
         if bos_dn[i] == 1 and bos_dn[i-1] == 0:
             for j in range(i-1, max(0, i-10), -1):
@@ -596,16 +600,23 @@ def _find_ob_zones_strict(o, c, h, l, bos_up, bos_dn):
                         if c[j+1] < o[j+1] and next_body > 1.5 * body_ob:
                             lbe_bot = float(l[j])
                             lbe_top = float(h[j])
+                            bear_age = 0
                     break
+
+        if lbu_top > 0: bull_age += 1
+        if lbe_bot > 0: bear_age += 1
 
         # Mitigation / Invalidation logic to prevent stale limit orders
         if lbu_top > 0 and c[i] < lbu_bot:
-            lbu_top = 0.0; lbu_bot = 0.0
+            lbu_top = 0.0; lbu_bot = 0.0; bull_age = 0
         if lbe_bot > 0 and c[i] > lbe_top:
-            lbe_bot = 0.0; lbe_top = 0.0
+            lbe_bot = 0.0; lbe_top = 0.0; bear_age = 0
 
         obt[i] = lbu_top; obb[i] = lbe_bot
-    return obt, obb
+        bars_since_ob_bull[i] = bull_age
+        bars_since_ob_bear[i] = bear_age
+
+    return obt, obb, bars_since_ob_bull, bars_since_ob_bear
 
 class Precomp:
     def __init__(self, df):
@@ -620,7 +631,7 @@ class Precomp:
         self.bos_up, self.bos_down, self.sweep_up, self.sweep_dn = _bos_flags(self.c, self.h, self.l, self.last_sh, self.last_sl)
         self.engulf_bull, self.engulf_bear, self.pin_bull, self.pin_bear, self.inside_bar = _inside_engulf_pin(self.o, self.h, self.l, self.c)
         self.fvg_up, self.fvg_dn = _fvg_flags(self.h, self.l)
-        self.ob_bull, self.ob_bear = _find_ob_zones_strict(self.o, self.c, self.h, self.l, self.bos_up, self.bos_down)
+        self.ob_bull, self.ob_bear, self.bars_since_ob_bull, self.bars_since_ob_bear = _find_ob_zones_strict(self.o, self.c, self.h, self.l, self.bos_up, self.bos_down)
         
         self.ema50 = _ema_np(self.c, 50); self.ema200 = _ema_np(self.c, 200)
         self.atr14 = _atr_np(self.h, self.l, self.c, 14); self.rsi14 = _rsi14_np(self.c)
@@ -653,13 +664,14 @@ class Precomp:
         self.poc, self.vah, self.val = _volume_profile_np(self.c, self.v, 100, 20)
         self.cvd_div_bull, self.cvd_div_bear = _cvd_divergence_np(self.c, self.cvd, self.last_sl, self.last_sh)
         self.cvd_roc = _roc(self.cvd, 5)
+        self.cvd_acceleration = _roc(self.cvd_roc, 5)
 
         hours = pd.to_datetime(df.timestamp, unit='ms', utc=True).dt.hour.values
         days = pd.to_datetime(df.timestamp, unit='ms', utc=True).dt.dayofyear.values
         self.asian_high, self.asian_low = _asian_range_np(self.h, self.l, hours, days)
 
         self.atr_percentile_100 = _rolling_percentile_np(self.atr14, 100)
-        self.rolling_vwap_20 = _rolling_vwap_np(typical_price, self.v, 20)
+        self.rolling_vwap_20 = _rolling_vwap_np((self.h + self.l + self.c) / 3.0, self.v, 20)
 
 def _trend_flags(e50, e200): return (1.0, 0.0) if e50>e200 else ((0.0, 1.0) if e50<e200 else (0.0, 0.0))
 def _ensure_precomp(df, pre): return pre if isinstance(pre, Precomp) else Precomp(df)
@@ -710,6 +722,8 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     f["choch_down"]=float(1.0 if pl.bos_down[idx_L] and idx_L>=5 and pl.bos_up[idx_L-5] else 0.0)
     f["ob_bull_dist"] = (px - pl.ob_bull[idx_L])/px*100 if pl.ob_bull[idx_L]>0 else 0.0
     f["ob_bear_dist"] = (pl.ob_bear[idx_L] - px)/px*100 if pl.ob_bear[idx_L]>0 else 0.0
+    f["bars_since_ob_bull"] = float(pl.bars_since_ob_bull[idx_L])
+    f["bars_since_ob_bear"] = float(pl.bars_since_ob_bear[idx_L])
     f["vol_spike"] = float(pl.vol_spike[idx_L])
     f["kalman_vel"] = float(pl.kalman_vel[idx_L]); f["hurst"] = float(pl.hurst[idx_L])
     
@@ -749,6 +763,7 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     f["cvd_div_bull"] = float(pl.cvd_div_bull[idx_L])
     f["cvd_div_bear"] = float(pl.cvd_div_bear[idx_L])
     f["cvd_roc"] = float(pl.cvd_roc[idx_L])
+    f["cvd_acceleration"] = float(pl.cvd_acceleration[idx_L])
 
     f["asian_high"] = float(pl.asian_high[idx_L])
     f["asian_low"] = float(pl.asian_low[idx_L])
@@ -969,6 +984,12 @@ def precompute_v6_features(ph, pm, pl, htf, mtf, ltf, btc_close_arr=None):
     candle_spread = pl.h - pl.l
     body_size = np.abs(cl - pl.o)
     f['vol_absorption'] = np.where((pl.rvol > 1.5) & ((body_size / (candle_spread + 1e-9)) < 0.3), 1.0, 0.0)
+
+    # Time at Mode (Liquidity Consumption proxy)
+    # Measures how many bars in the last 20 were within 0.5 ATR of the VWAP
+    diff_from_vwap = np.abs(cl - pl.rolling_vwap_20)
+    is_near_vwap = np.where(diff_from_vwap <= atr_safe * 0.5, 1.0, 0.0)
+    f['time_at_mode'] = pd.Series(is_near_vwap).rolling(20, min_periods=1).sum().to_numpy()
 
     # ---------------------------------------------------------
     # DIRECTIVE 3: VWAP & MEAN REVERSION EXTREMES
@@ -1367,8 +1388,9 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
             ob_bull = base.get("ob_bull_price", 0.0)
             fvg_p = base.get("fvg_bull", 0)
             fib_zone = base.get("fib_786_long", px)
-            # Fractal Alignment: 1H OB must be within 1.0 ATR of 4H Swing Low
-            if ob_bull > 0 and abs(ob_bull - mtf_sl) <= current_atr * 1.0:
+            bars_since = base.get("bars_since_ob_bull", 0)
+            # Smart Trade Invalidation: reject if structure is older than 20 bars (stale)
+            if ob_bull > 0 and bars_since <= 20 and abs(ob_bull - mtf_sl) <= current_atr * 1.0:
                 # FVG must directly align with OB (or be just above it)
                 if fvg_p > 0 and fvg_p >= ob_bull - current_atr * 0.5:
                     # Require price to be in OTE zone (using 0.786 as proxy for zone)
@@ -1381,8 +1403,9 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
             ob_bear = base.get("ob_bear_price", 0.0)
             fvg_p = base.get("fvg_bear", 0)
             fib_zone = base.get("fib_786_short", px)
-            # Fractal Alignment: 1H OB must be within 1.0 ATR of 4H Swing High
-            if ob_bear > 0 and abs(ob_bear - mtf_sh) <= current_atr * 1.0:
+            bars_since = base.get("bars_since_ob_bear", 0)
+            # Smart Trade Invalidation: reject if structure is older than 20 bars (stale)
+            if ob_bear > 0 and bars_since <= 20 and abs(ob_bear - mtf_sh) <= current_atr * 1.0:
                 if fvg_p > 0 and fvg_p <= ob_bear + current_atr * 0.5:
                     if px <= ob_bear - current_atr * 0.1 and abs(ob_bear - fib_zone) < current_atr * 1.0:
                         candidates.append({
@@ -1436,6 +1459,22 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         
         entry = cand['entry']
 
+        # STAGE 2: THE "RUBBER BAND" ENTRY MODEL
+        # We front-run structural levels if MTF ADX is screaming, and fade deeper into wicks if the trend is weak.
+        if order_type == 'limit':
+            mtf_adx = adv.get('trend_strength_mtf_aligned', [0.0])[iL] if 'trend_strength_mtf_aligned' in adv else 0.0
+            # Wait, trend_strength_mtf_aligned is EMA distance. Let's use local adx for momentum.
+            local_adx = base.get("adx", 25.0)
+
+            if local_adx > 35:
+                # Strong trend, front-run the entry to ensure fill
+                offset = current_atr * 0.25
+                entry = entry + offset if side == 'long' else entry - offset
+            elif local_adx < 25:
+                # Weak trend, fade deep into the wick
+                offset = current_atr * 0.50
+                entry = entry - offset if side == 'long' else entry + offset
+
         # DEFAULT BASELINE VARIABLES (If no brain is present)
         prob = 1.0
         risk_factor = cand.get('risk_mult', 1.0)
@@ -1472,14 +1511,24 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 score *= 0.5
                 risk_factor *= 0.5
 
-        # DIRECTIVE 3: STRICT 1:3 GEOMETRIC ENFORCEMENT & RISK COMPRESSION
-        # Mathematically force the SL to exactly the candidate's sl_dist_atr to guarantee achievable Take Profits
-        sl_dist_atr = cand.get('sl_dist_atr', 1.5)
+        # STAGE 1: VOLATILITY-ADJUSTED GEOMETRY (RISK COMPRESSION FIX)
+        # Dynamically map the SL distance to the atr_percentile_100 to give noise room in wild markets, and tight leashes in dead ones.
+        base_sl_dist = cand.get('sl_dist_atr', 1.5)
+
+        # Pull atr_percentile_100 from adv features, map linearly from 0% to 100% -> scales base SL by 0.6x to 1.4x
+        atr_p = 0.5
+        if 'atr_percentile_100' in adv and iL < len(adv['atr_percentile_100']):
+            atr_p = adv['atr_percentile_100'][iL] / 100.0
+
+        # Example mapping: at 0% (dead market) multiplier is 0.66. At 100% (wild market) multiplier is 1.33.
+        # If base_sl_dist is 1.5 ATR, range is 1.0 ATR to 2.0 ATR.
+        volatility_multiplier = 0.66 + (0.66 * atr_p)
+        dynamic_sl_dist_atr = base_sl_dist * volatility_multiplier
 
         if side == 'long':
-            sl = entry - (current_atr * sl_dist_atr)
+            sl = entry - (current_atr * dynamic_sl_dist_atr)
         else:
-            sl = entry + (current_atr * sl_dist_atr)
+            sl = entry + (current_atr * dynamic_sl_dist_atr)
 
         dynamic_risk = abs(entry - sl)
 
