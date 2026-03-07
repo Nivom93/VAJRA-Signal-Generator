@@ -1080,7 +1080,7 @@ class TradeManager:
             **plan,
             "dca_level": 0,
             "risk_factor": plan.get('risk_factor', 1.0),
-            "created_ts": bar.get("timestamp", time.time()*1000), 
+            "created_ts": bar.get("timestamp", 0),
             "ttl": ttl, 
             "status": "PENDING" 
         }
@@ -1089,11 +1089,14 @@ class TradeManager:
         self.mem.record_signal(order)
         return order
 
-    def step_bar(self, o, h, l, c, swing_high=0.0, swing_low=0.0):
+    def step_bar(self, o, h, l, c, ts=None, swing_high=0.0, swing_low=0.0):
         closed = []
         still_open = []
         still_pending = []
         
+        # Determine the current bar's timestamp, fallback to 0 if not provided
+        current_ts = ts if ts is not None else 0
+
         fee = (self.cfg.taker_fee_bps + self.cfg.slippage_bps) / 10000.0
         trail_trig = self.cfg.trailing_stop_trigger_r
         trail_dist = self.cfg.trailing_dist_r
@@ -1143,7 +1146,7 @@ class TradeManager:
                 trade['total_size'] = order.get('total_size', 1.0 * order.get('risk_factor',1.0))
                 trade['initial_risk_unit'] = initial_risk
                 trade['status'] = 'OPEN'
-                trade['fill_ts'] = time.time()
+                trade['fill_ts'] = current_ts
                 trade['bars_open'] = 0
                 
                 if self.cfg.use_dca:
@@ -1221,7 +1224,7 @@ class TradeManager:
                 t['pnl_r'] = (pnl - cost) / risk 
                 t['exit_price'] = exit_px
                 t['exit_reason'] = exit_reason
-                t['exit_ts'] = time.time()
+                t['exit_ts'] = current_ts
                 
                 closed.append(t)
                 self.mem.record_exit(t)
@@ -1553,8 +1556,12 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         # 1. Structural Stop Loss: Exactly below/above macro swing
         if side == 'long':
             sl = base.get("last_swing_low", entry - current_atr) - (current_atr * 0.1)
+            if sl >= entry or (entry - sl) < (current_atr * 0.5):
+                sl = entry - (current_atr * 1.5)
         else:
             sl = base.get("last_swing_high", entry + current_atr) + (current_atr * 0.1)
+            if sl <= entry or (sl - entry) < (current_atr * 0.5):
+                sl = entry + (current_atr * 1.5)
 
         dynamic_risk = abs(entry - sl)
         if dynamic_risk < 1e-9: continue
