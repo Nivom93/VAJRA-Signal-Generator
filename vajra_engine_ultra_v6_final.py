@@ -724,6 +724,11 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     f["ob_bear_dist"] = (pl.ob_bear[idx_L] - px)/px*100 if pl.ob_bear[idx_L]>0 else 0.0
     f["bars_since_ob_bull"] = float(pl.bars_since_ob_bull[idx_L])
     f["bars_since_ob_bear"] = float(pl.bars_since_ob_bear[idx_L])
+
+    # Safely pull velocity_atr_3 if precomputed, else 0
+    if hasattr(pl, 'velocity_atr_3'):
+        f["velocity_atr_3"] = float(pl.velocity_atr_3[idx_L])
+
     f["vol_spike"] = float(pl.vol_spike[idx_L])
     f["kalman_vel"] = float(pl.kalman_vel[idx_L]); f["hurst"] = float(pl.hurst[idx_L])
     
@@ -995,6 +1000,13 @@ def precompute_v6_features(ph, pm, pl, htf, mtf, ltf, btc_close_arr=None):
     # DIRECTIVE 3: VWAP & MEAN REVERSION EXTREMES
     # ---------------------------------------------------------
     f['vwap_z_score'] = (cl - pl.rolling_vwap_20) / atr_safe
+
+    # Liquidation Cascade Velocity Filter (Anti-Falling Knife)
+    # Measures the speed of the price drop/rally over the last 3 bars
+    cl_shifted_3 = pd.Series(cl).shift(3).fillna(cl[0]).to_numpy()
+    velocity_atr_3_arr = np.abs(cl - cl_shifted_3) / atr_safe
+    f['velocity_atr_3'] = velocity_atr_3_arr
+    pl.velocity_atr_3 = velocity_atr_3_arr
 
     # ---------------------------------------------------------
     # DIRECTIVE 4: STRIP COLLINEAR NOISE
@@ -1538,16 +1550,32 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 if bars_since == 0:  # Mitigated or invalid
                     continue
 
+        # UPGRADE 1: Liquidation Cascade Velocity Filter
+        # Do not catch a falling knife if it's crashing > 1.5 ATR per bar into our limit
+        velocity_atr_3 = base.get("velocity_atr_3", 0.0)
+        if velocity_atr_3 > 1.5:
+            continue
+
         # ==========================================================
         # THE PARADIGM SHIFT: STRUCTURAL RR VALIDATION
         # ==========================================================
         # 1. Structural Stop Loss: Exactly below/above macro swing
+        # UPGRADE 2: Macro-Structural Stop Loss Anchoring
         if side == 'long':
-            sl = base.get("last_swing_low", entry - current_atr) - (current_atr * 0.1)
+            # Use 4H swing low if it's safely nearby (<= 2.5 ATR), otherwise fallback to 1H
+            if mtf_sl > 0 and mtf_sl < entry and (entry - mtf_sl) <= current_atr * 2.5:
+                sl = mtf_sl - (current_atr * 0.1)
+            else:
+                sl = base.get("last_swing_low", entry - current_atr) - (current_atr * 0.1)
+
             if sl >= entry or (entry - sl) < (current_atr * 0.5):
                 sl = entry - (current_atr * 1.5)
         else:
-            sl = base.get("last_swing_high", entry + current_atr) + (current_atr * 0.1)
+            if mtf_sh > 0 and mtf_sh > entry and (mtf_sh - entry) <= current_atr * 2.5:
+                sl = mtf_sh + (current_atr * 0.1)
+            else:
+                sl = base.get("last_swing_high", entry + current_atr) + (current_atr * 0.1)
+
             if sl <= entry or (sl - entry) < (current_atr * 0.5):
                 sl = entry + (current_atr * 1.5)
 
@@ -1577,11 +1605,21 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
             else:
                 tp = entry - (current_atr * 4.5) # Fallback
 
-        # 3. The 1:3 Structural Gate
-        implied_rr = abs(tp - entry) / dynamic_risk
+        # 3. The 1:3 Structural Gate with Probability Window
+        # Reject if the structural target does not even yield 2.4 RR.
+        # Cap greed exactly at 3.0 RR if the structural target is much higher.
+        structural_rr = abs(tp - entry) / dynamic_risk
 
-        if implied_rr < 3.0:
+        if structural_rr < 2.4:
             continue
+
+        implied_rr = structural_rr
+        if implied_rr > 3.0:
+            implied_rr = 3.0
+            if side == 'long':
+                tp = entry + (3.0 * dynamic_risk)
+            else:
+                tp = entry - (3.0 * dynamic_risk)
 
         if score > best_score:
             best_score = score
