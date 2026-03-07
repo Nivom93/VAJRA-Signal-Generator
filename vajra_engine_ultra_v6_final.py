@@ -1363,12 +1363,11 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     # ==========================================================
     market_regime = base.get("market_regime", "CONSOLIDATION")
 
-    # Algorithmic Temporal Gating (Killzones)
-    killzone_active = False
-    if (0 <= hour <= 3) or (7 <= hour <= 10) or (13 <= hour <= 16):
-        killzone_active = True
+    # STAGE 3: Expand the Algorithmic Temporal Gates
+    # Removed the hard killzone_active constraint. The XGBoost model sees hour_of_day
+    # and will natively learn to penalize low-probability off-hours without manual blinding.
 
-    if market_regime == "EXPANSION" and killzone_active:
+    if market_regime == "EXPANSION":
         # Unlock SIGMA_CONTINUATION
         if can_long and base.get("bos_up", 0) > 0:
             entry_target = base.get("last_swing_high", px)
@@ -1433,7 +1432,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                     "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.0, "type": "limit"
                 })
 
-    elif market_regime == "REVERSAL_WARNING" and killzone_active:
+    elif market_regime == "REVERSAL_WARNING":
         # Unlock ZETA_LIQUIDITY_SWEEP
         if can_long:
             # Deep Liquidity Penetration (ZETA Upgrade)
@@ -1514,29 +1513,18 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 score *= 0.5
                 risk_factor *= 0.5
 
-        # UPGRADE 1: Derivatives Liquidation Matrix (The Squeeze Gate)
-        # Retail gets squeezed. We only take longs if funding <= 0.01%, shorts if >= -0.01%
-        if side == 'long' and funding > 0.0001:  # 0.01% in standard format, wait, ccxt funding format is usually 0.0001 for 0.01%
-            continue
-        if side == 'short' and funding < -0.0001:
-            continue
+        # STAGE 1: Convert Hard Gates to "Soft" Features
+        # Derivatives, Volume Profile Confluence are now handled entirely by XGBoost features
+        # (funding_rate, time_at_mode, dist_poc_pct) instead of hard rejections to ensure trade quantity.
 
-        # UPGRADE 2: Volume Profile Node Confluence (The Defense Wall)
-        # Entry must rest within 0.5 ATR of a high volume node
-        if order_type == 'limit':
-            near_poc = abs(entry - poc) <= current_atr * 0.5
-            near_vah = abs(entry - vah) <= current_atr * 0.5
-            near_val = abs(entry - val) <= current_atr * 0.5
-            if not (near_poc or near_vah or near_val):
-                continue
-
-        # UPGRADE 3: MTF Premium/Discount Filtering (Value Area Logic)
+        # Relaxed UPGRADE 3: MTF Premium/Discount Filtering (Value Area Logic)
+        # Only reject absolute extremes (e.g., > 0.8 for longs, < 0.2 for shorts) instead of the 0.5 midpoint.
         mtf_range = mtf_sh - mtf_sl
         if mtf_range > 0:
             mtf_premium_discount = (px - mtf_sl) / mtf_range
-            if side == 'long' and mtf_premium_discount > 0.5:
+            if side == 'long' and mtf_premium_discount > 0.80:
                 continue
-            if side == 'short' and mtf_premium_discount < 0.5:
+            if side == 'short' and mtf_premium_discount < 0.20:
                 continue
 
         # UPGRADE 4: Order Block First-Touch Exhaustion
@@ -1567,13 +1555,12 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         if dynamic_risk < 1e-9: continue
 
         # 2. Structural Take Profit: Opposing macro liquidity pool
+        # Removed asian_high / asian_low from TP targets to remove the Implied RR Chokehold.
         if side == 'long':
             ob_bear = base.get("ob_bear_price", 0.0)
-            asian_h = base.get("asian_high", 0.0)
             targets = []
             if mtf_sh > entry: targets.append(mtf_sh)
             if ob_bear > entry: targets.append(ob_bear)
-            if asian_h > entry: targets.append(asian_h)
 
             if targets:
                 tp = min(targets)
@@ -1581,11 +1568,9 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 tp = entry + (current_atr * 4.5) # Fallback
         else:
             ob_bull = base.get("ob_bull_price", 0.0)
-            asian_l = base.get("asian_low", 0.0)
             targets = []
             if mtf_sl > 0 and mtf_sl < entry: targets.append(mtf_sl)
             if ob_bull > 0 and ob_bull < entry: targets.append(ob_bull)
-            if asian_l > 0 and asian_l < entry: targets.append(asian_l)
 
             if targets:
                 tp = max(targets)
