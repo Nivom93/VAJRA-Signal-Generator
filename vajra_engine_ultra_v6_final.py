@@ -1511,43 +1511,90 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 score *= 0.5
                 risk_factor *= 0.5
 
-        # STAGE 1: VOLATILITY-ADJUSTED GEOMETRY (RISK COMPRESSION FIX)
-        # Dynamically map the SL distance to the atr_percentile_100 to give noise room in wild markets, and tight leashes in dead ones.
-        base_sl_dist = cand.get('sl_dist_atr', 1.5)
+        # UPGRADE 1: Derivatives Liquidation Matrix (The Squeeze Gate)
+        # Retail gets squeezed. We only take longs if funding <= 0.01%, shorts if >= -0.01%
+        if side == 'long' and funding > 0.0001:  # 0.01% in standard format, wait, ccxt funding format is usually 0.0001 for 0.01%
+            continue
+        if side == 'short' and funding < -0.0001:
+            continue
 
-        # Pull atr_percentile_100 from adv features, map linearly from 0% to 100% -> scales base SL by 0.6x to 1.4x
-        atr_p = 0.5
-        if 'atr_percentile_100' in adv and iL < len(adv['atr_percentile_100']):
-            atr_p = adv['atr_percentile_100'][iL] / 100.0
+        # UPGRADE 2: Volume Profile Node Confluence (The Defense Wall)
+        # Entry must rest within 0.5 ATR of a high volume node
+        if order_type == 'limit':
+            near_poc = abs(entry - poc) <= current_atr * 0.5
+            near_vah = abs(entry - vah) <= current_atr * 0.5
+            near_val = abs(entry - val) <= current_atr * 0.5
+            if not (near_poc or near_vah or near_val):
+                continue
 
-        # Example mapping: at 0% (dead market) multiplier is 0.66. At 100% (wild market) multiplier is 1.33.
-        # If base_sl_dist is 1.5 ATR, range is 1.0 ATR to 2.0 ATR.
-        volatility_multiplier = 0.66 + (0.66 * atr_p)
-        dynamic_sl_dist_atr = base_sl_dist * volatility_multiplier
+        # UPGRADE 3: MTF Premium/Discount Filtering (Value Area Logic)
+        mtf_range = mtf_sh - mtf_sl
+        if mtf_range > 0:
+            mtf_premium_discount = (px - mtf_sl) / mtf_range
+            if side == 'long' and mtf_premium_discount > 0.5:
+                continue
+            if side == 'short' and mtf_premium_discount < 0.5:
+                continue
 
+        # UPGRADE 4: Order Block First-Touch Exhaustion
+        if 'GAMMA' in cand['strat']:
+            if side == 'long':
+                bars_since = base.get("bars_since_ob_bull", 0)
+                if bars_since == 0:  # Mitigated or invalid
+                    continue
+            else:
+                bars_since = base.get("bars_since_ob_bear", 0)
+                if bars_since == 0:  # Mitigated or invalid
+                    continue
+
+        # ==========================================================
+        # THE PARADIGM SHIFT: STRUCTURAL RR VALIDATION
+        # ==========================================================
+        # 1. Structural Stop Loss: Exactly below/above macro swing
         if side == 'long':
-            sl = entry - (current_atr * dynamic_sl_dist_atr)
+            sl = base.get("last_swing_low", entry - current_atr) - (current_atr * 0.1)
         else:
-            sl = entry + (current_atr * dynamic_sl_dist_atr)
+            sl = base.get("last_swing_high", entry + current_atr) + (current_atr * 0.1)
 
         dynamic_risk = abs(entry - sl)
+        if dynamic_risk < 1e-9: continue
 
-        # Strictly lock TP to mathematically exactly 3x the calculated risk distance.
-        tp_dist = dynamic_risk * 3.0
-
+        # 2. Structural Take Profit: Opposing macro liquidity pool
         if side == 'long':
-            tp = entry + tp_dist
-            if sl >= entry: continue
+            ob_bear = base.get("ob_bear_price", 0.0)
+            asian_h = base.get("asian_high", 0.0)
+            targets = []
+            if mtf_sh > entry: targets.append(mtf_sh)
+            if ob_bear > entry: targets.append(ob_bear)
+            if asian_h > entry: targets.append(asian_h)
+
+            if targets:
+                tp = min(targets)
+            else:
+                tp = entry + (current_atr * 4.5) # Fallback
         else:
-            tp = entry - tp_dist
-            if sl <= entry: continue
+            ob_bull = base.get("ob_bull_price", 0.0)
+            asian_l = base.get("asian_low", 0.0)
+            targets = []
+            if mtf_sl > 0 and mtf_sl < entry: targets.append(mtf_sl)
+            if ob_bull > 0 and ob_bull < entry: targets.append(ob_bull)
+            if asian_l > 0 and asian_l < entry: targets.append(asian_l)
+
+            if targets:
+                tp = max(targets)
+            else:
+                tp = entry - (current_atr * 4.5) # Fallback
+
+        # 3. The 1:3 Structural Gate
+        implied_rr = abs(tp - entry) / dynamic_risk
+
+        if implied_rr < 3.0:
+            continue
 
         if score > best_score:
             best_score = score
             
-            rr = abs(tp - entry) / max(1e-12, abs(entry - sl))
-            
-            if rr >= cfg.min_rr:
+            if implied_rr >= cfg.min_rr:
                 best_plan = {
                     "side": side,
                     "entry": entry,
