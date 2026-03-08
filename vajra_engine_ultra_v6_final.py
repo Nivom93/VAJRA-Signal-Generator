@@ -421,6 +421,17 @@ def _rolling_vwap_np(typical_price, volume, window=20):
             vwap[i] = typical_price[i]
     return vwap
 
+@njit(cache=True)
+def _donchian_channels_np(high, low, window=20):
+    n = len(high)
+    dc_high = np.zeros(n, dtype=np.float64)
+    dc_low = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        start_idx = max(0, i - window + 1)
+        dc_high[i] = np.max(high[start_idx:i+1])
+        dc_low[i] = np.min(low[start_idx:i+1])
+    return dc_high, dc_low
+
 # ==============================================================================
 # 5. CONFIG & CLASSES
 # ==============================================================================
@@ -672,6 +683,7 @@ class Precomp:
 
         self.atr_percentile_100 = _rolling_percentile_np(self.atr14, 100)
         self.rolling_vwap_20 = _rolling_vwap_np((self.h + self.l + self.c) / 3.0, self.v, 20)
+        self.dc_high_20, self.dc_low_20 = _donchian_channels_np(self.h, self.l, 20)
 
 def _trend_flags(e50, e200): return (1.0, 0.0) if e50>e200 else ((0.0, 1.0) if e50<e200 else (0.0, 0.0))
 def _ensure_precomp(df, pre): return pre if isinstance(pre, Precomp) else Precomp(df)
@@ -777,6 +789,8 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
 
     f["asian_high"] = float(pl.asian_high[idx_L])
     f["asian_low"] = float(pl.asian_low[idx_L])
+    f["dc_high_20"] = float(pl.dc_high_20[idx_L])
+    f["dc_low_20"] = float(pl.dc_low_20[idx_L])
     
     f["dist_asian_high_pct"] = (px - f["asian_high"]) / px_safe * 100
     f["dist_asian_low_pct"] = (px - f["asian_low"]) / px_safe * 100
@@ -1376,109 +1390,51 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     candidates = []
 
     # ==========================================================
-    # REGIME-LOCKED STRATEGY ALLOCATION (DIRECTIVE 2)
+    # PIVOT 1: VOLATILITY SQUEEZE BREAKOUT (MOMENTUM MECHANICS)
     # ==========================================================
-    market_regime = base.get("market_regime", "CONSOLIDATION")
+    # We are pivoting away from Limit Pullbacks which statistically act as "falling knives" in crypto.
+    # The true edge is Volatility Expansion Breakouts.
 
-    # STAGE 3: Expand the Algorithmic Temporal Gates
-    # Removed the hard killzone_active constraint. The XGBoost model sees hour_of_day
-    # and will natively learn to penalize low-probability off-hours without manual blinding.
+    is_squeezed = base.get("is_squeezed", 0)
+    squeeze_fired = base.get("squeeze_fired", 0)
 
-    # UPGRADE 4: Macro Momentum Alignment (The 50 EMA Gate)
-    # We will instantly veto pullbacks if they oppose the macro 4H EMA50 trend.
-    htf_ema50 = base.get("htf_ema50", px)
-    macro_long_ok = px > htf_ema50
-    macro_short_ok = px < htf_ema50
+    # We only care about placing Breakout (Stop-Market) orders when the market is tightly coiled.
+    # This guarantees we only enter if the momentum explosively confirms our direction.
+    if is_squeezed > 0 or squeeze_fired > 0:
 
-    if market_regime == "EXPANSION":
-        # Unlock SIGMA_CONTINUATION
-        if can_long and macro_long_ok and base.get("bos_up", 0) > 0:
-            entry_target = base.get("last_swing_high", px)
-            if px >= entry_target + current_atr * 0.1:
-                candidates.append({
-                    "strat": "SIGMA_CONTINUATION_LONG", "priority": 2.0, "side": "long",
-                    "entry": entry_target, "sl_dist_atr": 1.5, "risk_mult": 1.0, "type": "limit"
-                })
-        if can_short and macro_short_ok and base.get("bos_down", 0) > 0:
-            entry_target = base.get("last_swing_low", px)
-            if px <= entry_target - current_atr * 0.1:
-                candidates.append({
-                    "strat": "SIGMA_CONTINUATION_SHORT", "priority": 2.0, "side": "short",
-                    "entry": entry_target, "sl_dist_atr": 1.5, "risk_mult": 1.0, "type": "limit"
-                })
+        # Macro Momentum Alignment
+        htf_ema50 = base.get("htf_ema50", px)
+        macro_long_ok = px > htf_ema50
+        macro_short_ok = px < htf_ema50
 
-    elif market_regime == "RETRACEMENT":
-        # Unlock GAMMA_PULLBACK -> Converted to GOLDEN POCKET PULLBACK
-        # The Golden Pocket Shift: Institutional Reloads happen at 0.618 - 0.786 of the fresh impulse.
-        mtf_squeeze_fired = base.get("mtf_squeeze_fired", 0)
-        mtf_is_squeezed = base.get("mtf_is_squeezed", 0)
+        # PIVOT 2: Donchian Channel Breakouts
+        # We target the 20-period local consolidation boundaries.
+        dc_high = base.get("dc_high_20", px + current_atr)
+        dc_low = base.get("dc_low_20", px - current_atr)
 
-        # MISSING EDGE 2: The HTF Volatility Squeeze (The Macro Engine)
-        # We only trade pullbacks if the macro timeframe is expanding (squeeze fired recently or is strictly expanding).
-        macro_expanding = (mtf_squeeze_fired > 0 or mtf_is_squeezed == 0)
+        if can_long and macro_long_ok:
+            # We place a 'breakout' order at the exact local high.
+            # If price surges through it, we get filled with confirmed momentum.
+            candidates.append({
+                "strat": "DONCHIAN_BREAKOUT_LONG",
+                "priority": 3.0,
+                "side": "long",
+                "entry": dc_high,
+                "sl_override": dc_low, # PIVOT 2: Stop Loss is precisely the opposite side of the channel
+                "risk_mult": 1.0,
+                "type": "breakout"
+            })
 
-        if macro_expanding:
-            if can_long and macro_long_ok and (base.get("bos_up", 0) > 0 or base.get("choch_up", 0) > 0):
-                # Calculate Impulse range
-                if mtf_sh > mtf_sl and mtf_sl > 0:
-                    impulse_range = mtf_sh - mtf_sl
-                    golden_pocket = mtf_sh - (impulse_range * 0.618)
-                    if px >= golden_pocket + current_atr * 0.1:
-                        candidates.append({
-                            "strat": "GAMMA_PULLBACK_LONG", "priority": 2.5, "side": "long",
-                            "entry": golden_pocket, "sl_dist_atr": 1.5, "risk_mult": 1.25, "type": "limit"
-                        })
-
-            if can_short and macro_short_ok and (base.get("bos_down", 0) > 0 or base.get("choch_down", 0) > 0):
-                if mtf_sh > mtf_sl and mtf_sh > 0:
-                    impulse_range = mtf_sh - mtf_sl
-                    golden_pocket = mtf_sl + (impulse_range * 0.618)
-                    if px <= golden_pocket - current_atr * 0.1:
-                        candidates.append({
-                            "strat": "GAMMA_PULLBACK_SHORT", "priority": 2.5, "side": "short",
-                            "entry": golden_pocket, "sl_dist_atr": 1.5, "risk_mult": 1.25, "type": "limit"
-                        })
-
-    elif market_regime == "CONSOLIDATION":
-        # Unlock OMEGA_RANGE
-        if can_long:
-            entry_target = base.get("bb_lower", px)
-            if px >= entry_target + current_atr * 0.1:
-                candidates.append({
-                    "strat": "OMEGA_RANGE_LONG", "priority": 1.0, "side": "long",
-                    "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.0, "type": "limit"
-                })
-        if can_short:
-            entry_target = base.get("bb_upper", px)
-            if px <= entry_target - current_atr * 0.1:
-                candidates.append({
-                    "strat": "OMEGA_RANGE_SHORT", "priority": 1.0, "side": "short",
-                    "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.0, "type": "limit"
-                })
-
-    elif market_regime == "REVERSAL_WARNING":
-        # UPGRADE 3: The "Exhaustion Sweep" Confluence
-        # Only take sweeps if we are strictly piercing outside Keltner Channels
-        kc_upper = base.get("kc_upper", px)
-        kc_lower = base.get("kc_lower", px)
-        has_cvd_div_bull = base.get("cvd_div_bull", 0) > 0
-        has_cvd_div_bear = base.get("cvd_div_bear", 0) > 0
-
-        # Unlock ZETA_LIQUIDITY_SWEEP
-        if can_long and has_cvd_div_bull and px < kc_lower:
-            entry_target = base.get("last_swing_low", px) - (current_atr * 0.75)
-            if px >= entry_target + current_atr * 0.1:
-                candidates.append({
-                    "strat": "ZETA_LIQUIDITY_SWEEP_LONG", "priority": 3.0, "side": "long",
-                    "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.5, "type": "limit"
-                })
-        if can_short and has_cvd_div_bear and px > kc_upper:
-            entry_target = base.get("last_swing_high", px) + (current_atr * 0.75)
-            if px <= entry_target - current_atr * 0.1:
-                candidates.append({
-                    "strat": "ZETA_LIQUIDITY_SWEEP_SHORT", "priority": 3.0, "side": "short",
-                    "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.5, "type": "limit"
-                })
+        if can_short and macro_short_ok:
+            candidates.append({
+                "strat": "DONCHIAN_BREAKOUT_SHORT",
+                "priority": 3.0,
+                "side": "short",
+                "entry": dc_low,
+                "sl_override": dc_high, # PIVOT 2: Stop Loss is precisely the opposite side of the channel
+                "risk_mult": 1.0,
+                "type": "breakout"
+            })
 
     # EVALUATE ALL CANDIDATES
     best_plan = None
@@ -1490,17 +1446,23 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         
         entry = cand['entry']
 
-        # UPGRADE 1: Abolish Artificial Offsets
-        # Limit orders must sit exactly on the pure structural level to guarantee institutional support.
-        # (Rubber Band offset logic completely removed).
-
-        # MISSING EDGE 3: CVD Exhaustion Delta (The Final Gate)
-        # If the market is approaching our limit order but sellers/buyers are accelerating, cancel it.
+        # PIVOT 3: The Order Flow "Fuel" Gate
+        # A breakout is mathematically vetoed if `rvol` (Relative Volume) is not surging,
+        # or if the order flow acceleration is opposing us.
+        # Since this is a Breakout order resting above the market, we must ensure
+        # the setup phase itself has volume accumulation.
+        rvol = base.get("rvol", 1.0)
         cvd_accel = base.get("cvd_acceleration", 0.0)
+
+        # We need the fuel to be primed. If volume is dead during the squeeze, the breakout will fake out.
+        if rvol < 0.8:
+            continue
+
+        # We need the order flow to be leaning in our direction even before it breaks out.
         if side == 'long' and cvd_accel < 0:
-            continue  # Sellers are accelerating, cancel long limit
+            continue
         if side == 'short' and cvd_accel > 0:
-            continue  # Buyers are accelerating, cancel short limit
+            continue
 
         # DEFAULT BASELINE VARIABLES (If no brain is present)
         prob = 1.0
@@ -1572,25 +1534,31 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         # ==========================================================
         # THE PARADIGM SHIFT: STRUCTURAL RR VALIDATION
         # ==========================================================
-        # 1. Structural Stop Loss: Exactly below/above macro swing
-        # UPGRADE 2: Macro-Structural Stop Loss Anchoring
-        if side == 'long':
-            # Use 4H swing low if it's safely nearby (<= 2.5 ATR), otherwise fallback to 1H
-            if mtf_sl > 0 and mtf_sl < entry and (entry - mtf_sl) <= current_atr * 2.5:
-                sl = mtf_sl - (current_atr * 0.1)
-            else:
-                sl = base.get("last_swing_low", entry - current_atr) - (current_atr * 0.1)
-
-            if sl >= entry or (entry - sl) < (current_atr * 0.5):
-                sl = entry - (current_atr * 1.5)
+        # 1. Structural Stop Loss:
+        # If sl_override is provided (e.g. from Donchian Breakout logic), we strictly use it.
+        if 'sl_override' in cand:
+            sl = cand['sl_override']
+            # Sanity clamp to prevent mathematically impossible physics
+            if side == 'long' and sl >= entry: sl = entry - (current_atr * 1.5)
+            if side == 'short' and sl <= entry: sl = entry + (current_atr * 1.5)
         else:
-            if mtf_sh > 0 and mtf_sh > entry and (mtf_sh - entry) <= current_atr * 2.5:
-                sl = mtf_sh + (current_atr * 0.1)
-            else:
-                sl = base.get("last_swing_high", entry + current_atr) + (current_atr * 0.1)
+            # Fallback to the MTF logic
+            if side == 'long':
+                if mtf_sl > 0 and mtf_sl < entry and (entry - mtf_sl) <= current_atr * 2.5:
+                    sl = mtf_sl - (current_atr * 0.1)
+                else:
+                    sl = base.get("last_swing_low", entry - current_atr) - (current_atr * 0.1)
 
-            if sl <= entry or (sl - entry) < (current_atr * 0.5):
-                sl = entry + (current_atr * 1.5)
+                if sl >= entry or (entry - sl) < (current_atr * 0.5):
+                    sl = entry - (current_atr * 1.5)
+            else:
+                if mtf_sh > 0 and mtf_sh > entry and (mtf_sh - entry) <= current_atr * 2.5:
+                    sl = mtf_sh + (current_atr * 0.1)
+                else:
+                    sl = base.get("last_swing_high", entry + current_atr) + (current_atr * 0.1)
+
+                if sl <= entry or (sl - entry) < (current_atr * 0.5):
+                    sl = entry + (current_atr * 1.5)
 
         dynamic_risk = abs(entry - sl)
         if dynamic_risk < 1e-9: continue
