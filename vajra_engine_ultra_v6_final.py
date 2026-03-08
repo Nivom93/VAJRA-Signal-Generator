@@ -170,16 +170,21 @@ def _volume_profile_np(close, volume, window=100, bins=20):
     return poc, vah, val
 
 @njit(cache=True)
-def _cvd_divergence_np(close, cvd, last_sl, last_sh):
+def _cvd_divergence_np(close, cvd, last_sl, last_sh, last_sl_cvd, last_sh_cvd):
     n = len(close)
     div_bull = np.zeros(n, dtype=np.float64)
     div_bear = np.zeros(n, dtype=np.float64)
     for i in range(10, n):
+        # Bullish Divergence: Price makes a Lower Low (relative to last swing low)
+        # BUT CVD makes a Higher Low (Current CVD > CVD at the time of that swing low)
         if close[i] < last_sl[i]:
-            if cvd[i] > cvd[i-5]: 
+            if cvd[i] > last_sl_cvd[i]:
                 div_bull[i] = 1.0
+
+        # Bearish Divergence: Price makes a Higher High (relative to last swing high)
+        # BUT CVD makes a Lower High (Current CVD < CVD at the time of that swing high)
         if close[i] > last_sh[i]:
-            if cvd[i] < cvd[i-5]:
+            if cvd[i] < last_sh_cvd[i]:
                 div_bear[i] = 1.0
     return div_bull, div_bear
 
@@ -543,14 +548,26 @@ def _swing_points_strict(high, low, left=3, right=3):
     return sh_conf, sl_conf
 
 @njit(cache=True)
-def _last_swing_prices_strict(high, low, sh_conf, sl_conf, right=3):
-    n = high.size; lsh = np.zeros(n); lsl = np.zeros(n)
+def _last_swing_prices_strict(high, low, cvd, sh_conf, sl_conf, right=3):
+    n = high.size
+    lsh = np.zeros(n); lsl = np.zeros(n)
+    lsh_cvd = np.zeros(n); lsl_cvd = np.zeros(n)
+
     curr_sh = high[0]; curr_sl = low[0]
+    curr_sh_cvd = cvd[0]; curr_sl_cvd = cvd[0]
+
     for i in range(n):
-        if sh_conf[i] == 1: curr_sh = high[i - right]
-        if sl_conf[i] == 1: curr_sl = low[i - right]
+        if sh_conf[i] == 1:
+            curr_sh = high[i - right]
+            curr_sh_cvd = cvd[i - right]
+        if sl_conf[i] == 1:
+            curr_sl = low[i - right]
+            curr_sl_cvd = cvd[i - right]
+
         lsh[i] = curr_sh; lsl[i] = curr_sl
-    return lsh, lsl
+        lsh_cvd[i] = curr_sh_cvd; lsl_cvd[i] = curr_sl_cvd
+
+    return lsh, lsl, lsh_cvd, lsl_cvd
 
 @njit(cache=True)
 def _bos_flags(close, high, low, lsh, lsl):
@@ -638,7 +655,7 @@ class Precomp:
         
         sh_conf, sl_conf = _swing_points_strict(self.h, self.l, 3, 3)
         self.swing_hi = sh_conf; self.swing_lo = sl_conf
-        self.last_sh, self.last_sl = _last_swing_prices_strict(self.h, self.l, sh_conf, sl_conf, 3)
+        self.last_sh, self.last_sl, self.last_sh_cvd, self.last_sl_cvd = _last_swing_prices_strict(self.h, self.l, self.cvd, sh_conf, sl_conf, 3)
         self.bos_up, self.bos_down, self.sweep_up, self.sweep_dn = _bos_flags(self.c, self.h, self.l, self.last_sh, self.last_sl)
         self.engulf_bull, self.engulf_bear, self.pin_bull, self.pin_bear, self.inside_bar = _inside_engulf_pin(self.o, self.h, self.l, self.c)
         self.fvg_up, self.fvg_dn = _fvg_flags(self.h, self.l)
@@ -673,7 +690,7 @@ class Precomp:
         self.avwap_bull = _avwap_np(typical_price, self.v, self.swing_lo)
         self.avwap_bear = _avwap_np(typical_price, self.v, self.swing_hi)
         self.poc, self.vah, self.val = _volume_profile_np(self.c, self.v, 100, 20)
-        self.cvd_div_bull, self.cvd_div_bear = _cvd_divergence_np(self.c, self.cvd, self.last_sl, self.last_sh)
+        self.cvd_div_bull, self.cvd_div_bear = _cvd_divergence_np(self.c, self.cvd, self.last_sl, self.last_sh, self.last_sl_cvd, self.last_sh_cvd)
         self.cvd_roc = _roc(self.cvd, 5)
         self.cvd_acceleration = _roc(self.cvd_roc, 5)
 
@@ -1390,91 +1407,48 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     candidates = []
 
     # ==========================================================
-    # RESTORED: 4-D REGIME MATRIX & STRUCTURAL ENTRY GATING
+    # PIVOT: THE "FAILED BREAKOUT" (DEVIATION) MATRIX
     # ==========================================================
-    market_regime = base.get("market_regime", "CONSOLIDATION")
+    # Abandoning limit pullbacks inside trends (which act as falling knives).
+    # Exclusively trading Spring/Upthrust Liquidity Traps with True CVD Divergence.
 
-    htf_ema50 = base.get("htf_ema50", px)
-    macro_long_ok = px > htf_ema50
-    macro_short_ok = px < htf_ema50
+    dc_high = base.get("dc_high_20", px + current_atr)
+    dc_low = base.get("dc_low_20", px - current_atr)
 
-    if market_regime == "EXPANSION":
-        # Unlock SIGMA_CONTINUATION (Breakout of local structure)
-        if can_long and macro_long_ok and base.get("bos_up", 0) > 0:
-            entry_target = base.get("last_swing_high", px)
+    has_cvd_div_bull = base.get("cvd_div_bull", 0) > 0
+    has_cvd_div_bear = base.get("cvd_div_bear", 0) > 0
+
+    # WYCKOFF SPRING (Long Liquidity Trap)
+    # Price breaks below the 20-period range, traps shorts, and CVD mathematically diverges (buyers absorbing).
+    # We place a limit order exactly at the local swing low (the trap boundary) to catch it coming back inside.
+    if can_long and has_cvd_div_bull:
+        entry_target = base.get("last_swing_low", px)
+        # Ensure we are actually taking a trap trade near the bottom of the range
+        if entry_target <= dc_low + (current_atr * 0.5):
             if px >= entry_target + current_atr * 0.1:
                 candidates.append({
-                    "strat": "SIGMA_CONTINUATION_LONG", "priority": 2.0, "side": "long",
-                    "entry": entry_target, "sl_dist_atr": 1.5, "risk_mult": 1.0, "type": "limit"
+                    "strat": "WYCKOFF_SPRING_LONG",
+                    "priority": 3.0,
+                    "side": "long",
+                    "entry": entry_target,
+                    "sl_dist_atr": 1.0, # Will be clamped dynamically if structure demands it
+                    "risk_mult": 1.5,
+                    "type": "limit"
                 })
-        if can_short and macro_short_ok and base.get("bos_down", 0) > 0:
-            entry_target = base.get("last_swing_low", px)
+
+    # WYCKOFF UPTHRUST (Short Liquidity Trap)
+    if can_short and has_cvd_div_bear:
+        entry_target = base.get("last_swing_high", px)
+        if entry_target >= dc_high - (current_atr * 0.5):
             if px <= entry_target - current_atr * 0.1:
                 candidates.append({
-                    "strat": "SIGMA_CONTINUATION_SHORT", "priority": 2.0, "side": "short",
-                    "entry": entry_target, "sl_dist_atr": 1.5, "risk_mult": 1.0, "type": "limit"
-                })
-
-    elif market_regime == "RETRACEMENT":
-        # Unlock GAMMA_PULLBACK -> GOLDEN POCKET PULLBACK
-        # The Golden Pocket Shift: Institutional Reloads happen at 0.618 - 0.786 of the fresh impulse.
-        if can_long and macro_long_ok and (base.get("bos_up", 0) > 0 or base.get("choch_up", 0) > 0):
-            if mtf_sh > mtf_sl and mtf_sl > 0:
-                impulse_range = mtf_sh - mtf_sl
-                golden_pocket = mtf_sh - (impulse_range * 0.618)
-                if px >= golden_pocket + current_atr * 0.1:
-                    candidates.append({
-                        "strat": "GAMMA_PULLBACK_LONG", "priority": 2.5, "side": "long",
-                        "entry": golden_pocket, "sl_dist_atr": 1.5, "risk_mult": 1.25, "type": "limit"
-                    })
-
-        if can_short and macro_short_ok and (base.get("bos_down", 0) > 0 or base.get("choch_down", 0) > 0):
-            if mtf_sh > mtf_sl and mtf_sh > 0:
-                impulse_range = mtf_sh - mtf_sl
-                golden_pocket = mtf_sl + (impulse_range * 0.618)
-                if px <= golden_pocket - current_atr * 0.1:
-                    candidates.append({
-                        "strat": "GAMMA_PULLBACK_SHORT", "priority": 2.5, "side": "short",
-                        "entry": golden_pocket, "sl_dist_atr": 1.5, "risk_mult": 1.25, "type": "limit"
-                    })
-
-    elif market_regime == "CONSOLIDATION":
-        # Unlock OMEGA_RANGE
-        if can_long:
-            entry_target = base.get("bb_lower", px)
-            if px >= entry_target + current_atr * 0.1:
-                candidates.append({
-                    "strat": "OMEGA_RANGE_LONG", "priority": 1.0, "side": "long",
-                    "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.0, "type": "limit"
-                })
-        if can_short:
-            entry_target = base.get("bb_upper", px)
-            if px <= entry_target - current_atr * 0.1:
-                candidates.append({
-                    "strat": "OMEGA_RANGE_SHORT", "priority": 1.0, "side": "short",
-                    "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.0, "type": "limit"
-                })
-
-    elif market_regime == "REVERSAL_WARNING":
-        # Unlock ZETA_LIQUIDITY_SWEEP
-        kc_upper = base.get("kc_upper", px)
-        kc_lower = base.get("kc_lower", px)
-        has_cvd_div_bull = base.get("cvd_div_bull", 0) > 0
-        has_cvd_div_bear = base.get("cvd_div_bear", 0) > 0
-
-        if can_long and has_cvd_div_bull and px < kc_lower:
-            entry_target = base.get("last_swing_low", px) - (current_atr * 0.75)
-            if px >= entry_target + current_atr * 0.1:
-                candidates.append({
-                    "strat": "ZETA_LIQUIDITY_SWEEP_LONG", "priority": 3.0, "side": "long",
-                    "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.5, "type": "limit"
-                })
-        if can_short and has_cvd_div_bear and px > kc_upper:
-            entry_target = base.get("last_swing_high", px) + (current_atr * 0.75)
-            if px <= entry_target - current_atr * 0.1:
-                candidates.append({
-                    "strat": "ZETA_LIQUIDITY_SWEEP_SHORT", "priority": 3.0, "side": "short",
-                    "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.5, "type": "limit"
+                    "strat": "WYCKOFF_UPTHRUST_SHORT",
+                    "priority": 3.0,
+                    "side": "short",
+                    "entry": entry_target,
+                    "sl_dist_atr": 1.0,
+                    "risk_mult": 1.5,
+                    "type": "limit"
                 })
 
     # EVALUATE ALL CANDIDATES
