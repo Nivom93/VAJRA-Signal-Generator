@@ -1390,51 +1390,92 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     candidates = []
 
     # ==========================================================
-    # PIVOT 1: VOLATILITY SQUEEZE BREAKOUT (MOMENTUM MECHANICS)
+    # RESTORED: 4-D REGIME MATRIX & STRUCTURAL ENTRY GATING
     # ==========================================================
-    # We are pivoting away from Limit Pullbacks which statistically act as "falling knives" in crypto.
-    # The true edge is Volatility Expansion Breakouts.
+    market_regime = base.get("market_regime", "CONSOLIDATION")
 
-    is_squeezed = base.get("is_squeezed", 0)
-    squeeze_fired = base.get("squeeze_fired", 0)
+    htf_ema50 = base.get("htf_ema50", px)
+    macro_long_ok = px > htf_ema50
+    macro_short_ok = px < htf_ema50
 
-    # We only care about placing Breakout (Stop-Market) orders when the market is tightly coiled.
-    # This guarantees we only enter if the momentum explosively confirms our direction.
-    if is_squeezed > 0 or squeeze_fired > 0:
+    if market_regime == "EXPANSION":
+        # Unlock SIGMA_CONTINUATION (Breakout of local structure)
+        if can_long and macro_long_ok and base.get("bos_up", 0) > 0:
+            entry_target = base.get("last_swing_high", px)
+            if px >= entry_target + current_atr * 0.1:
+                candidates.append({
+                    "strat": "SIGMA_CONTINUATION_LONG", "priority": 2.0, "side": "long",
+                    "entry": entry_target, "sl_dist_atr": 1.5, "risk_mult": 1.0, "type": "limit"
+                })
+        if can_short and macro_short_ok and base.get("bos_down", 0) > 0:
+            entry_target = base.get("last_swing_low", px)
+            if px <= entry_target - current_atr * 0.1:
+                candidates.append({
+                    "strat": "SIGMA_CONTINUATION_SHORT", "priority": 2.0, "side": "short",
+                    "entry": entry_target, "sl_dist_atr": 1.5, "risk_mult": 1.0, "type": "limit"
+                })
 
-        # Macro Momentum Alignment
-        htf_ema50 = base.get("htf_ema50", px)
-        macro_long_ok = px > htf_ema50
-        macro_short_ok = px < htf_ema50
+    elif market_regime == "RETRACEMENT":
+        # Unlock GAMMA_PULLBACK -> GOLDEN POCKET PULLBACK
+        # The Golden Pocket Shift: Institutional Reloads happen at 0.618 - 0.786 of the fresh impulse.
+        if can_long and macro_long_ok and (base.get("bos_up", 0) > 0 or base.get("choch_up", 0) > 0):
+            if mtf_sh > mtf_sl and mtf_sl > 0:
+                impulse_range = mtf_sh - mtf_sl
+                golden_pocket = mtf_sh - (impulse_range * 0.618)
+                if px >= golden_pocket + current_atr * 0.1:
+                    candidates.append({
+                        "strat": "GAMMA_PULLBACK_LONG", "priority": 2.5, "side": "long",
+                        "entry": golden_pocket, "sl_dist_atr": 1.5, "risk_mult": 1.25, "type": "limit"
+                    })
 
-        # PIVOT 2: Donchian Channel Breakouts
-        # We target the 20-period local consolidation boundaries.
-        dc_high = base.get("dc_high_20", px + current_atr)
-        dc_low = base.get("dc_low_20", px - current_atr)
+        if can_short and macro_short_ok and (base.get("bos_down", 0) > 0 or base.get("choch_down", 0) > 0):
+            if mtf_sh > mtf_sl and mtf_sh > 0:
+                impulse_range = mtf_sh - mtf_sl
+                golden_pocket = mtf_sl + (impulse_range * 0.618)
+                if px <= golden_pocket - current_atr * 0.1:
+                    candidates.append({
+                        "strat": "GAMMA_PULLBACK_SHORT", "priority": 2.5, "side": "short",
+                        "entry": golden_pocket, "sl_dist_atr": 1.5, "risk_mult": 1.25, "type": "limit"
+                    })
 
-        if can_long and macro_long_ok:
-            # We place a 'breakout' order at the exact local high.
-            # If price surges through it, we get filled with confirmed momentum.
-            candidates.append({
-                "strat": "DONCHIAN_BREAKOUT_LONG",
-                "priority": 3.0,
-                "side": "long",
-                "entry": dc_high,
-                "sl_override": dc_low, # PIVOT 2: Stop Loss is precisely the opposite side of the channel
-                "risk_mult": 1.0,
-                "type": "breakout"
-            })
+    elif market_regime == "CONSOLIDATION":
+        # Unlock OMEGA_RANGE
+        if can_long:
+            entry_target = base.get("bb_lower", px)
+            if px >= entry_target + current_atr * 0.1:
+                candidates.append({
+                    "strat": "OMEGA_RANGE_LONG", "priority": 1.0, "side": "long",
+                    "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.0, "type": "limit"
+                })
+        if can_short:
+            entry_target = base.get("bb_upper", px)
+            if px <= entry_target - current_atr * 0.1:
+                candidates.append({
+                    "strat": "OMEGA_RANGE_SHORT", "priority": 1.0, "side": "short",
+                    "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.0, "type": "limit"
+                })
 
-        if can_short and macro_short_ok:
-            candidates.append({
-                "strat": "DONCHIAN_BREAKOUT_SHORT",
-                "priority": 3.0,
-                "side": "short",
-                "entry": dc_low,
-                "sl_override": dc_high, # PIVOT 2: Stop Loss is precisely the opposite side of the channel
-                "risk_mult": 1.0,
-                "type": "breakout"
-            })
+    elif market_regime == "REVERSAL_WARNING":
+        # Unlock ZETA_LIQUIDITY_SWEEP
+        kc_upper = base.get("kc_upper", px)
+        kc_lower = base.get("kc_lower", px)
+        has_cvd_div_bull = base.get("cvd_div_bull", 0) > 0
+        has_cvd_div_bear = base.get("cvd_div_bear", 0) > 0
+
+        if can_long and has_cvd_div_bull and px < kc_lower:
+            entry_target = base.get("last_swing_low", px) - (current_atr * 0.75)
+            if px >= entry_target + current_atr * 0.1:
+                candidates.append({
+                    "strat": "ZETA_LIQUIDITY_SWEEP_LONG", "priority": 3.0, "side": "long",
+                    "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.5, "type": "limit"
+                })
+        if can_short and has_cvd_div_bear and px > kc_upper:
+            entry_target = base.get("last_swing_high", px) + (current_atr * 0.75)
+            if px <= entry_target - current_atr * 0.1:
+                candidates.append({
+                    "strat": "ZETA_LIQUIDITY_SWEEP_SHORT", "priority": 3.0, "side": "short",
+                    "entry": entry_target, "sl_dist_atr": 1.0, "risk_mult": 1.5, "type": "limit"
+                })
 
     # EVALUATE ALL CANDIDATES
     best_plan = None
@@ -1446,23 +1487,6 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         
         entry = cand['entry']
 
-        # PIVOT 3: The Order Flow "Fuel" Gate
-        # A breakout is mathematically vetoed if `rvol` (Relative Volume) is not surging,
-        # or if the order flow acceleration is opposing us.
-        # Since this is a Breakout order resting above the market, we must ensure
-        # the setup phase itself has volume accumulation.
-        rvol = base.get("rvol", 1.0)
-        cvd_accel = base.get("cvd_acceleration", 0.0)
-
-        # We need the fuel to be primed. If volume is dead during the squeeze, the breakout will fake out.
-        if rvol < 0.8:
-            continue
-
-        # We need the order flow to be leaning in our direction even before it breaks out.
-        if side == 'long' and cvd_accel < 0:
-            continue
-        if side == 'short' and cvd_accel > 0:
-            continue
 
         # DEFAULT BASELINE VARIABLES (If no brain is present)
         prob = 1.0
