@@ -768,6 +768,8 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
 
     f["is_squeezed"] = float(pl.is_squeezed[idx_L])
     f["squeeze_fired"] = float(pl.squeeze_fired[idx_L])
+    f["mtf_is_squeezed"] = float(pm.is_squeezed[idx_M])
+    f["mtf_squeeze_fired"] = float(pm.squeeze_fired[idx_M])
     f["cvd_div_bull"] = float(pl.cvd_div_bull[idx_L])
     f["cvd_div_bear"] = float(pl.cvd_div_bear[idx_L])
     f["cvd_roc"] = float(pl.cvd_roc[idx_L])
@@ -1406,32 +1408,35 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 })
 
     elif market_regime == "RETRACEMENT":
-        # Unlock GAMMA_PULLBACK
-        # UPGRADE 2: Structural Validation Requirement (BOS/ChoCh Gate)
-        # OB must be accompanied by a structural break
-        if can_long and macro_long_ok and (base.get("bos_up", 0) > 0 or base.get("choch_up", 0) > 0):
-            ob_bull = base.get("ob_bull_price", 0.0)
-            fvg_p = base.get("fvg_bull", 0)
-            fib_zone = base.get("fib_786_long", px)
-            bars_since = base.get("bars_since_ob_bull", 0)
-            if ob_bull > 0 and bars_since <= 20 and abs(ob_bull - mtf_sl) <= current_atr * 1.0:
-                if fvg_p > 0 and fvg_p >= ob_bull - current_atr * 0.5:
-                    if px >= ob_bull + current_atr * 0.1 and abs(ob_bull - fib_zone) < current_atr * 1.0:
+        # Unlock GAMMA_PULLBACK -> Converted to GOLDEN POCKET PULLBACK
+        # The Golden Pocket Shift: Institutional Reloads happen at 0.618 - 0.786 of the fresh impulse.
+        mtf_squeeze_fired = base.get("mtf_squeeze_fired", 0)
+        mtf_is_squeezed = base.get("mtf_is_squeezed", 0)
+
+        # MISSING EDGE 2: The HTF Volatility Squeeze (The Macro Engine)
+        # We only trade pullbacks if the macro timeframe is expanding (squeeze fired recently or is strictly expanding).
+        macro_expanding = (mtf_squeeze_fired > 0 or mtf_is_squeezed == 0)
+
+        if macro_expanding:
+            if can_long and macro_long_ok and (base.get("bos_up", 0) > 0 or base.get("choch_up", 0) > 0):
+                # Calculate Impulse range
+                if mtf_sh > mtf_sl and mtf_sl > 0:
+                    impulse_range = mtf_sh - mtf_sl
+                    golden_pocket = mtf_sh - (impulse_range * 0.618)
+                    if px >= golden_pocket + current_atr * 0.1:
                         candidates.append({
                             "strat": "GAMMA_PULLBACK_LONG", "priority": 2.5, "side": "long",
-                            "entry": ob_bull, "sl_dist_atr": 1.5, "risk_mult": 1.25, "type": "limit"
+                            "entry": golden_pocket, "sl_dist_atr": 1.5, "risk_mult": 1.25, "type": "limit"
                         })
-        if can_short and macro_short_ok and (base.get("bos_down", 0) > 0 or base.get("choch_down", 0) > 0):
-            ob_bear = base.get("ob_bear_price", 0.0)
-            fvg_p = base.get("fvg_bear", 0)
-            fib_zone = base.get("fib_786_short", px)
-            bars_since = base.get("bars_since_ob_bear", 0)
-            if ob_bear > 0 and bars_since <= 20 and abs(ob_bear - mtf_sh) <= current_atr * 1.0:
-                if fvg_p > 0 and fvg_p <= ob_bear + current_atr * 0.5:
-                    if px <= ob_bear - current_atr * 0.1 and abs(ob_bear - fib_zone) < current_atr * 1.0:
+
+            if can_short and macro_short_ok and (base.get("bos_down", 0) > 0 or base.get("choch_down", 0) > 0):
+                if mtf_sh > mtf_sl and mtf_sh > 0:
+                    impulse_range = mtf_sh - mtf_sl
+                    golden_pocket = mtf_sl + (impulse_range * 0.618)
+                    if px <= golden_pocket - current_atr * 0.1:
                         candidates.append({
                             "strat": "GAMMA_PULLBACK_SHORT", "priority": 2.5, "side": "short",
-                            "entry": ob_bear, "sl_dist_atr": 1.5, "risk_mult": 1.25, "type": "limit"
+                            "entry": golden_pocket, "sl_dist_atr": 1.5, "risk_mult": 1.25, "type": "limit"
                         })
 
     elif market_regime == "CONSOLIDATION":
@@ -1488,6 +1493,14 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         # UPGRADE 1: Abolish Artificial Offsets
         # Limit orders must sit exactly on the pure structural level to guarantee institutional support.
         # (Rubber Band offset logic completely removed).
+
+        # MISSING EDGE 3: CVD Exhaustion Delta (The Final Gate)
+        # If the market is approaching our limit order but sellers/buyers are accelerating, cancel it.
+        cvd_accel = base.get("cvd_acceleration", 0.0)
+        if side == 'long' and cvd_accel < 0:
+            continue  # Sellers are accelerating, cancel long limit
+        if side == 'short' and cvd_accel > 0:
+            continue  # Buyers are accelerating, cancel short limit
 
         # DEFAULT BASELINE VARIABLES (If no brain is present)
         prob = 1.0
