@@ -1563,93 +1563,43 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
             if side == 'short' and mtf_premium_discount < 0.20:
                 continue
 
-        # UPGRADE 4: Order Block First-Touch Exhaustion
-        if 'GAMMA' in cand['strat']:
-            if side == 'long':
-                bars_since = base.get("bars_since_ob_bull", 0)
-                if bars_since == 0:  # Mitigated or invalid
-                    continue
-            else:
-                bars_since = base.get("bars_since_ob_bear", 0)
-                if bars_since == 0:  # Mitigated or invalid
-                    continue
-
-        # UPGRADE 1: Liquidation Cascade Velocity Filter
+        # UPGRADE 1: Liquidation Cascade Velocity Filter (Only for Limits, Breakouts ride the cascade)
         # Do not catch a falling knife if it's crashing > 1.5 ATR per bar into our limit
         velocity_atr_3 = base.get("velocity_atr_3", 0.0)
-        if velocity_atr_3 > 1.5:
-            continue
+        if order_type == 'limit' and velocity_atr_3 > 1.5:
+            if cand['strat'] != 'PANIC_REVERSION_LONG' and cand['strat'] != 'PANIC_REVERSION_SHORT':
+                continue # We WANT high velocity for panic reversion, but reject for trend rides
 
         # ==========================================================
-        # THE PARADIGM SHIFT: STRUCTURAL RR VALIDATION
+        # MULTI-MODEL RISK & REWARD GEOMETRY
         # ==========================================================
-        # 1. Structural Stop Loss:
-        # If sl_override is provided (e.g. from Donchian Breakout logic), we strictly use it.
+
+        # 1. Stop Loss Assignment
         if 'sl_override' in cand:
             sl = cand['sl_override']
             # Sanity clamp to prevent mathematically impossible physics
             if side == 'long' and sl >= entry: sl = entry - (current_atr * 1.5)
             if side == 'short' and sl <= entry: sl = entry + (current_atr * 1.5)
         else:
-            # Fallback to the MTF logic
+            # Fallback to dynamic ATR distance provided by the model
+            sl_dist_atr = cand.get('sl_dist_atr', 1.5)
             if side == 'long':
-                if mtf_sl > 0 and mtf_sl < entry and (entry - mtf_sl) <= current_atr * 2.5:
-                    sl = mtf_sl - (current_atr * 0.1)
-                else:
-                    sl = base.get("last_swing_low", entry - current_atr) - (current_atr * 0.1)
-
-                if sl >= entry or (entry - sl) < (current_atr * 0.5):
-                    sl = entry - (current_atr * 1.5)
+                sl = entry - (current_atr * sl_dist_atr)
             else:
-                if mtf_sh > 0 and mtf_sh > entry and (mtf_sh - entry) <= current_atr * 2.5:
-                    sl = mtf_sh + (current_atr * 0.1)
-                else:
-                    sl = base.get("last_swing_high", entry + current_atr) + (current_atr * 0.1)
-
-                if sl <= entry or (sl - entry) < (current_atr * 0.5):
-                    sl = entry + (current_atr * 1.5)
+                sl = entry + (current_atr * sl_dist_atr)
 
         dynamic_risk = abs(entry - sl)
         if dynamic_risk < 1e-9: continue
 
-        # 2. Structural Take Profit: Opposing macro liquidity pool
-        # Removed asian_high / asian_low from TP targets to remove the Implied RR Chokehold.
+        # 2. Strict 1:3 Take Profit Lock
+        # Since these models are purely momentum/mean-reversion and not structural pullbacks,
+        # we lock the Take Profit to EXACTLY 3.0x the calculated risk distance.
+        implied_rr = 3.0
+
         if side == 'long':
-            ob_bear = base.get("ob_bear_price", 0.0)
-            targets = []
-            if mtf_sh > entry: targets.append(mtf_sh)
-            if ob_bear > entry: targets.append(ob_bear)
-
-            if targets:
-                tp = min(targets)
-            else:
-                tp = entry + (current_atr * 4.5) # Fallback
+            tp = entry + (3.0 * dynamic_risk)
         else:
-            ob_bull = base.get("ob_bull_price", 0.0)
-            targets = []
-            if mtf_sl > 0 and mtf_sl < entry: targets.append(mtf_sl)
-            if ob_bull > 0 and ob_bull < entry: targets.append(ob_bull)
-
-            if targets:
-                tp = max(targets)
-            else:
-                tp = entry - (current_atr * 4.5) # Fallback
-
-        # 3. The 1:3 Structural Gate with Probability Window
-        # Reject if the structural target does not even yield 2.4 RR.
-        # Cap greed exactly at 3.0 RR if the structural target is much higher.
-        structural_rr = abs(tp - entry) / dynamic_risk
-
-        if structural_rr < 2.4:
-            continue
-
-        implied_rr = structural_rr
-        if implied_rr > 3.0:
-            implied_rr = 3.0
-            if side == 'long':
-                tp = entry + (3.0 * dynamic_risk)
-            else:
-                tp = entry - (3.0 * dynamic_risk)
+            tp = entry - (3.0 * dynamic_risk)
 
         if score > best_score:
             best_score = score
