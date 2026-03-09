@@ -52,7 +52,7 @@ def fetch_macro_trend(ticker_symbol: str, ltf_timestamps: pd.Series) -> np.ndarr
         start_dt = pd.to_datetime(ltf_timestamps.iloc[0], unit='ms')
         end_dt = pd.to_datetime(ltf_timestamps.iloc[-1], unit='ms')
         start_dt_padded = start_dt - pd.Timedelta(days=30)
-        df = yf.download(ticker_symbol, start=start_dt_padded, end=end_dt, interval="1d", progress=False)
+        df = yf.download(ticker_symbol, start=start_dt_padded, end=end_dt, interval="1d", progress=False, auto_adjust=True)
         
         if df.empty: return np.zeros(len(ltf_timestamps))
         

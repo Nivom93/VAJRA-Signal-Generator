@@ -611,7 +611,7 @@ def _find_ob_zones_strict(o, c, h, l, bos_up, bos_dn):
 
     for i in range(2, n - 1):
         if bos_up[i] == 1 and bos_up[i-1] == 0:
-            for j in range(i-1, max(0, i-10), -1):
+            for j in range(i-1, max(0, i-50), -1):
                 if c[j] < o[j]: 
                     if j+1 < n:
                         body_ob = o[j] - c[j]; next_body = c[j+1] - o[j+1]
@@ -621,7 +621,7 @@ def _find_ob_zones_strict(o, c, h, l, bos_up, bos_dn):
                             bull_age = 0
                     break
         if bos_dn[i] == 1 and bos_dn[i-1] == 0:
-            for j in range(i-1, max(0, i-10), -1):
+            for j in range(i-1, max(0, i-50), -1):
                 if c[j] > o[j]: 
                     if j+1 < n:
                         body_ob = c[j] - o[j]; next_body = o[j+1] - c[j+1]
@@ -1420,97 +1420,128 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     candidates = []
 
     # ==========================================================
-    # THE ULTIMATE CRYPTO PIVOT PLAN (3-MODEL MATRIX)
+    # INSTITUTIONAL EXECUTION OVERHAUL (4-MODEL MATRIX)
     # ==========================================================
 
-    htf_ema50 = base.get("htf_ema50", px)
-    velocity_atr_3 = base.get("velocity_atr_3", 0.0)
+    market_regime = base.get("market_regime", "CONSOLIDATION")
 
     # ----------------------------------------------------------
-    # MODEL A: The Volatility Squeeze Breakout (The 1:3 Momentum Engine)
+    # MODEL A: Order Block Mitigation (SMC Sniper)
     # ----------------------------------------------------------
-    is_squeezed = base.get("is_squeezed", 0)
+    ob_bull = base.get("ob_bull_price", 0)
+    ob_bear = base.get("ob_bear_price", 0)
 
-    if is_squeezed > 0:
-        dc_high = base.get("dc_high_20", px + current_atr)
-        dc_low = base.get("dc_low_20", px - current_atr)
+    if can_long and ob_bull > 0 and px > ob_bull:
+        candidates.append({
+            "strat": "OB_MITIGATION_LONG",
+            "priority": 3.0,
+            "side": "long",
+            "entry": ob_bull,
+            "sl_override": ob_bull - (current_atr * 0.5),
+            "tp_override": ob_bear if ob_bear > ob_bull else ob_bull + (current_atr * 3.0),
+            "risk_mult": 1.0,
+            "type": "limit"
+        })
 
-        if can_long and px > htf_ema50:
+    if can_short and ob_bear > 0 and px < ob_bear:
+        candidates.append({
+            "strat": "OB_MITIGATION_SHORT",
+            "priority": 3.0,
+            "side": "short",
+            "entry": ob_bear,
+            "sl_override": ob_bear + (current_atr * 0.5),
+            "tp_override": ob_bull if (ob_bull > 0 and ob_bull < ob_bear) else ob_bear - (current_atr * 3.0),
+            "risk_mult": 1.0,
+            "type": "limit"
+        })
+
+    # ----------------------------------------------------------
+    # MODEL B: Liquidity Sweep Trap (Wyckoff Spring/Upthrust)
+    # ----------------------------------------------------------
+    asian_swept_dn = base.get("asian_range_swept_dn", 0)
+    asian_swept_up = base.get("asian_range_swept_up", 0)
+
+    if can_long and asian_swept_dn > 0 and base.get("cvd_div_bull", 0) > 0:
+        sweep_low = base.get("asian_low", px - current_atr)
+        candidates.append({
+            "strat": "LIQ_SWEEP_TRAP_LONG",
+            "priority": 3.5,
+            "side": "long",
+            "entry": px,  # Market execution on confirmation
+            "sl_override": sweep_low - (current_atr * 0.2),
+            "tp_override": base.get("asian_high", px + current_atr * 2),
+            "risk_mult": 1.5,
+            "type": "market"
+        })
+
+    if can_short and asian_swept_up > 0 and base.get("cvd_div_bear", 0) > 0:
+        sweep_high = base.get("asian_high", px + current_atr)
+        candidates.append({
+            "strat": "LIQ_SWEEP_TRAP_SHORT",
+            "priority": 3.5,
+            "side": "short",
+            "entry": px,
+            "sl_override": sweep_high + (current_atr * 0.2),
+            "tp_override": base.get("asian_low", px - current_atr * 2),
+            "risk_mult": 1.5,
+            "type": "market"
+        })
+
+    # ----------------------------------------------------------
+    # MODEL C: Value Area Fade (Auction Market Theory)
+    # ----------------------------------------------------------
+    if market_regime == "CONSOLIDATION":
+        if can_long and px < val:
             candidates.append({
-                "strat": "SQUEEZE_BREAKOUT_LONG",
-                "priority": 3.0,
-                "side": "long",
-                "entry": dc_high,
-                "sl_override": dc_low,
-                "risk_mult": 1.0,
-                "type": "breakout"
-            })
-
-        if can_short and px < htf_ema50:
-            candidates.append({
-                "strat": "SQUEEZE_BREAKOUT_SHORT",
-                "priority": 3.0,
-                "side": "short",
-                "entry": dc_low,
-                "sl_override": dc_high,
-                "risk_mult": 1.0,
-                "type": "breakout"
-            })
-
-    # ----------------------------------------------------------
-    # MODEL B: The V-Shape Mean Reversion (The Panic Buy/Sell)
-    # ----------------------------------------------------------
-    bb_lower_25 = base.get("bb_lower_25", px - current_atr * 2.5)
-    bb_upper_25 = base.get("bb_upper_25", px + current_atr * 2.5)
-
-    # We only fade extremes if velocity is insanely high (algorithmic cascade)
-    if velocity_atr_3 > 1.5:
-        if can_long and rsi < 30 and px < bb_lower_25:
-            candidates.append({
-                "strat": "PANIC_REVERSION_LONG",
+                "strat": "VA_FADE_LONG",
                 "priority": 2.5,
                 "side": "long",
-                "entry": bb_lower_25,
-                "sl_dist_atr": 1.0,
-                "risk_mult": 1.5,
-                "type": "limit"
-            })
-
-        if can_short and rsi > 70 and px > bb_upper_25:
-            candidates.append({
-                "strat": "PANIC_REVERSION_SHORT",
-                "priority": 2.5,
-                "side": "short",
-                "entry": bb_upper_25,
-                "sl_dist_atr": 1.0,
-                "risk_mult": 1.5,
-                "type": "limit"
-            })
-
-    # ----------------------------------------------------------
-    # MODEL C: The EMA20 Trend Continuation
-    # ----------------------------------------------------------
-    ema20 = adv.get('ema20_L', [px])[iL] if 'ema20_L' in adv else px
-
-    if adx_val > 35:
-        if can_long and px > htf_ema50 and px > ema20:
-            candidates.append({
-                "strat": "EMA_TREND_RIDE_LONG",
-                "priority": 2.0,
-                "side": "long",
-                "entry": ema20,
-                "sl_dist_atr": 1.5,
+                "entry": val,
+                "sl_override": val - current_atr,
+                "tp_override": poc,
                 "risk_mult": 1.0,
                 "type": "limit"
             })
 
-        if can_short and px < htf_ema50 and px < ema20:
+        if can_short and px > vah:
             candidates.append({
-                "strat": "EMA_TREND_RIDE_SHORT",
+                "strat": "VA_FADE_SHORT",
+                "priority": 2.5,
+                "side": "short",
+                "entry": vah,
+                "sl_override": vah + current_atr,
+                "tp_override": poc,
+                "risk_mult": 1.0,
+                "type": "limit"
+            })
+
+    # ----------------------------------------------------------
+    # MODEL D: Deep Fibonacci (Golden Pocket Retracement)
+    # ----------------------------------------------------------
+    fib_786_long = base.get("fib_786_long", px - current_atr)
+    fib_786_short = base.get("fib_786_short", px + current_atr)
+
+    if market_regime == "EXPANSION":
+        if can_long and px > fib_786_long:
+            candidates.append({
+                "strat": "DEEP_FIB_LONG",
+                "priority": 2.0,
+                "side": "long",
+                "entry": fib_786_long,
+                "sl_override": base.get("last_swing_low", fib_786_long - current_atr) - (current_atr * 0.2),
+                "tp_override": base.get("last_swing_high", px + current_atr * 2),
+                "risk_mult": 1.0,
+                "type": "limit"
+            })
+
+        if can_short and px < fib_786_short:
+            candidates.append({
+                "strat": "DEEP_FIB_SHORT",
                 "priority": 2.0,
                 "side": "short",
-                "entry": ema20,
-                "sl_dist_atr": 1.5,
+                "entry": fib_786_short,
+                "sl_override": base.get("last_swing_high", fib_786_short + current_atr) + (current_atr * 0.2),
+                "tp_override": base.get("last_swing_low", px - current_atr * 2),
                 "risk_mult": 1.0,
                 "type": "limit"
             })
@@ -1604,32 +1635,35 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         dynamic_risk = abs(entry - sl)
         if dynamic_risk < 1e-9: continue
 
-        # 2. Strict 1:3 Take Profit Lock
-        # Since these models are purely momentum/mean-reversion and not structural pullbacks,
-        # we lock the Take Profit to EXACTLY 3.0x the calculated risk distance.
-        implied_rr = 3.0
-
-        if side == 'long':
-            tp = entry + (3.0 * dynamic_risk)
+        # 2. Dynamic Structural Take Profit
+        if 'tp_override' in cand:
+            tp = cand['tp_override']
+            if side == 'long' and tp <= entry: tp = entry + (3.0 * dynamic_risk)
+            if side == 'short' and tp >= entry: tp = entry - (3.0 * dynamic_risk)
         else:
-            tp = entry - (3.0 * dynamic_risk)
+            if side == 'long': tp = entry + (3.0 * dynamic_risk)
+            else: tp = entry - (3.0 * dynamic_risk)
+
+        reward = abs(tp - entry)
+        implied_rr = reward / dynamic_risk
+
+        if implied_rr < max(cfg.min_rr, 2.4):
+            continue
 
         if score > best_score:
             best_score = score
-            
-            if implied_rr >= cfg.min_rr:
-                best_plan = {
-                    "side": side,
-                    "entry": entry,
-                    "sl": sl,
-                    "tp": tp,
-                    "rr": implied_rr,
-                    "prob": prob,
-                    "key": f"{cand['strat']}_{side}",
-                    "features": base,
-                    "risk_factor": risk_factor,
-                    "strategy": cand['strat'],
-                    "type": order_type
-                }
+            best_plan = {
+                "side": side,
+                "entry": entry,
+                "sl": sl,
+                "tp": tp,
+                "rr": implied_rr,
+                "prob": prob,
+                "key": f"{cand['strat']}_{side}",
+                "features": base,
+                "risk_factor": risk_factor,
+                "strategy": cand['strat'],
+                "type": order_type
+            }
 
     return best_plan
