@@ -110,43 +110,9 @@ class RealExecutionManager:
         
         # --- PAPER MODE ---
         if is_paper:
-            log.info(f"📝 SIMULATION: Signal @ {price:.2f}. Mode: {plan_type.upper()} | RVOL: {rvol:.2f}")
-            
-            curr_px = self.get_best_book_price(symbol, c_side) or price
-            
-            # QUADRATIC SLIPPAGE (Protocol v34.0)
-            penalty_pct = 0.0001 * (rvol ** 2)
-            if rvol > 5.0 and side == 'short':
-                penalty_pct *= 1.5
-            
-            impact = price * penalty_pct
-            
-            # Worsen the price
-            if side == 'long': curr_px += impact
-            else: curr_px -= impact
-            
-            if impact > 0:
-                log.warning(f"📉 Quadratic Impact! RVOL {rvol:.1f} caused {impact:.2f} ({penalty_pct*100:.3f}%) slippage.")
-
-            if plan_type == 'market':
-                log.info(f"📝 SIMULATION: Market Order Filled Instantly @ {curr_px:.2f} (Incl. Impact)")
-                return curr_px
-            elif plan_type == 'breakout':
-                # Long: Enter if Price >= Trigger. Short: Enter if Price <= Trigger
-                triggered = (c_side == 'buy' and curr_px >= price) or (c_side == 'sell' and curr_px <= price)
-                
-                if not triggered:
-                    log.warning(f"📝 SIMULATION: Breakout Trigger {price} not hit (Curr: {curr_px}). Order Pending/Skipped.")
-                    return None 
-                else:
-                    log.info(f"📝 SIMULATION: Breakout Triggered! Filling at {curr_px:.2f} (Incl. Impact)")
-                    return curr_px
-            
-            # Standard Limit Logic
-            time.sleep(self.wait_time) 
-            final_px = price + impact if side == 'long' else price - impact
-            log.info(f"📝 SIMULATION: Order Filled @ {final_px:.2f}")
-            return final_px
+            if plan_type == 'limit':
+                return price
+            return self.get_best_book_price(symbol, c_side) or price
 
         # --- REAL EXECUTION ---
         log.info(f"⚡ REAL EXECUTION: {c_side.upper()} {qty:.4f} {symbol}...")
@@ -498,7 +464,7 @@ def run_bot(args):
                 curr_bar = {"o":ltf.open.iloc[-2], "h":ltf.high.iloc[-2], "l":ltf.low.iloc[-2], "c":ltf.close.iloc[-2]}
                 
                 # Step 1: Manage Existing
-                closed = tm.step_bar(curr_bar["o"], curr_bar["h"], curr_bar["l"], curr_bar["c"], ts=int(ltf.timestamp.iloc[-2]))
+                closed = tm.step_bar(symbol, curr_bar["o"], curr_bar["h"], curr_bar["l"], curr_bar["c"], ts=int(ltf.timestamp.iloc[-2]))
                 if closed:
                     for t in closed:
                         log.info(f"[{symbol}] ⛔ Trade Closed: {t['side']} PnL: {t['pnl_r']:.2f}R")

@@ -246,7 +246,7 @@ def run_backtest(args, preloaded: Optional[Preloaded]=None, markets_data=None):
         while iM+1 < len(mtf) and int(mtf["timestamp"].iloc[iM+1]) <= ts: iM += 1
         iL = int(ltf.index.get_loc(rowL.name))
 
-        closed = tm.step_bar(float(rowL["open"]), float(rowL["high"]), float(rowL["low"]), float(rowL["close"]), ts=ts)
+        closed = tm.step_bar(cfg.symbol, float(rowL["open"]), float(rowL["high"]), float(rowL["low"]), float(rowL["close"]), ts=ts)
         if closed: all_closed.extend(closed)
 
         # Inject BTC Context & Orderbook Stub

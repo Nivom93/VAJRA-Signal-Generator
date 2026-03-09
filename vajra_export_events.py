@@ -209,7 +209,7 @@ def main():
         if iH < 0 or iM < 0: continue
 
         bar = {"o": row["open"], "h": row["high"], "l": row["low"], "c": row["close"]}
-        exits = tm.step_bar(bar["o"], bar["h"], bar["l"], bar["c"])
+        exits = tm.step_bar(cfg.symbol, bar["o"], bar["h"], bar["l"], bar["c"], ts=ts)
         
         for cl in exits:
             meta = next((m for m in open_meta if m["key"] == cl.get("key")), None)

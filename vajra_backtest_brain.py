@@ -112,7 +112,7 @@ def run_backtest_with_brain(args, preloaded=None):
         if iH < 0 or iM < 0: continue
 
         bar = {"o": row["open"], "h": row["high"], "l": row["low"], "c": row["close"]}
-        closed = tm.step_bar(float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]), ts=ts)
+        closed = tm.step_bar(cfg.symbol, float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]), ts=ts)
         all_closed.extend(closed)
 
         # Inject Context (Regime Filter & Macro)

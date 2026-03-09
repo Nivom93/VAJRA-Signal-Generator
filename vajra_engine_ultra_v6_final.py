@@ -1078,9 +1078,7 @@ class BrainLearningManager:
             vec = self._build_vec(side, base, adv, iL, iM, px, pre_l, b['feature_names'])
             # CRITICAL FIX: Clip all array values before casting to prevent float32 memory overflow
             vec = np.clip(np.nan_to_num(vec, nan=0.0), -1e10, 1e10).astype(np.float32)
-            if 'imputer' in b: vec = b['imputer'].transform(vec)
-            vec_s = b['scaler'].transform(vec)
-            p = b['classifier'].predict_proba(vec_s)[0][1]
+            p = b['classifier'].predict_proba(vec)[0][1]
             return 1.0-p if b.get('invert_prob') else p
         except: return 0.0
 
@@ -1110,7 +1108,8 @@ class TradeManager:
         self.open_trades = []
         self.pending_orders = []
         self.last_signal_time = {}
-        self.current_bar_index = 0
+        self.current_bar_index = {}
+        self.last_processed_ts = {}
 
     def can_open(self, side):
         total_active = len(self.open_trades) + len(self.pending_orders)
@@ -1126,10 +1125,11 @@ class TradeManager:
         last_signal = self.last_signal_time.get(signal_key, -999)
 
         # Reject identical signals for the next 10 bars
-        if self.current_bar_index - last_signal < 10:
+        curr_idx = self.current_bar_index.get(symbol, 0)
+        if curr_idx - last_signal < 10:
             return None
 
-        self.last_signal_time[signal_key] = self.current_bar_index
+        self.last_signal_time[signal_key] = curr_idx
 
         adx = plan.get('features', {}).get('adx', 25.0)
         ttl = 12 
@@ -1150,8 +1150,11 @@ class TradeManager:
         self.mem.record_signal(order)
         return order
 
-    def step_bar(self, o, h, l, c, ts=None, swing_high=0.0, swing_low=0.0):
-        self.current_bar_index += 1
+    def step_bar(self, symbol, o, h, l, c, ts=None, swing_high=0.0, swing_low=0.0):
+        if ts is not None and ts == self.last_processed_ts.get(symbol): return []
+        self.last_processed_ts[symbol] = ts
+        self.current_bar_index[symbol] = self.current_bar_index.get(symbol, 0) + 1
+
         closed = []
         still_open = []
         still_pending = []
@@ -1436,24 +1439,26 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     ob_bear = base.get("ob_bear_price", 0)
 
     if can_long and ob_bull > 0 and px > ob_bull:
+        ob_bull_bot = base.get("ob_bull_bot", ob_bull) # Assuming we can fall back to ob_bull if bot isn't provided
         candidates.append({
             "strat": "OB_MITIGATION_LONG",
             "priority": 3.0,
             "side": "long",
             "entry": ob_bull,
-            "sl_override": ob_bull - (current_atr * 0.5),
+            "sl_override": min(ob_bull_bot - (0.2 * current_atr), ob_bull - (0.5 * current_atr)),
             "tp_override": ob_bear if ob_bear > ob_bull else ob_bull + (current_atr * 3.0),
             "risk_mult": 1.0,
             "type": "limit"
         })
 
     if can_short and ob_bear > 0 and px < ob_bear:
+        ob_bear_top = base.get("ob_bear_top", ob_bear)
         candidates.append({
             "strat": "OB_MITIGATION_SHORT",
             "priority": 3.0,
             "side": "short",
             "entry": ob_bear,
-            "sl_override": ob_bear + (current_atr * 0.5),
+            "sl_override": max(ob_bear_top + (0.2 * current_atr), ob_bear + (0.5 * current_atr)),
             "tp_override": ob_bull if (ob_bull > 0 and ob_bull < ob_bear) else ob_bear - (current_atr * 3.0),
             "risk_mult": 1.0,
             "type": "limit"
@@ -1532,7 +1537,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 "priority": 2.0,
                 "side": "long",
                 "entry": fib_786_long,
-                "sl_override": base.get("last_swing_low", fib_786_long - current_atr) - (current_atr * 0.2),
+                "sl_override": min(base.get("last_swing_low", fib_786_long - current_atr) - (current_atr * 0.2), fib_786_long - (0.5 * current_atr)),
                 "tp_override": base.get("last_swing_high", px + current_atr * 2),
                 "risk_mult": 1.0,
                 "type": "limit"
@@ -1544,7 +1549,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 "priority": 2.0,
                 "side": "short",
                 "entry": fib_786_short,
-                "sl_override": base.get("last_swing_high", fib_786_short + current_atr) + (current_atr * 0.2),
+                "sl_override": max(base.get("last_swing_high", fib_786_short + current_atr) + (current_atr * 0.2), fib_786_short + (0.5 * current_atr)),
                 "tp_override": base.get("last_swing_low", px - current_atr * 2),
                 "risk_mult": 1.0,
                 "type": "limit"
@@ -1651,7 +1656,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         reward = abs(tp - entry)
         implied_rr = reward / dynamic_risk
 
-        if implied_rr < max(cfg.min_rr, 2.4):
+        if implied_rr < cfg.min_rr:
             continue
 
         if score > best_score:
