@@ -613,22 +613,22 @@ def _find_ob_zones_strict(o, c, h, l, bos_up, bos_dn):
         if bos_up[i] == 1 and bos_up[i-1] == 0:
             for j in range(i-1, max(0, i-50), -1):
                 if c[j] < o[j]: 
-                    if j+1 < n:
-                        body_ob = o[j] - c[j]; next_body = c[j+1] - o[j+1]
-                        if c[j+1] > o[j+1] and next_body > 1.5 * body_ob:
-                            lbu_top = float(h[j])
-                            lbu_bot = float(l[j])
-                            bull_age = 0
+                    push = c[min(j+3, i)] - c[j]
+                    body_ob = o[j] - c[j]
+                    if push > 1.5 * body_ob:
+                        lbu_top = float(h[j])
+                        lbu_bot = float(l[j])
+                        bull_age = 0
                     break
         if bos_dn[i] == 1 and bos_dn[i-1] == 0:
             for j in range(i-1, max(0, i-50), -1):
                 if c[j] > o[j]: 
-                    if j+1 < n:
-                        body_ob = c[j] - o[j]; next_body = o[j+1] - c[j+1]
-                        if c[j+1] < o[j+1] and next_body > 1.5 * body_ob:
-                            lbe_bot = float(l[j])
-                            lbe_top = float(h[j])
-                            bear_age = 0
+                    push = c[j] - c[min(j+3, i)]
+                    body_ob = c[j] - o[j]
+                    if push > 1.5 * body_ob:
+                        lbe_bot = float(l[j])
+                        lbe_top = float(h[j])
+                        bear_age = 0
                     break
 
         if lbu_top > 0: bull_age += 1
@@ -1120,8 +1120,9 @@ class TradeManager:
     def submit_plan(self, plan, bar):
         if not plan or not self.can_open(plan['side']): return None
         
-        # Signal cooldown to prevent trade stacking
-        signal_key = f"{plan.get('strat', plan.get('strategy', 'unknown'))}_{plan['side']}"
+        # Signal cooldown to prevent trade stacking isolated by symbol
+        symbol = plan.get('features', {}).get('symbol', 'UNKNOWN')
+        signal_key = f"{symbol}_{plan.get('strat', plan.get('strategy', 'unknown'))}_{plan['side']}"
         last_signal = self.last_signal_time.get(signal_key, -999)
 
         # Reject identical signals for the next 10 bars
@@ -1184,7 +1185,10 @@ class TradeManager:
                     if h >= entry_target:
                         triggered = True
                         fill_px = max(o, entry_target)
-            else:
+            elif order_type == 'market':
+                triggered = True
+                fill_px = o
+            else: # breakout
                 if side == 'long':
                     if h >= entry_target:
                         triggered = True
@@ -1522,7 +1526,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     fib_786_short = base.get("fib_786_short", px + current_atr)
 
     if market_regime == "EXPANSION":
-        if can_long and px > fib_786_long:
+        if can_long and px >= fib_786_long:
             candidates.append({
                 "strat": "DEEP_FIB_LONG",
                 "priority": 2.0,
@@ -1534,7 +1538,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 "type": "limit"
             })
 
-        if can_short and px < fib_786_short:
+        if can_short and px <= fib_786_short:
             candidates.append({
                 "strat": "DEEP_FIB_SHORT",
                 "priority": 2.0,

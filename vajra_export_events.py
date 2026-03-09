@@ -215,8 +215,8 @@ def main():
             meta = next((m for m in open_meta if m["key"] == cl.get("key")), None)
             if meta:
                 open_meta.remove(meta)
-                # PURE SIGNAL EDGE: 1.0 strictly if it hits structural TP or achieves pnl_r >= 2.5 without BE contamination
-                meta_label = 1.0 if cl.get("exit_reason") == "tp" or cl.get("pnl_r", 0) >= 2.5 else 0.0
+                # PURE SIGNAL EDGE: 1.0 strictly if it hits structural TP.
+                meta_label = 1.0 if cl.get("exit_reason") == "tp" else 0.0
                 
                 if -50 < cl["pnl_r"] < 50:
                     events.append({

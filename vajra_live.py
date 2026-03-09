@@ -348,7 +348,7 @@ def run_bot(args):
             try:
                 # 1. BTC Context
                 new_btc_4h = ex.fetch_ohlcv_df("BTC/USDT", "4h", limit=5)
-                global_cache["btc_4h"] = pd.concat([global_cache["btc_4h"], new_btc_4h]).drop_duplicates(subset=["timestamp"], keep="last").tail(1000).reset_index(drop=True)
+                global_cache["btc_4h"] = pd.concat([global_cache["btc_4h"], new_btc_4h]).drop_duplicates(subset=["timestamp"], keep="last").tail(1000).reset_index(drop=True).copy()
                 btc_ohlcv = global_cache["btc_4h"]
                 
                 if not btc_ohlcv.empty:
@@ -361,7 +361,7 @@ def run_bot(args):
 
                 # 2. BTC LTF Context (For relative strength syncing)
                 new_btc_ltf = ex.fetch_ohlcv_df("BTC/USDT", cfg.ltf, limit=5)
-                global_cache["btc_ltf"] = pd.concat([global_cache["btc_ltf"], new_btc_ltf]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True)
+                global_cache["btc_ltf"] = pd.concat([global_cache["btc_ltf"], new_btc_ltf]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True).copy()
                 btc_ltf = global_cache["btc_ltf"]
 
                 # 3. BTC DOMINANCE CONTEXT
@@ -369,9 +369,9 @@ def run_bot(args):
                     new_btcd = ex.fetch_ohlcv_df("BTCDOM/USDT", "4h", limit=5)
                     if not new_btcd.empty:
                         if global_cache["btcd_4h"].empty:
-                            global_cache["btcd_4h"] = new_btcd
+                            global_cache["btcd_4h"] = new_btcd.copy()
                         else:
-                            global_cache["btcd_4h"] = pd.concat([global_cache["btcd_4h"], new_btcd]).drop_duplicates(subset=["timestamp"], keep="last").tail(50).reset_index(drop=True)
+                            global_cache["btcd_4h"] = pd.concat([global_cache["btcd_4h"], new_btcd]).drop_duplicates(subset=["timestamp"], keep="last").tail(50).reset_index(drop=True).copy()
                     btcd_df = global_cache["btcd_4h"]
                 except:
                     btcd_df = pd.DataFrame()
@@ -393,8 +393,8 @@ def run_bot(args):
                         import yfinance as yf
                         dxy_c = yf.Ticker("DX-Y.NYB").history(period="5d")['Close']
                         spx_c = yf.Ticker("^GSPC").history(period="5d")['Close']
-                        dxy_val = float(dxy_c.iloc[-1]) if not dxy_c.empty else 0.0
-                        spx_val = float(spx_c.iloc[-1]) if not spx_c.empty else 0.0
+                        dxy_val = float(dxy_c.iloc[-2]) if len(dxy_c) > 1 else 0.0
+                        spx_val = float(spx_c.iloc[-2]) if len(spx_c) > 1 else 0.0
                     except: pass
 
             except Exception as e:
@@ -432,15 +432,15 @@ def run_bot(args):
 
                 # Fetch incremental update and apply to cache (Protect Rate Limits)
                 new_htf = ex.fetch_ohlcv_df(symbol, cfg.htf, limit=5)
-                market_cache[symbol]["htf"] = pd.concat([market_cache[symbol]["htf"], new_htf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
+                market_cache[symbol]["htf"] = pd.concat([market_cache[symbol]["htf"], new_htf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True).copy()
                 htf = market_cache[symbol]["htf"]
                 
                 new_mtf = ex.fetch_ohlcv_df(symbol, cfg.mtf, limit=5)
-                market_cache[symbol]["mtf"] = pd.concat([market_cache[symbol]["mtf"], new_mtf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
+                market_cache[symbol]["mtf"] = pd.concat([market_cache[symbol]["mtf"], new_mtf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True).copy()
                 mtf = market_cache[symbol]["mtf"]
 
                 new_ltf = ex.fetch_ohlcv_df(symbol, cfg.ltf, limit=5)
-                market_cache[symbol]["ltf"] = pd.concat([market_cache[symbol]["ltf"], new_ltf]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True)
+                market_cache[symbol]["ltf"] = pd.concat([market_cache[symbol]["ltf"], new_ltf]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True).copy()
                 ltf = market_cache[symbol]["ltf"]
                 
                 if ltf.empty or len(htf) < 2 or len(mtf) < 2 or len(ltf) < 2: continue
@@ -490,9 +490,10 @@ def run_bot(args):
                 }
                 
                 # PHASE 1: PREVENT FEATURE REPAINTING (Strict evaluation on fully closed candle)
-                iH, iM, iL = len(htf)-2, len(mtf)-2, len(ltf)-2
+                iH, iM, iL = len(htf)-1, len(mtf)-1, len(ltf)-2
                 base = confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, pre_map, extras=extras)
                 base["timestamp"] = ltf.timestamp.iloc[-2]
+                base["symbol"] = symbol
                 
                 curr_bar = {"o":ltf.open.iloc[-2], "h":ltf.high.iloc[-2], "l":ltf.low.iloc[-2], "c":ltf.close.iloc[-2]}
                 
