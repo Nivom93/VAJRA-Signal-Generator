@@ -1407,49 +1407,100 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     candidates = []
 
     # ==========================================================
-    # PIVOT: THE "FAILED BREAKOUT" (DEVIATION) MATRIX
+    # THE ULTIMATE CRYPTO PIVOT PLAN (3-MODEL MATRIX)
     # ==========================================================
-    # Abandoning limit pullbacks inside trends (which act as falling knives).
-    # Exclusively trading Spring/Upthrust Liquidity Traps with True CVD Divergence.
 
-    dc_high = base.get("dc_high_20", px + current_atr)
-    dc_low = base.get("dc_low_20", px - current_atr)
+    htf_ema50 = base.get("htf_ema50", px)
+    velocity_atr_3 = base.get("velocity_atr_3", 0.0)
 
-    has_cvd_div_bull = base.get("cvd_div_bull", 0) > 0
-    has_cvd_div_bear = base.get("cvd_div_bear", 0) > 0
+    # ----------------------------------------------------------
+    # MODEL A: The Volatility Squeeze Breakout (The 1:3 Momentum Engine)
+    # ----------------------------------------------------------
+    is_squeezed = base.get("is_squeezed", 0)
 
-    # WYCKOFF SPRING (Long Liquidity Trap)
-    # Price breaks below the 20-period range, traps shorts, and CVD mathematically diverges (buyers absorbing).
-    # We place a limit order exactly at the local swing low (the trap boundary) to catch it coming back inside.
-    if can_long and has_cvd_div_bull:
-        entry_target = base.get("last_swing_low", px)
-        # Ensure we are actually taking a trap trade near the bottom of the range
-        if entry_target <= dc_low + (current_atr * 0.5):
-            if px >= entry_target + current_atr * 0.1:
-                candidates.append({
-                    "strat": "WYCKOFF_SPRING_LONG",
-                    "priority": 3.0,
-                    "side": "long",
-                    "entry": entry_target,
-                    "sl_dist_atr": 1.0, # Will be clamped dynamically if structure demands it
-                    "risk_mult": 1.5,
-                    "type": "limit"
-                })
+    if is_squeezed > 0:
+        dc_high = base.get("dc_high_20", px + current_atr)
+        dc_low = base.get("dc_low_20", px - current_atr)
 
-    # WYCKOFF UPTHRUST (Short Liquidity Trap)
-    if can_short and has_cvd_div_bear:
-        entry_target = base.get("last_swing_high", px)
-        if entry_target >= dc_high - (current_atr * 0.5):
-            if px <= entry_target - current_atr * 0.1:
-                candidates.append({
-                    "strat": "WYCKOFF_UPTHRUST_SHORT",
-                    "priority": 3.0,
-                    "side": "short",
-                    "entry": entry_target,
-                    "sl_dist_atr": 1.0,
-                    "risk_mult": 1.5,
-                    "type": "limit"
-                })
+        if can_long and px > htf_ema50:
+            candidates.append({
+                "strat": "SQUEEZE_BREAKOUT_LONG",
+                "priority": 3.0,
+                "side": "long",
+                "entry": dc_high,
+                "sl_override": dc_low,
+                "risk_mult": 1.0,
+                "type": "breakout"
+            })
+
+        if can_short and px < htf_ema50:
+            candidates.append({
+                "strat": "SQUEEZE_BREAKOUT_SHORT",
+                "priority": 3.0,
+                "side": "short",
+                "entry": dc_low,
+                "sl_override": dc_high,
+                "risk_mult": 1.0,
+                "type": "breakout"
+            })
+
+    # ----------------------------------------------------------
+    # MODEL B: The V-Shape Mean Reversion (The Panic Buy/Sell)
+    # ----------------------------------------------------------
+    bb_lower_25 = base.get("bb_lower_25", px - current_atr * 2.5)
+    bb_upper_25 = base.get("bb_upper_25", px + current_atr * 2.5)
+
+    # We only fade extremes if velocity is insanely high (algorithmic cascade)
+    if velocity_atr_3 > 1.5:
+        if can_long and rsi < 30 and px < bb_lower_25:
+            candidates.append({
+                "strat": "PANIC_REVERSION_LONG",
+                "priority": 2.5,
+                "side": "long",
+                "entry": bb_lower_25,
+                "sl_dist_atr": 1.0,
+                "risk_mult": 1.5,
+                "type": "limit"
+            })
+
+        if can_short and rsi > 70 and px > bb_upper_25:
+            candidates.append({
+                "strat": "PANIC_REVERSION_SHORT",
+                "priority": 2.5,
+                "side": "short",
+                "entry": bb_upper_25,
+                "sl_dist_atr": 1.0,
+                "risk_mult": 1.5,
+                "type": "limit"
+            })
+
+    # ----------------------------------------------------------
+    # MODEL C: The EMA20 Trend Continuation
+    # ----------------------------------------------------------
+    ema20 = adv.get('ema20_L', [px])[iL] if 'ema20_L' in adv else px
+
+    if adx_val > 35:
+        if can_long and px > htf_ema50 and px > ema20:
+            candidates.append({
+                "strat": "EMA_TREND_RIDE_LONG",
+                "priority": 2.0,
+                "side": "long",
+                "entry": ema20,
+                "sl_dist_atr": 1.5,
+                "risk_mult": 1.0,
+                "type": "limit"
+            })
+
+        if can_short and px < htf_ema50 and px < ema20:
+            candidates.append({
+                "strat": "EMA_TREND_RIDE_SHORT",
+                "priority": 2.0,
+                "side": "short",
+                "entry": ema20,
+                "sl_dist_atr": 1.5,
+                "risk_mult": 1.0,
+                "type": "limit"
+            })
 
     # EVALUATE ALL CANDIDATES
     best_plan = None
