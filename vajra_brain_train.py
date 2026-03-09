@@ -58,6 +58,7 @@ def is_feature_column(df: pd.DataFrame, col: str, extra_exclude: Set[str]) -> bo
         # --- ABSOLUTE PRICES (Forces AI to memorize the year) ---
         "last_swing_high", "last_swing_low", "ob_bull_price", "ob_bear_price",
         "avwap_bull", "avwap_bear", "poc", "vah", "val", "asian_high", "asian_low",
+        "dc_high_20", "dc_low_20",
         "htf_swing_high", "htf_swing_low", "mtf_swing_high", "mtf_swing_low",
         "ema20_L", "ema50_L", "ema100_L", "mtf_ema200_arr", "bb_upper", "bb_lower",
         "kc_upper", "kc_lower", "kalman_price", 
@@ -77,13 +78,14 @@ def _enforce_causality_drop(df: pd.DataFrame, lookahead: int = 5) -> pd.DataFram
     if len(df) > lookahead: return df.iloc[:-lookahead]
     return df
 
-def _calculate_recency_and_pnl_weights(df: pd.DataFrame, decay: float = 0.999) -> np.ndarray:
+def _calculate_recency_and_pnl_weights(df: pd.DataFrame) -> np.ndarray:
     n = len(df)
-    indices = np.arange(n)[::-1] 
-    recency = np.power(decay, indices)
     pnl_weights = np.clip(np.abs(df['pnl_r'].values), 0, 5)
-    weights = recency * pnl_weights
-    weights = weights * (n / weights.sum())
+    weights = pnl_weights
+    if weights.sum() > 0:
+        weights = weights * (n / weights.sum())
+    else:
+        weights = np.ones(n)
     return weights
 
 def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_exclude: Set[str]) -> Tuple[pd.DataFrame, List[str]]:
@@ -170,8 +172,8 @@ def main(argv=None):
     X_all = df[feature_names].values
     y_all = df["label"].values
     
-    sample_weights = _calculate_recency_and_pnl_weights(df, decay=args.weight_decay)
-    log.info(f"Applying Recency & PnL Weights (Decay={args.weight_decay}). Head (Old)={sample_weights[0]:.4f}, Tail (New)={sample_weights[-1]:.4f}")
+    sample_weights = _calculate_recency_and_pnl_weights(df)
+    log.info(f"Applying PnL Weights. Head (Old)={sample_weights[0]:.4f}, Tail (New)={sample_weights[-1]:.4f}")
 
     X_all = _sanitize_data(X_all)
 
@@ -245,7 +247,7 @@ def main(argv=None):
     avg_brier = np.mean(brier_scores)
     log.info(f"✅ WFA RESULTS: Avg AUC = {avg_auc:.4f} | Avg Brier = {avg_brier:.4f}")
 
-    log.info("Training Final Production Model on FULL DATASET (Weighted)...")
+    log.info("Feature Pruning: Evaluating feature importance...")
     
     imputer = SimpleImputer(strategy='median')
     scaler = RobustScaler()
@@ -255,6 +257,36 @@ def main(argv=None):
     num_pos_all = int(np.sum(y_all.astype(int)))
     num_neg_all = int(len(y_all)) - num_pos_all
     spw_all = min(num_neg_all / max(num_pos_all, 1), 5.0)
+
+    feature_eval_model = xgb.XGBClassifier(
+        n_estimators=args.n_estimators,
+        learning_rate=0.02,
+        max_depth=3,
+        reg_alpha=args.reg_alpha,
+        reg_lambda=args.reg_lambda,
+        colsample_bytree=0.7,
+        subsample=0.8,
+        scale_pos_weight=spw_all,
+        random_state=42,
+        eval_metric='logloss'
+    )
+    feature_eval_model.fit(X_all_s, y_all, sample_weight=sample_weights)
+
+    importances = feature_eval_model.feature_importances_
+
+    # Select top 30 features
+    num_top_features = min(30, len(feature_names))
+    top_indices = np.argsort(importances)[::-1][:num_top_features]
+
+    top_feature_names = [feature_names[i] for i in top_indices]
+    log.info(f"Selected Top {num_top_features} Features: {top_feature_names}")
+
+    # Re-train final model using only top features
+    X_top = X_all[:, top_indices]
+
+    imputer_final = SimpleImputer(strategy='median')
+    scaler_final = RobustScaler()
+    X_top_s = scaler_final.fit_transform(imputer_final.fit_transform(X_top))
 
     final_base = xgb.XGBClassifier(
         n_estimators=args.n_estimators,
@@ -271,19 +303,20 @@ def main(argv=None):
         
     final_model = final_base
     
+    log.info("Training Final Production Model on FULL DATASET (Weighted) with Top Features...")
     if args.calibrate:
         final_cal = CalibratedClassifierCV(final_base, method='isotonic', cv=5)
-        try: final_cal.fit(X_all_s, y_all, sample_weight=sample_weights)
-        except: final_cal.fit(X_all_s, y_all)
+        try: final_cal.fit(X_top_s, y_all, sample_weight=sample_weights)
+        except: final_cal.fit(X_top_s, y_all)
         final_model = final_cal
     else:
-        final_model.fit(X_all_s, y_all, sample_weight=sample_weights)
+        final_model.fit(X_top_s, y_all, sample_weight=sample_weights)
 
     pipeline = {
-        "imputer": imputer, 
-        "scaler": scaler, 
+        "imputer": imputer_final,
+        "scaler": scaler_final,
         "classifier": final_model, 
-        "feature_names": feature_names, 
+        "feature_names": top_feature_names,
         "training_args": vars(args), 
         "invert_prob": False, 
         "model": "xgboost",

@@ -1108,7 +1108,9 @@ class TradeManager:
         self.mem = mem
         self.brain = brain
         self.open_trades = []
-        self.pending_orders = [] 
+        self.pending_orders = []
+        self.last_signal_time = {}
+        self.current_bar_index = 0
 
     def can_open(self, side):
         total_active = len(self.open_trades) + len(self.pending_orders)
@@ -1118,6 +1120,16 @@ class TradeManager:
     def submit_plan(self, plan, bar):
         if not plan or not self.can_open(plan['side']): return None
         
+        # Signal cooldown to prevent trade stacking
+        signal_key = f"{plan.get('strat', plan.get('strategy', 'unknown'))}_{plan['side']}"
+        last_signal = self.last_signal_time.get(signal_key, -999)
+
+        # Reject identical signals for the next 10 bars
+        if self.current_bar_index - last_signal < 10:
+            return None
+
+        self.last_signal_time[signal_key] = self.current_bar_index
+
         adx = plan.get('features', {}).get('adx', 25.0)
         ttl = 12 
         
@@ -1138,6 +1150,7 @@ class TradeManager:
         return order
 
     def step_bar(self, o, h, l, c, ts=None, swing_high=0.0, swing_low=0.0):
+        self.current_bar_index += 1
         closed = []
         still_open = []
         still_pending = []

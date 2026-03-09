@@ -420,8 +420,13 @@ def run_bot(args):
                 # --- STALE ORDER CLEANUP ---
                 if not cfg.paper_mode:
                     try:
-                        ex.client.cancel_all_orders(symbol)
-                        log.debug(f"🧹 Cleaned up stale open orders for {symbol}")
+                        open_orders = ex.client.fetch_open_orders(symbol)
+                        for o in open_orders:
+                            # Do not cancel if it's a Stop-Loss or Take-Profit order (reduceOnly, stopPrice etc)
+                            if o.get('reduceOnly') or o.get('stopPrice') is not None or o.get('triggerPrice') is not None:
+                                continue
+                            ex.client.cancel_order(o['id'], symbol)
+                        log.debug(f"🧹 Cleaned up stale open entry orders for {symbol}")
                     except Exception as e:
                         log.warning(f"⚠️ Failed to cancel open orders for {symbol}: {e}")
 
@@ -492,7 +497,7 @@ def run_bot(args):
                 curr_bar = {"o":ltf.open.iloc[-2], "h":ltf.high.iloc[-2], "l":ltf.low.iloc[-2], "c":ltf.close.iloc[-2]}
                 
                 # Step 1: Manage Existing
-                closed = tm.step_bar(curr_bar["o"], curr_bar["h"], curr_bar["l"], curr_bar["c"])
+                closed = tm.step_bar(curr_bar["o"], curr_bar["h"], curr_bar["l"], curr_bar["c"], ts=int(ltf.timestamp.iloc[-2]))
                 if closed:
                     for t in closed:
                         log.info(f"[{symbol}] ⛔ Trade Closed: {t['side']} PnL: {t['pnl_r']:.2f}R")
