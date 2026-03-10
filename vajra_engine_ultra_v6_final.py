@@ -603,48 +603,45 @@ def _fvg_flags(h, l):
 
 @njit(cache=True)
 def _find_ob_zones_strict(o, c, h, l, bos_up, bos_dn):
-    n = len(c); obt = np.zeros(n); obb = np.zeros(n)
+    n = len(c)
+    ob_bull_top = np.zeros(n); ob_bull_bot = np.zeros(n)
+    ob_bear_bot = np.zeros(n); ob_bear_top = np.zeros(n)
     bars_since_ob_bull = np.zeros(n); bars_since_ob_bear = np.zeros(n)
-    lbu_top = 0.0; lbu_bot = 0.0
-    lbe_bot = 0.0; lbe_top = 0.0
+
+    lbu_top = 0.0; lbu_bot = 0.0; lbe_top = 0.0; lbe_bot = 0.0
     bull_age = 0; bear_age = 0
 
-    for i in range(2, n - 1):
+    for i in range(2, n):
         if bos_up[i] == 1 and bos_up[i-1] == 0:
             for j in range(i-1, max(0, i-50), -1):
                 if c[j] < o[j]: 
-                    push = c[min(j+3, i)] - c[j]
-                    body_ob = o[j] - c[j]
-                    if push > 1.5 * body_ob:
-                        lbu_top = float(h[j])
-                        lbu_bot = float(l[j])
-                        bull_age = 0
-                    break
+                    if j+3 <= i:
+                        body_ob = o[j] - c[j] + 1e-9
+                        push = c[min(j+3, i)] - c[j]
+                        if push > 1.2 * body_ob:
+                            lbu_top = float(h[j]); lbu_bot = float(l[j]); bull_age = 0
+                            break
         if bos_dn[i] == 1 and bos_dn[i-1] == 0:
             for j in range(i-1, max(0, i-50), -1):
                 if c[j] > o[j]: 
-                    push = c[j] - c[min(j+3, i)]
-                    body_ob = c[j] - o[j]
-                    if push > 1.5 * body_ob:
-                        lbe_bot = float(l[j])
-                        lbe_top = float(h[j])
-                        bear_age = 0
-                    break
+                    if j+3 <= i:
+                        body_ob = c[j] - o[j] + 1e-9
+                        push = c[j] - c[min(j+3, i)]
+                        if push > 1.2 * body_ob:
+                            lbe_bot = float(l[j]); lbe_top = float(h[j]); bear_age = 0
+                            break
 
         if lbu_top > 0: bull_age += 1
         if lbe_bot > 0: bear_age += 1
 
-        # Mitigation / Invalidation logic to prevent stale limit orders
-        if lbu_top > 0 and c[i] < lbu_bot:
-            lbu_top = 0.0; lbu_bot = 0.0; bull_age = 0
-        if lbe_bot > 0 and c[i] > lbe_top:
-            lbe_bot = 0.0; lbe_top = 0.0; bear_age = 0
+        if lbu_top > 0 and c[i] < lbu_bot: lbu_top = 0.0; lbu_bot = 0.0; bull_age = 0
+        if lbe_bot > 0 and c[i] > lbe_top: lbe_bot = 0.0; lbe_top = 0.0; bear_age = 0
 
-        obt[i] = lbu_top; obb[i] = lbe_bot
-        bars_since_ob_bull[i] = bull_age
-        bars_since_ob_bear[i] = bear_age
+        ob_bull_top[i] = lbu_top; ob_bull_bot[i] = lbu_bot
+        ob_bear_bot[i] = lbe_bot; ob_bear_top[i] = lbe_top
+        bars_since_ob_bull[i] = bull_age; bars_since_ob_bear[i] = bear_age
 
-    return obt, obb, bars_since_ob_bull, bars_since_ob_bear
+    return ob_bull_top, ob_bull_bot, ob_bear_bot, ob_bear_top, bars_since_ob_bull, bars_since_ob_bear
 
 class Precomp:
     def __init__(self, df):
@@ -659,7 +656,7 @@ class Precomp:
         self.bos_up, self.bos_down, self.sweep_up, self.sweep_dn = _bos_flags(self.c, self.h, self.l, self.last_sh, self.last_sl)
         self.engulf_bull, self.engulf_bear, self.pin_bull, self.pin_bear, self.inside_bar = _inside_engulf_pin(self.o, self.h, self.l, self.c)
         self.fvg_up, self.fvg_dn = _fvg_flags(self.h, self.l)
-        self.ob_bull, self.ob_bear, self.bars_since_ob_bull, self.bars_since_ob_bear = _find_ob_zones_strict(self.o, self.c, self.h, self.l, self.bos_up, self.bos_down)
+        self.ob_bull_top, self.ob_bull_bot, self.ob_bear_bot, self.ob_bear_top, self.bars_since_ob_bull, self.bars_since_ob_bear = _find_ob_zones_strict(self.o, self.c, self.h, self.l, self.bos_up, self.bos_down)
         
         self.ema50 = _ema_np(self.c, 50); self.ema200 = _ema_np(self.c, 200)
         self.atr14 = _atr_np(self.h, self.l, self.c, 14); self.rsi14 = _rsi14_np(self.c)
@@ -729,14 +726,16 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     
     f["last_swing_high"] = float(pl.last_sh[idx_L])
     f["last_swing_low"] = float(pl.last_sl[idx_L])
-    f["ob_bull_price"] = float(pl.ob_bull[idx_L])
-    f["ob_bear_price"] = float(pl.ob_bear[idx_L])
+    f["ob_bull_top"] = float(pl.ob_bull_top[idx_L])
+    f["ob_bull_bot"] = float(pl.ob_bull_bot[idx_L])
+    f["ob_bear_bot"] = float(pl.ob_bear_bot[idx_L])
+    f["ob_bear_top"] = float(pl.ob_bear_top[idx_L])
     
     px_safe = px if px > 1e-12 else 1.0
     f["dist_last_sh_pct"] = (px - f["last_swing_high"]) / px_safe * 100
     f["dist_last_sl_pct"] = (px - f["last_swing_low"]) / px_safe * 100
-    f["dist_ob_bull_pct"] = (px - f["ob_bull_price"]) / px_safe * 100
-    f["dist_ob_bear_pct"] = (px - f["ob_bear_price"]) / px_safe * 100
+    f["dist_ob_bull_pct"] = (px - f["ob_bull_top"]) / px_safe * 100
+    f["dist_ob_bear_pct"] = (f["ob_bear_bot"] - px) / px_safe * 100
 
     atr_abs = ph.atr14[idx_H]
     if atr_abs < 1e-9: atr_abs = px * 0.01
@@ -750,8 +749,6 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     
     f["choch_up"]=float(1.0 if pl.bos_up[idx_L] and idx_L>=5 and pl.bos_down[idx_L-5] else 0.0)
     f["choch_down"]=float(1.0 if pl.bos_down[idx_L] and idx_L>=5 and pl.bos_up[idx_L-5] else 0.0)
-    f["ob_bull_dist"] = (px - pl.ob_bull[idx_L])/px*100 if pl.ob_bull[idx_L]>0 else 0.0
-    f["ob_bear_dist"] = (pl.ob_bear[idx_L] - px)/px*100 if pl.ob_bear[idx_L]>0 else 0.0
     f["bars_since_ob_bull"] = float(pl.bars_since_ob_bull[idx_L])
     f["bars_since_ob_bear"] = float(pl.bars_since_ob_bear[idx_L])
 
@@ -934,8 +931,8 @@ def precompute_v6_features(ph, pm, pl, htf, mtf, ltf, btc_close_arr=None):
     f['atr7_L']=_atr_np(pl.h,pl.l,pl.c,7)
     f['atr_pct_ltf_7_arr']=f['atr7_L']/(np.abs(cl)+eps)*100
     
-    f['dist_to_bull_ob_arr'] = np.where(pl.ob_bull>0, (cl-pl.ob_bull)/cl*100, 0.0)
-    f['dist_to_bear_ob_arr'] = np.where(pl.ob_bear>0, (pl.ob_bear-cl)/cl*100, 0.0)
+    f['dist_to_bull_ob_arr'] = np.where(pl.ob_bull_top>0, (cl-pl.ob_bull_top)/cl*100, 0.0)
+    f['dist_to_bear_ob_arr'] = np.where(pl.ob_bear_bot>0, (pl.ob_bear_bot-cl)/cl*100, 0.0)
     f['is_sweep_high_arr'] = pl.sweep_up.astype(float)
     f['is_sweep_low_arr'] = pl.sweep_dn.astype(float)
     
@@ -1441,34 +1438,34 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     # ----------------------------------------------------------
     # MODEL A: Order Block Mitigation (SMC Sniper)
     # ----------------------------------------------------------
-    ob_bull = base.get("ob_bull_price", 0)
-    ob_bear = base.get("ob_bear_price", 0)
+    ob_bull_top = base.get("ob_bull_top", 0.0)
+    ob_bull_bot = base.get("ob_bull_bot", 0.0)
+    ob_bear_bot = base.get("ob_bear_bot", 0.0)
+    ob_bear_top = base.get("ob_bear_top", 0.0)
 
-    if can_long and ob_bull > 0 and px > ob_bull:
-        ob_bull_bot = base.get("ob_bull_bot", ob_bull) # Assuming we can fall back to ob_bull if bot isn't provided
-        candidates.append({
-            "strat": "OB_MITIGATION_LONG",
-            "priority": 3.0,
-            "side": "long",
-            "entry": ob_bull,
-            "sl_override": min(ob_bull_bot - (0.2 * current_atr), ob_bull - (0.5 * current_atr)),
-            "tp_override": ob_bear if ob_bear > ob_bull else ob_bull + (current_atr * 3.0),
-            "risk_mult": 1.0,
-            "type": "limit"
-        })
+    if can_long and ob_bull_top > 0 and px >= ob_bull_bot:
+        dist = abs(px - ob_bull_top) / current_atr
+        if dist <= 1.0:
+            entry = min(px, ob_bull_top)
+            sl = ob_bull_bot - (0.2 * current_atr)
+            tp = ob_bear_bot if ob_bear_bot > px else base.get("last_swing_high", px + current_atr * 3)
+            if sl < entry and tp > entry:
+                candidates.append({
+                    "strat": "ALPHA_OB_LONG", "priority": 4.0, "side": "long", "entry": entry,
+                    "sl_override": min(sl, entry - (0.5 * current_atr)), "tp_override": tp, "risk_mult": 1.2, "type": "limit"
+                })
 
-    if can_short and ob_bear > 0 and px < ob_bear:
-        ob_bear_top = base.get("ob_bear_top", ob_bear)
-        candidates.append({
-            "strat": "OB_MITIGATION_SHORT",
-            "priority": 3.0,
-            "side": "short",
-            "entry": ob_bear,
-            "sl_override": max(ob_bear_top + (0.2 * current_atr), ob_bear + (0.5 * current_atr)),
-            "tp_override": ob_bull if (ob_bull > 0 and ob_bull < ob_bear) else ob_bear - (current_atr * 3.0),
-            "risk_mult": 1.0,
-            "type": "limit"
-        })
+    if can_short and ob_bear_bot > 0 and px <= ob_bear_top:
+        dist = abs(px - ob_bear_bot) / current_atr
+        if dist <= 1.0:
+            entry = max(px, ob_bear_bot)
+            sl = ob_bear_top + (0.2 * current_atr)
+            tp = ob_bull_top if (0 < ob_bull_top < px) else base.get("last_swing_low", px - current_atr * 3)
+            if sl > entry and tp < entry:
+                candidates.append({
+                    "strat": "ALPHA_OB_SHORT", "priority": 4.0, "side": "short", "entry": entry,
+                    "sl_override": max(sl, entry + (0.5 * current_atr)), "tp_override": tp, "risk_mult": 1.2, "type": "limit"
+                })
 
     # ----------------------------------------------------------
     # MODEL B: Liquidity Sweep Trap (Wyckoff Spring/Upthrust)
