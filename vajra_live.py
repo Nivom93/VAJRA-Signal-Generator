@@ -101,7 +101,7 @@ class RealExecutionManager:
             log.error(f"Ticker Fetch Fail: {e}")
             return None
 
-    def execute_entry(self, symbol, side, qty, price, is_paper=True, rvol=1.0, plan_type='limit'):
+    def execute_entry(self, symbol, side, qty, price, is_paper=True, rvol=1.0, plan_type='limit', sl=None, tp=None):
         """
         Executes an entry order.
         LEVEL 14: Quadratic Impact Simulation for Paper Mode.
@@ -140,10 +140,11 @@ class RealExecutionManager:
         elif plan_type == 'limit':
             try:
                 params = {'timeInForce': 'PostOnly'}
+                if sl: params['stopLoss'] = str(self.client.price_to_precision(symbol, sl))
+                if tp: params['takeProfit'] = str(self.client.price_to_precision(symbol, tp))
+
                 price_r = self.client.price_to_precision(symbol, price)
                 amount_r = self.client.amount_to_precision(symbol, qty)
-                
-                log.info(f"👉 TRUE LIMIT: Placing predictive resting order for {c_side} @ {price_r}")
                 order = self.client.create_order(symbol, 'limit', c_side, amount_r, price_r, params)
                 log.info(f"✅ RESTING LIMIT PLACED: ID {order['id']}")
                 return price
@@ -159,7 +160,8 @@ class RealExecutionManager:
                 order = self.client.create_order(symbol, 'market', c_side, amount_r)
 
                 current_limit_px = self.get_best_book_price(symbol, c_side)
-                avg_px = float(order.get('average', current_limit_px))
+                avg = order.get('average')
+                avg_px = float(avg if avg is not None else current_limit_px)
                 log.info(f"✅ FILLED (Market) @ {avg_px}")
                 return avg_px
             except Exception as e:
@@ -186,6 +188,18 @@ class RealExecutionManager:
             return order
         except Exception as e:
             log.error(f"CRITICAL: Failed to place Hard Stop! Error: {e}")
+            return None
+
+    def place_take_profit(self, symbol, side, qty, tp_price):
+        try:
+            sl_side = 'sell' if side == 'long' else 'buy'
+            amount_r = self.client.amount_to_precision(symbol, qty)
+            price_r = self.client.price_to_precision(symbol, tp_price)
+            order = self.client.create_order(symbol, 'limit', sl_side, amount_r, price_r, params={'reduceOnly': True})
+            log.info(f"✅ HARD TP PLACED: ID {order['id']} @ {tp_price:.2f}")
+            return order
+        except Exception as e:
+            log.error(f"Failed to place Hard TP: {e}")
             return None
 
     def execute_close(self, symbol, side, qty):
@@ -496,7 +510,7 @@ def run_bot(args):
                             rvol = plan['features'].get('rvol', 1.0)
                             plan_type = plan.get('type', cfg.execution_style)
                             
-                            fill_price = executor.execute_entry(symbol, plan['side'], qty, plan['entry'], is_paper=cfg.paper_mode, rvol=rvol, plan_type=plan_type)
+                            fill_price = executor.execute_entry(symbol, plan['side'], qty, plan['entry'], is_paper=cfg.paper_mode, rvol=rvol, plan_type=plan_type, sl=plan.get('sl'), tp=plan.get('tp'))
                             
                             if fill_price:
                                 plan['entry'] = fill_price 
@@ -505,6 +519,7 @@ def run_bot(args):
                                 # IMMEDIATE STOP LOSS PLACEMENT (Real Mode Only)
                                 if not cfg.paper_mode and plan_type != 'limit':
                                     executor.place_stop_loss(symbol, plan['side'], qty, plan['sl'])
+                                    executor.place_take_profit(symbol, plan['side'], qty, plan['tp'])
                         else:
                             log.warning(f"[{symbol}] Risk Distance is 0. Skipping.")
                     else:

@@ -22,7 +22,7 @@ import pandas as pd
 
 # --- BULLETPROOF IMPORTS ---
 try:
-    import ccxt; import joblib; from sklearn.preprocessing import StandardScaler
+    import ccxt; import joblib
 except:
     pass
 
