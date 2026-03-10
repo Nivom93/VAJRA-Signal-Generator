@@ -125,6 +125,16 @@ class RealExecutionManager:
             
             if triggered:
                 log.info(f"⚡ Breakout confirmed (Price {curr_px} passed Trigger {price}). Executing MARKET.")
+                try:
+                    amount_r = self.client.amount_to_precision(symbol, qty)
+                    order = self.client.create_order(symbol, 'market', c_side, amount_r)
+                    avg = order.get('average')
+                    avg_px = float(avg if avg is not None else curr_px)
+                    log.info(f"✅ FILLED (Breakout-Market) @ {avg_px}")
+                    return avg_px
+                except Exception as e:
+                    log.error(f"CRITICAL: Breakout Market Order Failed: {e}")
+                    return None
             else:
                 try:
                     log.info(f"⚡ Placing STOP MARKET Order @ {price}")
@@ -207,7 +217,7 @@ class RealExecutionManager:
             order_side = 'sell' if side == 'long' else 'buy'
             log.info(f"⚡ EXECUTING EXIT: {symbol} {side} {qty} (Market {order_side})")
             amount_r = self.client.amount_to_precision(symbol, qty)
-            order = self.client.create_order(symbol, 'market', order_side, amount_r)
+            order = self.client.create_order(symbol, 'market', order_side, amount_r, params={'reduceOnly': True})
             return order
         except Exception as e:
             log.error(f"CRITICAL: Failed to execute close for {symbol}. Error: {e}")
