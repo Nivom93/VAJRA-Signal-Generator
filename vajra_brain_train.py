@@ -238,7 +238,7 @@ def main(argv=None):
             eval_metric='logloss'
         )
             
-        clf.fit(X_tr, y_tr, sample_weight=w_tr)
+        clf.fit(X_tr, y_tr, sample_weight=w_tr, eval_set=[(X_te, y_te)], verbose=False)
         
         if args.calibrate:
             cal_clf = CalibratedClassifierCV(clf, method='isotonic', cv=3) 

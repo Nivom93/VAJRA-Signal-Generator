@@ -260,6 +260,7 @@ def run_backtest(args, preloaded: Optional[Preloaded]=None, markets_data=None):
         }
 
         feats = confluence_features(cfg, htf, mtf, ltf, iH=iH, iM=iM, iL=iL, precomp=pre_map, extras=extras)
+        feats["symbol"] = cfg.symbol
         
         # Test baseline engine with NO brain
         plan = plan_trade_with_brain(cfg, None, feats, adv_features, iH, iM, iL, pre_ltf)

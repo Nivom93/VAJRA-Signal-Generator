@@ -110,8 +110,7 @@ class RealExecutionManager:
         
         # --- PAPER MODE ---
         if is_paper:
-            if plan_type == 'limit':
-                return price
+            if plan_type == 'limit': return price
             return self.get_best_book_price(symbol, c_side) or price
 
         # --- REAL EXECUTION ---

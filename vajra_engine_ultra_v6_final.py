@@ -1078,6 +1078,8 @@ class BrainLearningManager:
             vec = self._build_vec(side, base, adv, iL, iM, px, pre_l, b['feature_names'])
             # CRITICAL FIX: Clip all array values before casting to prevent float32 memory overflow
             vec = np.clip(np.nan_to_num(vec, nan=0.0), -1e10, 1e10).astype(np.float32)
+            if 'imputer' in b: vec = b['imputer'].transform(vec)
+            if 'scaler' in b: vec = b['scaler'].transform(vec)
             p = b['classifier'].predict_proba(vec)[0][1]
             return 1.0-p if b.get('invert_prob') else p
         except: return 0.0
@@ -1139,6 +1141,7 @@ class TradeManager:
         
         order = {
             **plan,
+            "symbol": plan.get("features", {}).get("symbol", self.cfg.symbol),
             "dca_level": 0,
             "risk_factor": plan.get('risk_factor', 1.0),
             "created_ts": bar.get("timestamp", 0),
@@ -1167,6 +1170,10 @@ class TradeManager:
         trail_dist = self.cfg.trailing_dist_r
         
         for order in self.pending_orders:
+            if order.get('symbol', self.cfg.symbol) != symbol:
+                still_pending.append(order)
+                continue
+
             triggered = False
             fill_px = 0.0
             
@@ -1190,7 +1197,7 @@ class TradeManager:
                         fill_px = max(o, entry_target)
             elif order_type == 'market':
                 triggered = True
-                fill_px = o
+                fill_px = entry_target
             else: # breakout
                 if side == 'long':
                     if h >= entry_target:
@@ -1241,6 +1248,10 @@ class TradeManager:
         self.pending_orders = still_pending
 
         for t in self.open_trades:
+            if t.get('symbol', self.cfg.symbol) != symbol:
+                still_open.append(t)
+                continue
+
             t['bars_open'] = t.get('bars_open', 0) + 1
             side = t['side']
             entry = t['avg_price']

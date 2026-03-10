@@ -249,6 +249,7 @@ def main():
         }
 
         base = confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, pre_map, extras=extras)
+        base["symbol"] = cfg.symbol
         plan = plan_trade_with_brain(cfg, None, base, adv_features, iH, iM, iL, pre_l)
         
         if plan:
