@@ -410,11 +410,16 @@ def run_bot(args):
                 if not cfg.paper_mode:
                     try:
                         open_orders = ex.client.fetch_open_orders(symbol)
+                        pending_entries = [abs(p['entry']) for p in tm.pending_orders if p.get('symbol') == symbol]
                         for o in open_orders:
-                            # Do not cancel if it's a Stop-Loss or Take-Profit order (reduceOnly, stopPrice etc)
                             if o.get('reduceOnly') or o.get('stopPrice') is not None or o.get('triggerPrice') is not None:
                                 continue
-                            ex.client.cancel_order(o['id'], symbol)
+
+                            order_price = float(o.get('price', 0.0))
+                            is_active_pending = any(abs(order_price - pe) / (pe + 1e-9) < 0.001 for pe in pending_entries)
+
+                            if not is_active_pending:
+                                ex.client.cancel_order(o['id'], symbol)
                         log.debug(f"🧹 Cleaned up stale open entry orders for {symbol}")
                     except Exception as e:
                         log.warning(f"⚠️ Failed to cancel open orders for {symbol}: {e}")
