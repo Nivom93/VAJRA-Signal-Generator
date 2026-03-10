@@ -1075,31 +1075,26 @@ class BrainLearningManager:
         b = self.brains.get(side)
         if not b: return 0.0
         try:
-            vec = self._build_vec(side, base, adv, iL, iM, px, pre_l, b['feature_names'])
-            # CRITICAL FIX: Clip all array values before casting to prevent float32 memory overflow
+            d = {**base}
+            for k, v in adv.items():
+                if hasattr(v, '__getitem__') and len(v) > iL:
+                    val = v[iL]
+                    d[k] = float(val) if np.isfinite(val) else 0.0
+                    if d[k] > 1e6: d[k] = 1e6
+                    elif d[k] < -1e6: d[k] = -1e6
+                else: d[k] = 0.0
+            d.update({
+                "pos_vs_swing_h": (px-pre_l.last_sh[iL])/px if px else 0.0,
+                "pos_vs_swing_l": (px-pre_l.last_sl[iL])/px if px else 0.0,
+                "dist_to_mtf_ema200_pct": (px-adv['mtf_ema200_arr'][iM])/px*100 if px and 'mtf_ema200_arr' in adv else 0.0,
+                "side": 1.0 if side=="long" else 0.0
+            })
+            vec = np.array([d.get(n, 0.0) for n in b['feature_names']]).reshape(1,-1)
             vec = np.clip(np.nan_to_num(vec, nan=0.0), -1e10, 1e10).astype(np.float32)
-            if 'imputer' in b: vec = b['imputer'].transform(vec)
-            if 'scaler' in b: vec = b['scaler'].transform(vec)
             p = b['classifier'].predict_proba(vec)[0][1]
             return 1.0-p if b.get('invert_prob') else p
         except: return 0.0
 
-    def _build_vec(self, side, b, a, iL, iM, px, pl, fnames):
-        d = {**b} 
-        for k, v in a.items():
-            if hasattr(v, '__getitem__') and len(v) > iL:
-                val = v[iL]
-                d[k] = float(val) if np.isfinite(val) else 0.0
-                if d[k] > 1e6: d[k] = 1e6
-                elif d[k] < -1e6: d[k] = -1e6
-            else: d[k] = 0.0
-        d.update({
-            "pos_vs_swing_h": (px-pl.last_sh[iL])/px if px else 0.0, 
-            "pos_vs_swing_l": (px-pl.last_sl[iL])/px if px else 0.0,
-            "dist_to_mtf_ema200_pct": (px-a['mtf_ema200_arr'][iM])/px*100 if px and 'mtf_ema200_arr' in a else 0.0,
-            "side": 1.0 if side=="long" else 0.0
-        })
-        return np.array([d.get(n, 0.0) for n in fnames]).reshape(1,-1)
 
 class TradeManager:
     def __init__(self, cfg, exw, mem, brain, narrative_map=None):

@@ -503,7 +503,7 @@ def run_bot(args):
                                 tm.submit_plan(plan, curr_bar)
                                 
                                 # IMMEDIATE STOP LOSS PLACEMENT (Real Mode Only)
-                                if not cfg.paper_mode:
+                                if not cfg.paper_mode and plan_type != 'limit':
                                     executor.place_stop_loss(symbol, plan['side'], qty, plan['sl'])
                         else:
                             log.warning(f"[{symbol}] Risk Distance is 0. Skipping.")

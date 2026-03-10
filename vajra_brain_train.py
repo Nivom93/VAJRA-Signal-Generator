@@ -175,47 +175,15 @@ def main(argv=None):
 
     X_all = _sanitize_data(X_all)
 
-    log.info("Feature Pruning: Evaluating feature importance on FULL dataset FIRST...")
-
-    # FIX MINORITY CLASS STARVATION (FULL DATASET)
-    num_pos_all = int(np.sum(y_all.astype(int)))
-    num_neg_all = int(len(y_all)) - num_pos_all
-    spw_all = min(num_neg_all / max(num_pos_all, 1), 5.0)
-
-    feature_eval_model = xgb.XGBClassifier(
-        n_estimators=args.n_estimators,
-        learning_rate=0.02,
-        max_depth=3,
-        reg_alpha=args.reg_alpha,
-        reg_lambda=args.reg_lambda,
-        colsample_bytree=0.7,
-        subsample=0.8,
-        scale_pos_weight=spw_all,
-        random_state=42,
-        eval_metric='logloss'
-    )
-    feature_eval_model.fit(X_all, y_all, sample_weight=sample_weights)
-
-    importances = feature_eval_model.feature_importances_
-
-    # Select top 30 features
-    num_top_features = min(30, len(feature_names))
-    top_indices = np.argsort(importances)[::-1][:num_top_features]
-
-    top_feature_names = [feature_names[i] for i in top_indices]
-    log.info(f"Selected Top {num_top_features} Features: {top_feature_names}")
-
-    X_top = X_all[:, top_indices]
-
-    log.info(f"Running Walk-Forward Analysis ({args.wfa_folds} folds) strictly on Top Features...")
+    log.info(f"Running Walk-Forward Analysis ({args.wfa_folds} folds) on ALL Features...")
     tscv = TimeSeriesSplit(n_splits=args.wfa_folds)
     
     auc_scores = []
     brier_scores = []
     
-    for i, (train_idx, test_idx) in enumerate(tscv.split(X_top)):
-        X_tr, y_tr = X_top[train_idx], y_all[train_idx]
-        X_te, y_te = X_top[test_idx], y_all[test_idx]
+    for i, (train_idx, test_idx) in enumerate(tscv.split(X_all)):
+        X_tr, y_tr = X_all[train_idx], y_all[train_idx]
+        X_te, y_te = X_all[test_idx], y_all[test_idx]
         w_tr = sample_weights[train_idx]
         
         if w_tr.sum() > 0:
@@ -269,6 +237,38 @@ def main(argv=None):
     avg_auc = np.mean(auc_scores)
     avg_brier = np.mean(brier_scores)
     log.info(f"✅ WFA RESULTS: Avg AUC = {avg_auc:.4f} | Avg Brier = {avg_brier:.4f}")
+
+    log.info("Feature Pruning: Evaluating feature importance on FULL dataset...")
+
+    # FIX MINORITY CLASS STARVATION (FULL DATASET)
+    num_pos_all = int(np.sum(y_all.astype(int)))
+    num_neg_all = int(len(y_all)) - num_pos_all
+    spw_all = min(num_neg_all / max(num_pos_all, 1), 5.0)
+
+    feature_eval_model = xgb.XGBClassifier(
+        n_estimators=args.n_estimators,
+        learning_rate=0.02,
+        max_depth=3,
+        reg_alpha=args.reg_alpha,
+        reg_lambda=args.reg_lambda,
+        colsample_bytree=0.7,
+        subsample=0.8,
+        scale_pos_weight=spw_all,
+        random_state=42,
+        eval_metric='logloss'
+    )
+    feature_eval_model.fit(X_all, y_all, sample_weight=sample_weights)
+
+    importances = feature_eval_model.feature_importances_
+
+    # Select top 30 features
+    num_top_features = min(30, len(feature_names))
+    top_indices = np.argsort(importances)[::-1][:num_top_features]
+
+    top_feature_names = [feature_names[i] for i in top_indices]
+    log.info(f"Selected Top {num_top_features} Features: {top_feature_names}")
+
+    X_top = X_all[:, top_indices]
 
     final_base = xgb.XGBClassifier(
         n_estimators=args.n_estimators,
