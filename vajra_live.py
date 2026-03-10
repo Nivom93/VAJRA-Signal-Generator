@@ -406,21 +406,33 @@ def run_bot(args):
             for symbol in cfg.symbols:
                 cfg.symbol = symbol 
                 
-                # --- STALE ORDER CLEANUP ---
+                # --- STATE-AWARE ORDER CLEANUP ---
                 if not cfg.paper_mode:
                     try:
                         open_orders = ex.client.fetch_open_orders(symbol)
-                        pending_entries = [abs(p['entry']) for p in tm.pending_orders if p.get('symbol') == symbol]
+                        pending_entries = [abs(p['entry']) for p in tm.pending_orders if p.get('symbol', cfg.symbol) == symbol]
+                        active_trades = [t for t in tm.open_trades if t.get('symbol', cfg.symbol) == symbol]
+
                         for o in open_orders:
-                            if o.get('reduceOnly') or o.get('stopPrice') is not None or o.get('triggerPrice') is not None:
+                            is_protective = o.get('reduceOnly') or o.get('stopPrice') is not None or o.get('triggerPrice') is not None
+
+                            # If it's a protective stop/TP, but we have NO active trades for this symbol, it's a ghost trap. Delete it.
+                            if is_protective and len(active_trades) == 0:
+                                ex.client.cancel_order(o['id'], symbol)
                                 continue
 
-                            order_price = float(o.get('price', 0.0))
+                            # If it's a protective stop/TP, and we DO have active trades, protect it.
+                            if is_protective:
+                                continue
+
+                            # Otherwise, it is a limit entry. Check if it is still valid in the Engine's pending queue.
+                            order_price = float(o.get('price') or o.get('stopPrice') or o.get('triggerPrice') or 0.0)
                             is_active_pending = any(abs(order_price - pe) / (pe + 1e-9) < 0.001 for pe in pending_entries)
 
-                            if not is_active_pending:
+                            # If it's not in our pending list, it's stale -> cancel it.
+                            if not is_active_pending and order_price > 0:
                                 ex.client.cancel_order(o['id'], symbol)
-                        log.debug(f"🧹 Cleaned up stale open entry orders for {symbol}")
+                        log.debug(f"🧹 Cleaned up stale open orders & ghost traps for {symbol}")
                     except Exception as e:
                         log.warning(f"⚠️ Failed to cancel open orders for {symbol}: {e}")
 
