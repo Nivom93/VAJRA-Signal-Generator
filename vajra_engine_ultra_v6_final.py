@@ -1359,16 +1359,6 @@ def plan_trade(cfg, f):
     return None
 
 def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
-    if cfg.filter_hurst_strict and base.get("hurst", 0.5) < 0.45:
-        return None
-
-    ts = base.get("timestamp", 0)
-    hour = base.get("hour_of_day", 0)
-    
-    if cfg.filter_time_of_day and ts > 0:
-        if 2 <= hour <= 6:
-            return None
-
     px = base.get("price")
     if not px: return None
     
@@ -1378,8 +1368,9 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     # DYNAMIC TP SCALING
     bb_width = base.get("bb_width", 0.0)
     if getattr(cfg, 'dynamic_tp_enabled', True):
-        if bb_width > 5.0: tp_atr_dist = current_atr * 2.5
-        else: tp_atr_dist = current_atr * 1.5
+        # Scale structurally relative to Bollinger Band volatility expansion
+        bb_mult = min(max(bb_width / 2.0, 1.5), 5.0)
+        tp_atr_dist = current_atr * bb_mult
     else:
         tp_atr_dist = base.get("atr_ltf_pct",0)*0.01*px*cfg.atr_mult_tp
         
@@ -1401,16 +1392,8 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     vah = base.get("vah", px)
     val = base.get("val", px)
     
-    if base.get("candle_range_atr", 0.0) > 1.5: return None
-        
     can_long = True
     can_short = True
-    if rsi > 70: can_long = False
-    if rsi < 30: can_short = False
-    
-    # SPOOFING PROTECTION
-    if bid_ask_imbalance > 0.80: can_long = False
-    if bid_ask_imbalance < 0.20: can_short = False
     
     w_pattern = base.get("w_pattern", 0.0); m_pattern = base.get("m_pattern", 0.0)
     fvg_bull = base.get("fvg_bull", 0.0); fvg_bear = base.get("fvg_bear", 0.0)
@@ -1648,13 +1631,19 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         if dynamic_risk < 1e-9: continue
 
         # 2. Dynamic Structural Take Profit
+        if getattr(cfg, 'dynamic_tp_enabled', True):
+            # Dynamic TP based on bb_width expansion rather than static ATR mult
+            tp_mult = min(max(bb_width / 2.0, 1.5), 5.0)
+        else:
+            tp_mult = getattr(cfg, 'atr_mult_tp', 2.0)
+
         if 'tp_override' in cand:
             tp = cand['tp_override']
-            if side == 'long' and tp <= entry: tp = entry + (3.0 * dynamic_risk)
-            if side == 'short' and tp >= entry: tp = entry - (3.0 * dynamic_risk)
+            if side == 'long' and tp <= entry: tp = entry + (tp_mult * dynamic_risk)
+            if side == 'short' and tp >= entry: tp = entry - (tp_mult * dynamic_risk)
         else:
-            if side == 'long': tp = entry + (3.0 * dynamic_risk)
-            else: tp = entry - (3.0 * dynamic_risk)
+            if side == 'long': tp = entry + (tp_mult * dynamic_risk)
+            else: tp = entry - (tp_mult * dynamic_risk)
 
         reward = abs(tp - entry)
         implied_rr = reward / dynamic_risk

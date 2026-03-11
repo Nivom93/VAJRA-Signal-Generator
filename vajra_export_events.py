@@ -78,6 +78,27 @@ def fetch_macro_trend(ticker_symbol: str, ltf_timestamps: pd.Series) -> np.ndarr
         log.warning(f"yfinance failed for {ticker_symbol}: {e}")
         return np.zeros(len(ltf_timestamps))
 
+def fetch_historical_funding_rates(exw: ExchangeWrapper, symbol: str, ltf_timestamps: pd.Series) -> np.ndarray:
+    try:
+        if exw.client.has.get('fetchFundingRateHistory'):
+            # Fetch a larger history if possible, but CCXT often limits to 200/1000
+            funding = exw.client.fetch_funding_rate_history(symbol, limit=1000)
+            if not funding: return np.zeros(len(ltf_timestamps))
+
+            df = pd.DataFrame(funding)
+            if 'fundingRate' not in df.columns or 'timestamp' not in df.columns:
+                return np.zeros(len(ltf_timestamps))
+
+            df['fundingRate'] = pd.to_numeric(df['fundingRate'], errors='coerce')
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+            df.set_index('timestamp', inplace=True)
+
+            aligned = df['fundingRate'].shift(1).reindex(pd.to_datetime(ltf_timestamps, unit='ms', utc=True), method='ffill').fillna(0.0)
+            return aligned.values
+    except Exception as e:
+        log.warning(f"CCXT fetch_funding failed for {symbol}: {e}")
+    return np.zeros(len(ltf_timestamps))
+
 def fetch_delta_oi(exw: ExchangeWrapper, symbol: str, timeframe: str, ltf_timestamps: pd.Series) -> np.ndarray:
     try:
         target_symbol = symbol
@@ -97,7 +118,7 @@ def fetch_delta_oi(exw: ExchangeWrapper, symbol: str, timeframe: str, ltf_timest
                 return np.zeros(len(ltf_timestamps))
             
             df['openInterestValue'] = pd.to_numeric(df['openInterestValue'], errors='coerce')
-            vals = df['openInterestValue'].ffill().bfill().values
+            vals = df['openInterestValue'].ffill().values
             
             if len(vals) > 1:
                 delta = np.zeros_like(vals)
@@ -109,7 +130,7 @@ def fetch_delta_oi(exw: ExchangeWrapper, symbol: str, timeframe: str, ltf_timest
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
             df.set_index('timestamp', inplace=True)
             
-            aligned = df['delta_oi'].shift(1).reindex(pd.to_datetime(ltf_timestamps, unit='ms', utc=True)).ffill().fillna(0.0)
+            aligned = df['delta_oi'].shift(1).reindex(pd.to_datetime(ltf_timestamps, unit='ms', utc=True), method='ffill').fillna(0.0)
             return aligned.values
     except Exception as e:
         log.warning(f"CCXT fetch_oi failed for {symbol}: {e}")
@@ -173,9 +194,38 @@ def main():
     dxy_aligned = fetch_macro_trend("DX-Y.NYB", ltf["timestamp"])
     spx_aligned = fetch_macro_trend("^GSPC", ltf["timestamp"])
     oi_aligned = fetch_delta_oi(exw, cfg.symbol, cfg.ltf, ltf["timestamp"])
+    funding_aligned = fetch_historical_funding_rates(exw, cfg.symbol, ltf["timestamp"])
+
+    # Historical BTC.D Fetch
+    try:
+        btcd_df = exw.fetch_ohlcv_df("BTCDOM/USDT", "4h", limit=1000)
+        if not btcd_df.empty:
+            btcd_c = btcd_df['close'].values
+            btcd_trend = np.zeros_like(btcd_c)
+            for i in range(5, len(btcd_c)):
+                slope = (btcd_c[i] - btcd_c[i-5]) / btcd_c[i-5] * 100.0
+                if slope > 0.5: btcd_trend[i] = 1.0
+                elif slope < -0.5: btcd_trend[i] = -1.0
+
+            btcd_series = pd.Series(btcd_trend, index=pd.to_datetime(btcd_df['timestamp'], unit='ms', utc=True))
+            btcd_aligned = btcd_series.shift(1).reindex(pd.to_datetime(ltf["timestamp"], unit='ms', utc=True), method='ffill').fillna(0.0).values
+        else:
+            btcd_aligned = np.zeros(len(ltf))
+    except Exception as e:
+        log.warning(f"Failed to fetch BTCDOM: {e}")
+        btcd_aligned = np.zeros(len(ltf))
 
     pre_h, pre_m, pre_l = Precomp(htf), Precomp(mtf), Precomp(ltf)
     pre_map = {"htf": pre_h, "mtf": pre_m, "ltf": pre_l}
+
+    # Synthetic Bid-Ask Imbalance Proxy (Using wicks vs body size as order flow proxy since historical L2 is unavailable)
+    range_l = np.maximum(pre_l.h - pre_l.l, 1e-9)
+    body_top = np.maximum(pre_l.c, pre_l.o)
+    body_bot = np.minimum(pre_l.c, pre_l.o)
+    upper_wick = pre_l.h - body_top
+    lower_wick = body_bot - pre_l.l
+    bid_ask_proxy = 0.5 + (lower_wick - upper_wick) / (2 * range_l)
+    bid_ask_aligned = pd.Series(bid_ask_proxy).shift(1).fillna(0.5).values
 
     btc_s_close = pd.Series(btc_c, index=btc["timestamp"]).shift(1).reindex(ltf["timestamp"], method='ffill').bfill().values
     if len(btc_s_close) != len(ltf):
@@ -239,12 +289,12 @@ def main():
         
         extras = {
             "btc_bullish": btc_val,
-            "funding_rate": 0.0,
-            "btcd_trend": 0.0,
+            "funding_rate": float(funding_aligned[iL]) if iL < len(funding_aligned) else 0.0,
+            "btcd_trend": float(btcd_aligned[iL]) if iL < len(btcd_aligned) else 0.0,
             "dxy_trend": float(dxy_aligned[iL]) if iL < len(dxy_aligned) else 0.0,
             "spx_trend": float(spx_aligned[iL]) if iL < len(spx_aligned) else 0.0,
             "delta_oi": float(oi_aligned[iL]) if iL < len(oi_aligned) else 0.0,
-            "bid_ask_imbalance": 0.5,
+            "bid_ask_imbalance": float(bid_ask_aligned[iL]) if iL < len(bid_ask_aligned) else 0.5,
             "macro_sentiment": 0.0
         }
 

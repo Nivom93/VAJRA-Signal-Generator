@@ -24,7 +24,7 @@ def _strategy_overrides(cfg):
     cfg.be_trigger_r = 0.0             # Do not use BE tricks. Let structural TP or SL hit naturally.
     cfg.trailing_stop_trigger_r = 0.0
     cfg.trailing_dist_r = 0.0
-    cfg.dynamic_tp_enabled = False
+    cfg.dynamic_tp_enabled = True
     cfg.time_in_force_decay = 72
 
     # --- GLOBAL RISK DEFAULTS ---
@@ -50,7 +50,7 @@ def _strategy_overrides(cfg):
     cfg.strat_gamma_enabled = True  
     cfg.strat_delta_enabled = True 
     cfg.strat_epsilon_enabled = True  
-    cfg.strat_omega_enabled = False    # Disable mean reversion (often low win-rate in crypto)
+    cfg.strat_omega_enabled = True     # Re-enable mean reversion to catch chop structure
     cfg.strat_zeta_enabled = False     
 
    # ==========================================================
