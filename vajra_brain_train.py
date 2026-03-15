@@ -79,7 +79,7 @@ def _enforce_causality_drop(df: pd.DataFrame, lookahead: int = 5) -> pd.DataFram
 
 def _calculate_recency_and_pnl_weights(df: pd.DataFrame) -> np.ndarray:
     n = len(df)
-    pnl_weights = np.clip(np.abs(df['pnl_r'].values), 0, 5)
+    pnl_weights = np.clip(np.abs(df['pnl_r'].values), 0.1, 5.0)
     weights = pnl_weights
     if weights.sum() > 0:
         weights = weights * (n / weights.sum())
@@ -192,8 +192,8 @@ def main(argv=None):
             w_tr = w_tr * (len(w_tr) / w_tr.sum())
         
         clf = xgb.XGBClassifier(
-            n_estimators=args.n_estimators,
-            learning_rate=args.learning_rate,
+            n_estimators=400,
+            learning_rate=0.01,
             max_depth=3,
             reg_alpha=args.reg_alpha,
             reg_lambda=args.reg_lambda,
@@ -204,14 +204,7 @@ def main(argv=None):
         )
             
         clf.fit(X_tr, y_tr, sample_weight=w_tr, eval_set=[(X_te, y_te)], verbose=False)
-        
-        if args.calibrate:
-            cal_clf = CalibratedClassifierCV(clf, method='sigmoid', cv=3)
-            try: cal_clf.fit(X_tr, y_tr, sample_weight=w_tr)
-            except: cal_clf.fit(X_tr, y_tr) 
-            model = cal_clf
-        else:
-            model = clf
+        model = clf
             
         probs = model.predict_proba(X_te)[:, 1]
         
@@ -229,10 +222,7 @@ def main(argv=None):
         
         auc_scores.append(auc)
         brier_scores.append(brier)
-        if args.calibrate:
-            fold_importances.append(clf.feature_importances_)
-        else:
-            fold_importances.append(model.feature_importances_)
+        fold_importances.append(model.feature_importances_)
         log.info(f"  Fold {i+1}: AUC={auc:.4f} | Brier={brier:.4f}")
 
     avg_auc = np.mean(auc_scores)
@@ -252,8 +242,8 @@ def main(argv=None):
     X_top = X_all[:, top_indices]
 
     final_base = xgb.XGBClassifier(
-        n_estimators=args.n_estimators,
-        learning_rate=args.learning_rate,
+        n_estimators=400,
+        learning_rate=0.01,
         max_depth=3,
         reg_alpha=args.reg_alpha,
         reg_lambda=args.reg_lambda,
