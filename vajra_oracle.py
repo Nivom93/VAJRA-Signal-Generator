@@ -13,6 +13,7 @@ import json
 import time
 import os
 import logging
+import re
 from pathlib import Path
 
 # Setup Logging
@@ -75,8 +76,9 @@ def get_llm_sentiment(titles):
 
         result_text = response.choices[0].message.content.strip()
 
-        # Parse the float response
-        sentiment_score = float(result_text)
+        # Parse the float response safely with regex
+        match = re.search(r"[-+]?\d*\.\d+|\d+", result_text)
+        sentiment_score = float(match.group()) if match else 0.0
 
         # Ensure it's bounded correctly
         return max(-1.0, min(1.0, sentiment_score))

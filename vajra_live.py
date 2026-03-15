@@ -531,7 +531,9 @@ def run_bot(args):
                         dist = abs(plan['entry'] - plan['sl'])
                         
                         if dist > 0:
-                            qty = risk_amt / dist
+                            max_notional = cfg.account_notional * 10.0 # Hard 10x leverage cap
+                            raw_qty = risk_amt / dist
+                            qty = min(raw_qty, max_notional / plan['entry'])
                             
                             # Extract RVOL for Impact Calculation
                             rvol = plan['features'].get('rvol', 1.0)

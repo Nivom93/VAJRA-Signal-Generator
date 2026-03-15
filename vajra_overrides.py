@@ -16,9 +16,9 @@ def _strategy_overrides(cfg):
     # --- EXECUTION DEFAULTS (PURE LIMIT MODE) ---
     cfg.execution_style = 'limit'     
     cfg.pullback_atr_mult = 0.05        
-    cfg.slippage_bps = 0.0             
-    cfg.maker_fee_bps = 0.0            
-    cfg.taker_fee_bps = 0.0            
+    cfg.slippage_bps = 2.0
+    cfg.maker_fee_bps = 2.0
+    cfg.taker_fee_bps = 5.0
 
     # --- DEFENSE MECHANISMS (PURE SIGNAL EDGE) ---
     cfg.be_trigger_r = 0.0             # Do not use BE tricks. Let structural TP or SL hit naturally.
@@ -69,9 +69,9 @@ def _strategy_overrides(cfg):
     if "BTC" in symbol or "ETH" in symbol:
         cfg.min_conf_long = 1.0
         cfg.min_conf_short = 1.0
-        # Realistic AI Gatekeeping: Capture the optimal quartile of AI predictions
-        cfg.min_prob_long = 0.70
-        cfg.min_prob_short = 0.70
+        # Realistic AI Gatekeeping for Calibrated Models
+        cfg.min_prob_long = 0.55
+        cfg.min_prob_short = 0.55
     else:
-        cfg.min_prob_long = 0.70
-        cfg.min_prob_short = 0.70
+        cfg.min_prob_long = 0.55
+        cfg.min_prob_short = 0.55

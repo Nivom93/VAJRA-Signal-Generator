@@ -55,6 +55,7 @@ def is_feature_column(df: pd.DataFrame, col: str, extra_exclude: Set[str]) -> bo
         
         # --- ABSOLUTE PRICES (Forces AI to memorize the year) ---
         "last_swing_high", "last_swing_low", "ob_bull_price", "ob_bear_price",
+        "ob_bull_top", "ob_bull_bot", "ob_bear_top", "ob_bear_bot",
         "avwap_bull", "avwap_bear", "poc", "vah", "val", "asian_high", "asian_low",
         "dc_high_20", "dc_low_20", "htf_ema50",
         "htf_swing_high", "htf_swing_low", "mtf_swing_high", "mtf_swing_low",
@@ -180,6 +181,7 @@ def main(argv=None):
     
     auc_scores = []
     brier_scores = []
+    fold_importances = []
     
     for i, (train_idx, test_idx) in enumerate(tscv.split(X_all)):
         X_tr, y_tr = X_all[train_idx], y_all[train_idx]
@@ -188,10 +190,6 @@ def main(argv=None):
         
         if w_tr.sum() > 0:
             w_tr = w_tr * (len(w_tr) / w_tr.sum())
-
-        num_pos = int(np.sum(y_tr.astype(int)))
-        num_neg = int(len(y_tr)) - num_pos
-        spw = min(num_neg / max(num_pos, 1), 5.0)
         
         clf = xgb.XGBClassifier(
             n_estimators=args.n_estimators,
@@ -201,7 +199,6 @@ def main(argv=None):
             reg_lambda=args.reg_lambda,
             colsample_bytree=0.7,
             subsample=0.8,
-            scale_pos_weight=spw,
             random_state=42,
             eval_metric='logloss'
         )
@@ -209,7 +206,7 @@ def main(argv=None):
         clf.fit(X_tr, y_tr, sample_weight=w_tr, eval_set=[(X_te, y_te)], verbose=False)
         
         if args.calibrate:
-            cal_clf = CalibratedClassifierCV(clf, method='isotonic', cv=3) 
+            cal_clf = CalibratedClassifierCV(clf, method='sigmoid', cv=3)
             try: cal_clf.fit(X_tr, y_tr, sample_weight=w_tr)
             except: cal_clf.fit(X_tr, y_tr) 
             model = cal_clf
@@ -232,38 +229,22 @@ def main(argv=None):
         
         auc_scores.append(auc)
         brier_scores.append(brier)
+        if args.calibrate:
+            fold_importances.append(clf.feature_importances_)
+        else:
+            fold_importances.append(model.feature_importances_)
         log.info(f"  Fold {i+1}: AUC={auc:.4f} | Brier={brier:.4f}")
 
     avg_auc = np.mean(auc_scores)
     avg_brier = np.mean(brier_scores)
     log.info(f"✅ WFA RESULTS: Avg AUC = {avg_auc:.4f} | Avg Brier = {avg_brier:.4f}")
 
-    log.info("Feature Pruning: Evaluating feature importance on FULL dataset...")
-
-    # FIX MINORITY CLASS STARVATION (FULL DATASET)
-    num_pos_all = int(np.sum(y_all.astype(int)))
-    num_neg_all = int(len(y_all)) - num_pos_all
-    spw_all = min(num_neg_all / max(num_pos_all, 1), 5.0)
-
-    feature_eval_model = xgb.XGBClassifier(
-        n_estimators=args.n_estimators,
-        learning_rate=args.learning_rate,
-        max_depth=3,
-        reg_alpha=args.reg_alpha,
-        reg_lambda=args.reg_lambda,
-        colsample_bytree=0.7,
-        subsample=0.8,
-        scale_pos_weight=spw_all,
-        random_state=42,
-        eval_metric='logloss'
-    )
-    feature_eval_model.fit(X_all, y_all, sample_weight=sample_weights)
-
-    importances = feature_eval_model.feature_importances_
+    log.info("Feature Pruning: Evaluating aggregated feature importance...")
+    avg_importances = np.mean(fold_importances, axis=0)
 
     # Select top 30 features
     num_top_features = min(30, len(feature_names))
-    top_indices = np.argsort(importances)[::-1][:num_top_features]
+    top_indices = np.argsort(avg_importances)[::-1][:num_top_features]
 
     top_feature_names = [feature_names[i] for i in top_indices]
     log.info(f"Selected Top {num_top_features} Features: {top_feature_names}")
@@ -278,7 +259,6 @@ def main(argv=None):
         reg_lambda=args.reg_lambda,
         colsample_bytree=0.7,
         subsample=0.8,
-        scale_pos_weight=spw_all,
         random_state=42,
         eval_metric='logloss'
     )
@@ -287,7 +267,7 @@ def main(argv=None):
     
     log.info("Training Final Production Model on FULL DATASET (Weighted) with Top Features...")
     if args.calibrate:
-        final_cal = CalibratedClassifierCV(final_base, method='isotonic', cv=5)
+        final_cal = CalibratedClassifierCV(final_base, method='sigmoid', cv=5)
         try: final_cal.fit(X_top, y_all, sample_weight=sample_weights)
         except: final_cal.fit(X_top, y_all)
         final_model = final_cal

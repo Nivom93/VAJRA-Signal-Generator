@@ -1430,7 +1430,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         dist = abs(px - ob_bull_top) / current_atr
         if dist <= 1.0:
             entry = min(px, ob_bull_top)
-            sl = ob_bull_bot - (0.2 * current_atr)
+            sl = ob_bull_bot - (0.5 * current_atr)
             tp = ob_bear_bot if ob_bear_bot > px else base.get("last_swing_high", px + current_atr * 3)
             if sl < entry and tp > entry:
                 candidates.append({
@@ -1442,7 +1442,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         dist = abs(px - ob_bear_bot) / current_atr
         if dist <= 1.0:
             entry = max(px, ob_bear_bot)
-            sl = ob_bear_top + (0.2 * current_atr)
+            sl = ob_bear_top + (0.5 * current_atr)
             tp = ob_bull_top if (0 < ob_bull_top < px) else base.get("last_swing_low", px - current_atr * 3)
             if sl > entry and tp < entry:
                 candidates.append({
@@ -1463,7 +1463,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
             "priority": 3.5,
             "side": "long",
             "entry": px,  # Market execution on confirmation
-            "sl_override": sweep_low - (current_atr * 0.2),
+            "sl_override": sweep_low - (current_atr * 0.5),
             "tp_override": base.get("asian_high", px + current_atr * 2),
             "risk_mult": 1.5,
             "type": "market"
@@ -1476,7 +1476,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
             "priority": 3.5,
             "side": "short",
             "entry": px,
-            "sl_override": sweep_high + (current_atr * 0.2),
+            "sl_override": sweep_high + (current_atr * 0.5),
             "tp_override": base.get("asian_low", px - current_atr * 2),
             "risk_mult": 1.5,
             "type": "market"
@@ -1523,7 +1523,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 "priority": 2.0,
                 "side": "long",
                 "entry": fib_786_long,
-                "sl_override": min(base.get("last_swing_low", fib_786_long - current_atr) - (current_atr * 0.2), fib_786_long - (0.5 * current_atr)),
+                "sl_override": min(base.get("last_swing_low", fib_786_long - current_atr) - (0.5 * current_atr), fib_786_long - (1.0 * current_atr)),
                 "tp_override": base.get("last_swing_high", px + current_atr * 2),
                 "risk_mult": 1.0,
                 "type": "limit"
@@ -1535,7 +1535,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 "priority": 2.0,
                 "side": "short",
                 "entry": fib_786_short,
-                "sl_override": max(base.get("last_swing_high", fib_786_short + current_atr) + (current_atr * 0.2), fib_786_short + (0.5 * current_atr)),
+                "sl_override": max(base.get("last_swing_high", fib_786_short + current_atr) + (0.5 * current_atr), fib_786_short + (1.0 * current_atr)),
                 "tp_override": base.get("last_swing_low", px - current_atr * 2),
                 "risk_mult": 1.0,
                 "type": "limit"
@@ -1631,12 +1631,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         if dynamic_risk < 1e-9: continue
 
         # 2. Dynamic Structural Take Profit
-        if getattr(cfg, 'dynamic_tp_enabled', True):
-            # Dynamic TP based on bb_width expansion rather than static ATR mult
-            tp_mult = min(max(bb_width / 2.0, 1.5), 5.0)
-        else:
-            tp_mult = getattr(cfg, 'atr_mult_tp', 2.0)
-
+        tp_mult = getattr(cfg, 'atr_mult_tp', 2.0)
         if 'tp_override' in cand:
             tp = cand['tp_override']
             if side == 'long' and tp <= entry: tp = entry + (tp_mult * dynamic_risk)

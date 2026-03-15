@@ -70,6 +70,10 @@ def fetch_macro_trend(ticker_symbol: str, ltf_timestamps: pd.Series) -> np.ndarr
         
         # MACRO TIME LEAK FIX: Shift the daily close by 24h to ensure it is fully closed!
         trend_series = pd.Series(trend, index=df.index.view('int64') // 10**6)
+
+        # FIX: Strip duplicate indices to prevent reindex crashes
+        trend_series = trend_series[~trend_series.index.duplicated(keep='last')]
+
         trend_series.index = trend_series.index + 86400000 
         
         aligned = trend_series.shift(1).reindex(ltf_timestamps, method='ffill').fillna(0.0).values
@@ -82,7 +86,7 @@ def fetch_historical_funding_rates(exw: ExchangeWrapper, symbol: str, ltf_timest
     try:
         if exw.client.has.get('fetchFundingRateHistory'):
             # Fetch a larger history if possible, but CCXT often limits to 200/1000
-            funding = exw.client.fetch_funding_rate_history(symbol, limit=1000)
+            funding = exw.client.fetch_funding_rate_history(symbol, limit=1000, params={'category': 'linear'})
             if not funding: return np.zeros(len(ltf_timestamps))
 
             df = pd.DataFrame(funding)
@@ -198,7 +202,10 @@ def main():
 
     # Historical BTC.D Fetch
     try:
-        btcd_df = exw.fetch_ohlcv_df("BTCDOM/USDT", "4h", limit=1000)
+        import ccxt
+        binance_ex = ccxt.binance()
+        btcd_raw = binance_ex.fetch_ohlcv("BTCDOM/USDT", timeframe="4h", limit=1000)
+        btcd_df = pd.DataFrame(btcd_raw, columns=["timestamp","open","high","low","close","volume"])
         if not btcd_df.empty:
             btcd_c = btcd_df['close'].values
             btcd_trend = np.zeros_like(btcd_c)
@@ -266,7 +273,7 @@ def main():
             if meta:
                 open_meta.remove(meta)
                 # PURE SIGNAL EDGE: 1.0 strictly if it hits structural TP.
-                meta_label = 1.0 if cl.get("exit_reason") == "tp" else 0.0
+                meta_label = 1.0 if cl.get("pnl_r", 0.0) >= 0.5 else 0.0
                 
                 if -50 < cl["pnl_r"] < 50:
                     events.append({

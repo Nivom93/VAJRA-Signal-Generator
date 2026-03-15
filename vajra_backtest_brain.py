@@ -153,9 +153,9 @@ def run_backtest_with_brain(args, preloaded=None):
             if 'created_ts' in df_export.columns:
                 df_export['created_date'] = pd.to_datetime(df_export['created_ts'], unit='ms')
             if 'fill_ts' in df_export.columns:
-                df_export['fill_date'] = pd.to_datetime(df_export['fill_ts'], unit='s')
+                df_export['fill_date'] = pd.to_datetime(df_export['fill_ts'], unit='ms')
             if 'exit_ts' in df_export.columns:
-                df_export['exit_date'] = pd.to_datetime(df_export['exit_ts'], unit='s')
+                df_export['exit_date'] = pd.to_datetime(df_export['exit_ts'], unit='ms')
 
             desired_cols = [
                 'fill_date', 'exit_date', 'side', 'strategy', 'prob', 'rr',
