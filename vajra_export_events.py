@@ -203,8 +203,8 @@ def main():
     # Historical BTC.D Fetch
     try:
         import ccxt
-        binance_ex = ccxt.binance()
-        btcd_raw = binance_ex.fetch_ohlcv("BTCDOM/USDT", timeframe="4h", limit=1000)
+        binance_ex = ccxt.binance({'options': {'defaultType': 'swap'}})
+        btcd_raw = binance_ex.fetch_ohlcv("BTCDOM/USDT:USDT", timeframe="4h", limit=1000)
         btcd_df = pd.DataFrame(btcd_raw, columns=["timestamp","open","high","low","close","volume"])
         if not btcd_df.empty:
             btcd_c = btcd_df['close'].values
