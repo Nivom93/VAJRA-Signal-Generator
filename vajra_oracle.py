@@ -46,14 +46,15 @@ def fetch_rss_titles(url="https://www.coindesk.com/arc/outboundfeeds/rss/", limi
 
 def get_llm_sentiment(titles):
     try:
-        import openai
+        import google.generativeai as genai
 
-        # Ensure OPENAI_API_KEY is available in the environment
-        if not os.environ.get("OPENAI_API_KEY"):
-            log.warning("OPENAI_API_KEY not found. Returning neutral sentiment (0.0).")
+        # Ensure GEMINI_API_KEY is available in the environment
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            log.warning("GEMINI_API_KEY not found. Returning neutral sentiment (0.0).")
             return 0.0
 
-        client = openai.OpenAI()
+        genai.configure(api_key=api_key)
 
         prompt = (
             "You are an elite quantitative macro analyst. "
@@ -63,18 +64,20 @@ def get_llm_sentiment(titles):
         )
 
         headlines_text = "\n".join([f"- {title}" for title in titles])
+        full_prompt = prompt + "\n\n" + headlines_text
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": headlines_text}
-            ],
-            temperature=0.0,
-            max_tokens=10
+        # Using gemini-2.5-flash as requested by the latest integrations
+        model = genai.GenerativeModel("gemini-2.5-flash")
+
+        response = model.generate_content(
+            full_prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.0,
+                max_output_tokens=10,
+            )
         )
 
-        result_text = response.choices[0].message.content.strip()
+        result_text = response.text.strip()
 
         # Parse the float response safely with regex
         match = re.search(r"[-+]?\d*\.\d+|\d+", result_text)
