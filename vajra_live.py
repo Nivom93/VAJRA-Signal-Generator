@@ -380,8 +380,8 @@ def run_bot(args):
                 if getattr(cfg, 'use_macro_data', False):
                     try:
                         import yfinance as yf
-                        dxy_c = yf.Ticker("DX-Y.NYB").history(period="5d")['Close']
-                        spx_c = yf.Ticker("^GSPC").history(period="5d")['Close']
+                        dxy_c = yf.Ticker("DX=F").history(period="5d")['Close']
+                        spx_c = yf.Ticker("ES=F").history(period="5d")['Close']
                         dxy_val = float(dxy_c.iloc[-2]) if len(dxy_c) > 1 else 0.0
                         spx_val = float(spx_c.iloc[-2]) if len(spx_c) > 1 else 0.0
                     except: pass

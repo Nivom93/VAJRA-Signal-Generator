@@ -1180,10 +1180,16 @@ class TradeManager:
             
             if order_type == 'limit':
                 if side == 'long':
+                    if o <= order.get('sl', -1.0):
+                        order['ttl'] = -1
+                        continue
                     if l <= entry_target:
                         triggered = True
                         fill_px = min(o, entry_target)
                 elif side == 'short':
+                    if o >= order.get('sl', 99999999.0):
+                        order['ttl'] = -1
+                        continue
                     if h >= entry_target:
                         triggered = True
                         fill_px = max(o, entry_target)
@@ -1256,11 +1262,11 @@ class TradeManager:
                 t['can_tp_this_bar'] = True
 
             # Real-time PnL calc for Management
-            risk = t.get('initial_risk_unit', abs(t['entry'] - t['sl'])) 
-            if risk == 0: risk = entry * 0.01
-            curr_pnl = (c - entry) * t['total_size'] if side == 'long' else (entry - c) * t['total_size']
-            cost = (entry * t['total_size'] + c * t['total_size']) * fee
-            t['pnl_r'] = (curr_pnl - cost) / risk
+            raw_risk = max(abs(t['entry'] - t['sl']), 1e-9)
+
+            # Unrealized PnL Calculation
+            curr_pnl = (c - entry) if side == 'long' else (entry - c)
+            t['pnl_r'] = (curr_pnl / raw_risk) - fee
             
             hit_sl = False
             hit_tp = False
@@ -1290,9 +1296,8 @@ class TradeManager:
                     if side == 'long': exit_px = max(o, tp) if o > tp else tp
                     else: exit_px = min(o, tp) if o < tp else tp
 
-                pnl = (exit_px - entry) * t['total_size'] if side == 'long' else (entry - exit_px) * t['total_size']
-                cost = (entry * t['total_size'] + exit_px * t['total_size']) * fee
-                t['pnl_r'] = (pnl - cost) / risk 
+                raw_pnl = (exit_px - entry) if side == 'long' else (entry - exit_px)
+                t['pnl_r'] = (raw_pnl / raw_risk) - (fee * 2)
                 t['exit_price'] = exit_px
                 t['exit_reason'] = exit_reason
                 t['exit_ts'] = current_ts
@@ -1491,11 +1496,11 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 "strat": "VA_FADE_LONG",
                 "priority": 2.5,
                 "side": "long",
-                "entry": val,
+                "entry": px,
                 "sl_override": val - current_atr,
                 "tp_override": poc,
                 "risk_mult": 1.0,
-                "type": "limit"
+                "type": "market"
             })
 
         if can_short and px > vah:
@@ -1503,11 +1508,11 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 "strat": "VA_FADE_SHORT",
                 "priority": 2.5,
                 "side": "short",
-                "entry": vah,
+                "entry": px,
                 "sl_override": vah + current_atr,
                 "tp_override": poc,
                 "risk_mult": 1.0,
-                "type": "limit"
+                "type": "market"
             })
 
     # ----------------------------------------------------------
@@ -1631,14 +1636,13 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         if dynamic_risk < 1e-9: continue
 
         # 2. Dynamic Structural Take Profit
-        tp_mult = getattr(cfg, 'atr_mult_tp', 2.0)
         if 'tp_override' in cand:
             tp = cand['tp_override']
-            if side == 'long' and tp <= entry: tp = entry + (tp_mult * dynamic_risk)
-            if side == 'short' and tp >= entry: tp = entry - (tp_mult * dynamic_risk)
+            if side == 'long' and tp <= entry: tp = entry + (dynamic_risk * (cfg.atr_mult_tp / cfg.atr_mult_sl))
+            if side == 'short' and tp >= entry: tp = entry - (dynamic_risk * (cfg.atr_mult_tp / cfg.atr_mult_sl))
         else:
-            if side == 'long': tp = entry + (tp_mult * dynamic_risk)
-            else: tp = entry - (tp_mult * dynamic_risk)
+            tp_dist = dynamic_risk * (cfg.atr_mult_tp / cfg.atr_mult_sl)
+            tp = entry + tp_dist if side == 'long' else entry - tp_dist
 
         reward = abs(tp - entry)
         implied_rr = reward / dynamic_risk

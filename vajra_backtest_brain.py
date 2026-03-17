@@ -99,8 +99,8 @@ def run_backtest_with_brain(args, preloaded=None):
     ltf_iter = ltf[(ltf["timestamp"] >= since_ms) & (ltf["timestamp"] < until_ms)]
 
     log.info("Downloading Macro Context for Backtester...")
-    dxy_aligned = fetch_macro_trend("DX-Y.NYB", ltf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(ltf))
-    spx_aligned = fetch_macro_trend("^GSPC", ltf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(ltf))
+    dxy_aligned = fetch_macro_trend("DX=F", ltf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(ltf))
+    spx_aligned = fetch_macro_trend("ES=F", ltf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(ltf))
     oi_aligned = fetch_delta_oi(ExchangeWrapper(cfg), cfg.symbol, cfg.ltf, ltf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(ltf))
 
     for original_idx, row in ltf_iter.iterrows():

@@ -195,8 +195,8 @@ def main():
 
     log.info("Downloading Macro & Micro-Structure contextual data...")
     exw = ExchangeWrapper(cfg)
-    dxy_aligned = fetch_macro_trend("DX-Y.NYB", ltf["timestamp"])
-    spx_aligned = fetch_macro_trend("^GSPC", ltf["timestamp"])
+    dxy_aligned = fetch_macro_trend("DX=F", ltf["timestamp"])
+    spx_aligned = fetch_macro_trend("ES=F", ltf["timestamp"])
     oi_aligned = fetch_delta_oi(exw, cfg.symbol, cfg.ltf, ltf["timestamp"])
     funding_aligned = fetch_historical_funding_rates(exw, cfg.symbol, ltf["timestamp"])
 
