@@ -51,7 +51,7 @@ def _strategy_overrides(cfg):
     cfg.strat_delta_enabled = True 
     cfg.strat_epsilon_enabled = True  
     cfg.strat_omega_enabled = True     # Re-enable mean reversion to catch chop structure
-    cfg.strat_zeta_enabled = False     
+    cfg.strat_zeta_enabled = True
 
    # ==========================================================
     # 2. COIN-SPECIFIC MATRIX (Max Win Rate)
