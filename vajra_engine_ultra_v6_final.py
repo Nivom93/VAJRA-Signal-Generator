@@ -1643,7 +1643,10 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
             if side == 'long' and tp <= entry: tp = entry + (dynamic_risk * (cfg.atr_mult_tp / cfg.atr_mult_sl))
             if side == 'short' and tp >= entry: tp = entry - (dynamic_risk * (cfg.atr_mult_tp / cfg.atr_mult_sl))
         else:
-            tp_dist = dynamic_risk * (cfg.atr_mult_tp / cfg.atr_mult_sl)
+            if getattr(cfg, 'dynamic_tp_enabled', True):
+                tp_dist = tp_atr_dist
+            else:
+                tp_dist = dynamic_risk * (cfg.atr_mult_tp / cfg.atr_mult_sl)
             tp = entry + tp_dist if side == 'long' else entry - tp_dist
 
         reward = abs(tp - entry)
