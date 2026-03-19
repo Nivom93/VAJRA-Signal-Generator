@@ -103,16 +103,16 @@ def run_backtest_with_brain(args, preloaded=None):
     spx_aligned = fetch_macro_trend("ES=F", ltf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(ltf))
     oi_aligned = fetch_delta_oi(ExchangeWrapper(cfg), cfg.symbol, cfg.ltf, ltf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(ltf))
 
-    for original_idx, row in ltf_iter.iterrows():
-        ts = int(row["timestamp"])
+    for row in ltf_iter.itertuples():
+        ts = int(row.timestamp)
         iH = np.searchsorted(htf['timestamp'].values, ts, side='right') - 1
         iM = np.searchsorted(mtf['timestamp'].values, ts, side='right') - 1
-        iL = int(original_idx)
+        iL = int(row.Index)
 
         if iH < 0 or iM < 0: continue
 
-        bar = {"o": row["open"], "h": row["high"], "l": row["low"], "c": row["close"]}
-        closed = tm.step_bar(cfg.symbol, float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]), ts=ts)
+        bar = {"o": row.open, "h": row.high, "l": row.low, "c": row.close}
+        closed = tm.step_bar(cfg.symbol, float(row.open), float(row.high), float(row.low), float(row.close), ts=ts)
         all_closed.extend(closed)
 
         # Inject Context (Regime Filter & Macro)

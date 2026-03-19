@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse, time, logging, traceback, os, requests, json, csv, sqlite3, threading, subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from collections import deque
 import pandas as pd
 import numpy as np
 import ccxt # Explicit import for network exception handling
@@ -42,6 +43,30 @@ if not log.handlers:
     log.addHandler(h)
 
 # --- AUTO RETRAINER ---
+
+class MacroFetcher(threading.Thread):
+    """
+    Background daemon that asynchronously fetches slow macro data (yfinance)
+    to prevent main execution loop freezing.
+    """
+    def __init__(self, cfg):
+        super().__init__(daemon=True)
+        self.cfg = cfg
+        self.state = {"dxy_val": 0.0, "spx_val": 0.0}
+
+    def run(self):
+        log.info("🌐 Macro Fetcher Daemon Active.")
+        while True:
+            if getattr(self.cfg, 'use_macro_data', False):
+                try:
+                    import yfinance as yf
+                    dxy_c = yf.Ticker("DX=F").history(period="5d")['Close']
+                    spx_c = yf.Ticker("ES=F").history(period="5d")['Close']
+                    self.state["dxy_val"] = float(dxy_c.iloc[-2]) if len(dxy_c) > 1 else 0.0
+                    self.state["spx_val"] = float(spx_c.iloc[-2]) if len(spx_c) > 1 else 0.0
+                except Exception as e:
+                    log.debug(f"Macro Fetcher silent fail: {e}")
+            time.sleep(300) # Update every 5 minutes
 
 class AutoRetrainer(threading.Thread):
     """
@@ -296,35 +321,37 @@ def run_bot(args):
     retrainer = AutoRetrainer(brain, args.brain_long_path, args.brain_short_path)
     retrainer.start()
 
+    # 4. Start Macro Fetcher Daemon
+    macro_fetcher = MacroFetcher(cfg)
+    macro_fetcher.start()
+
     # PHASE 2: IN-MEMORY OHLCV CACHING SYSTEM (Prevents API ratelimits)
     log.info("Building In-Memory OHLCV Cache to prevent IP Bans...")
     market_cache = {}
     for sym in cfg.symbols:
         market_cache[sym] = {
-            "htf": ex.fetch_ohlcv_df(sym, cfg.htf, limit=250),
-            "mtf": ex.fetch_ohlcv_df(sym, cfg.mtf, limit=250),
-            "ltf": ex.fetch_ohlcv_df(sym, cfg.ltf, limit=500)
+            "htf": deque(ex.fetch_ohlcv_df(sym, cfg.htf, limit=250).to_dict('records'), maxlen=250),
+            "mtf": deque(ex.fetch_ohlcv_df(sym, cfg.mtf, limit=250).to_dict('records'), maxlen=250),
+            "ltf": deque(ex.fetch_ohlcv_df(sym, cfg.ltf, limit=500).to_dict('records'), maxlen=500)
         }
     
     global_cache = {
-        "btc_4h": ex.fetch_ohlcv_df("BTC/USDT", "4h", limit=1000),
-        "btc_ltf": ex.fetch_ohlcv_df("BTC/USDT", cfg.ltf, limit=500)
+        "btc_4h": deque(ex.fetch_ohlcv_df("BTC/USDT", "4h", limit=1000).to_dict('records'), maxlen=1000),
+        "btc_ltf": deque(ex.fetch_ohlcv_df("BTC/USDT", cfg.ltf, limit=500).to_dict('records'), maxlen=500)
     }
     try:
-        global_cache["btcd_4h"] = ex.fetch_ohlcv_df("BTCDOM/USDT", "4h", limit=50)
+        global_cache["btcd_4h"] = deque(ex.fetch_ohlcv_df("BTCDOM/USDT", "4h", limit=50).to_dict('records'), maxlen=50)
     except:
-        global_cache["btcd_4h"] = pd.DataFrame()
+        global_cache["btcd_4h"] = deque(maxlen=50)
         
     log.info("✅ Cache built successfully.")
 
-    log.info(f"✅ ENGINE v34 LIVE on {cfg.symbols}. Protocol: Liquidity Warlord.")
+    log.info(f"✅ ENGINE v35 LIVE on {cfg.symbols}. Protocol: Liquidity Warlord.")
     mode_str = "PAPER (Simulation)" if cfg.paper_mode else "REAL MONEY"
     log.info(f"EXECUTION MODE: {mode_str} | ENTRY STYLE: {cfg.execution_style}")
 
     btc_bullish = 1.0
     btcd_trend = 0.0 # Default Neutral
-    dxy_val = 0.0
-    spx_val = 0.0
     
     while True:
         try:
@@ -336,9 +363,20 @@ def run_bot(args):
             # A. REAL-TIME MACRO CONTEXT (Cache Append)
             try:
                 # 1. BTC Context
-                new_btc_4h = ex.fetch_ohlcv_df("BTC/USDT", "4h", limit=5)
-                global_cache["btc_4h"] = pd.concat([global_cache["btc_4h"], new_btc_4h]).drop_duplicates(subset=["timestamp"], keep="last").tail(1000).reset_index(drop=True).copy()
-                btc_ohlcv = global_cache["btc_4h"]
+                new_btc_4h = ex.fetch_ohlcv_df("BTC/USDT", "4h", limit=5).to_dict('records')
+                # Update deque avoiding duplicates
+                existing_ts = {r['timestamp'] for r in global_cache["btc_4h"]}
+                for rec in new_btc_4h:
+                    if rec['timestamp'] not in existing_ts:
+                        global_cache["btc_4h"].append(rec)
+                    else:
+                        # Update existing
+                        for i, r in enumerate(global_cache["btc_4h"]):
+                            if r['timestamp'] == rec['timestamp']:
+                                global_cache["btc_4h"][i] = rec
+                                break
+
+                btc_ohlcv = pd.DataFrame(list(global_cache["btc_4h"]))
                 
                 if not btc_ohlcv.empty:
                     btc_c = btc_ohlcv.close.values
@@ -349,19 +387,31 @@ def run_bot(args):
                     log.info(f"BTC Context (4H): Bullish={btc_bullish} (Dist={dist_pct:.2f}%)")
 
                 # 2. BTC LTF Context (For relative strength syncing)
-                new_btc_ltf = ex.fetch_ohlcv_df("BTC/USDT", cfg.ltf, limit=5)
-                global_cache["btc_ltf"] = pd.concat([global_cache["btc_ltf"], new_btc_ltf]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True).copy()
-                btc_ltf = global_cache["btc_ltf"]
+                new_btc_ltf = ex.fetch_ohlcv_df("BTC/USDT", cfg.ltf, limit=5).to_dict('records')
+                existing_ts_ltf = {r['timestamp'] for r in global_cache["btc_ltf"]}
+                for rec in new_btc_ltf:
+                    if rec['timestamp'] not in existing_ts_ltf:
+                        global_cache["btc_ltf"].append(rec)
+                    else:
+                        for i, r in enumerate(global_cache["btc_ltf"]):
+                            if r['timestamp'] == rec['timestamp']:
+                                global_cache["btc_ltf"][i] = rec
+                                break
+                btc_ltf = pd.DataFrame(list(global_cache["btc_ltf"]))
 
                 # 3. BTC DOMINANCE CONTEXT
                 try:
-                    new_btcd = ex.fetch_ohlcv_df("BTCDOM/USDT", "4h", limit=5)
-                    if not new_btcd.empty:
-                        if global_cache["btcd_4h"].empty:
-                            global_cache["btcd_4h"] = new_btcd.copy()
+                    new_btcd = ex.fetch_ohlcv_df("BTCDOM/USDT", "4h", limit=5).to_dict('records')
+                    existing_ts_btcd = {r['timestamp'] for r in global_cache["btcd_4h"]}
+                    for rec in new_btcd:
+                        if rec['timestamp'] not in existing_ts_btcd:
+                            global_cache["btcd_4h"].append(rec)
                         else:
-                            global_cache["btcd_4h"] = pd.concat([global_cache["btcd_4h"], new_btcd]).drop_duplicates(subset=["timestamp"], keep="last").tail(50).reset_index(drop=True).copy()
-                    btcd_df = global_cache["btcd_4h"]
+                            for i, r in enumerate(global_cache["btcd_4h"]):
+                                if r['timestamp'] == rec['timestamp']:
+                                    global_cache["btcd_4h"][i] = rec
+                                    break
+                    btcd_df = pd.DataFrame(list(global_cache["btcd_4h"]))
                 except:
                     btcd_df = pd.DataFrame()
                 
@@ -376,15 +426,9 @@ def run_bot(args):
                 else:
                     btcd_trend = 0.0
 
-                # 4. CROSS-ASSET MACRO (Live Fetch)
-                if getattr(cfg, 'use_macro_data', False):
-                    try:
-                        import yfinance as yf
-                        dxy_c = yf.Ticker("DX=F").history(period="5d")['Close']
-                        spx_c = yf.Ticker("ES=F").history(period="5d")['Close']
-                        dxy_val = float(dxy_c.iloc[-2]) if len(dxy_c) > 1 else 0.0
-                        spx_val = float(spx_c.iloc[-2]) if len(spx_c) > 1 else 0.0
-                    except: pass
+                # 4. CROSS-ASSET MACRO (Read from Daemon)
+                dxy_val = macro_fetcher.state["dxy_val"]
+                spx_val = macro_fetcher.state["spx_val"]
 
             except Exception as e:
                 log.warning(f"Macro Sync Failed: {e}")
@@ -437,17 +481,21 @@ def run_bot(args):
                         log.warning(f"⚠️ Failed to cancel open orders for {symbol}: {e}")
 
                 # Fetch incremental update and apply to cache (Protect Rate Limits)
-                new_htf = ex.fetch_ohlcv_df(symbol, cfg.htf, limit=5)
-                market_cache[symbol]["htf"] = pd.concat([market_cache[symbol]["htf"], new_htf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True).copy()
-                htf = market_cache[symbol]["htf"]
+                for timeframe, key, limit_n in [(cfg.htf, "htf", 250), (cfg.mtf, "mtf", 250), (cfg.ltf, "ltf", 500)]:
+                    new_data = ex.fetch_ohlcv_df(symbol, timeframe, limit=5).to_dict('records')
+                    existing_ts = {r['timestamp'] for r in market_cache[symbol][key]}
+                    for rec in new_data:
+                        if rec['timestamp'] not in existing_ts:
+                            market_cache[symbol][key].append(rec)
+                        else:
+                            for i, r in enumerate(market_cache[symbol][key]):
+                                if r['timestamp'] == rec['timestamp']:
+                                    market_cache[symbol][key][i] = rec
+                                    break
                 
-                new_mtf = ex.fetch_ohlcv_df(symbol, cfg.mtf, limit=5)
-                market_cache[symbol]["mtf"] = pd.concat([market_cache[symbol]["mtf"], new_mtf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True).copy()
-                mtf = market_cache[symbol]["mtf"]
-
-                new_ltf = ex.fetch_ohlcv_df(symbol, cfg.ltf, limit=5)
-                market_cache[symbol]["ltf"] = pd.concat([market_cache[symbol]["ltf"], new_ltf]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True).copy()
-                ltf = market_cache[symbol]["ltf"]
+                htf = pd.DataFrame(list(market_cache[symbol]["htf"]))
+                mtf = pd.DataFrame(list(market_cache[symbol]["mtf"]))
+                ltf = pd.DataFrame(list(market_cache[symbol]["ltf"]))
                 
                 if ltf.empty or len(htf) < 2 or len(mtf) < 2 or len(ltf) < 2: continue
                 

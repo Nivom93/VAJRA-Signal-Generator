@@ -31,7 +31,7 @@ def _strategy_overrides(cfg):
     cfg.risk_per_trade = 0.01          
     cfg.max_concurrent = 3             
     cfg.dynamic_risk_scaling = False   
-    cfg.max_risk_factor = 1.0          
+    cfg.max_risk_factor = 3.0
     
     # --- FILTERS (LET THE AI DECIDE) ---
     cfg.filter_htf_trend = True        
