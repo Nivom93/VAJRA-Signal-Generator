@@ -257,7 +257,7 @@ def main(argv=None):
     
     log.info("Training Final Production Model on FULL DATASET (Weighted) with Top Features...")
     if args.calibrate:
-        final_cal = CalibratedClassifierCV(final_base, method='sigmoid', cv=5)
+        final_cal = CalibratedClassifierCV(final_base, method='sigmoid', cv=TimeSeriesSplit(n_splits=5))
         try: final_cal.fit(X_top, y_all, sample_weight=sample_weights)
         except: final_cal.fit(X_top, y_all)
         final_model = final_cal

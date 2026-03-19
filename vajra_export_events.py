@@ -256,16 +256,16 @@ def main():
     
     len_ltf = len(ltf); len_mtf = len(mtf); len_htf = len(htf)
     
-    for original_idx, row in ltf_iter.iterrows():
-        ts = int(row["timestamp"])
+    for row in ltf_iter.itertuples():
+        ts = int(row.timestamp)
         
         iH = np.searchsorted(htf['timestamp'].values, ts, side='right') - 1
         iM = np.searchsorted(mtf['timestamp'].values, ts, side='right') - 1
-        iL = int(original_idx)
+        iL = int(row.Index)
         
         if iH < 0 or iM < 0: continue
 
-        bar = {"o": row["open"], "h": row["high"], "l": row["low"], "c": row["close"]}
+        bar = {"o": row.open, "h": row.high, "l": row.low, "c": row.close}
         exits = tm.step_bar(cfg.symbol, bar["o"], bar["h"], bar["l"], bar["c"], ts=ts)
         
         for cl in exits:
