@@ -24,7 +24,7 @@ def _strategy_overrides(cfg):
     cfg.be_trigger_r = 0.0             # Do not use BE tricks. Let structural TP or SL hit naturally.
     cfg.trailing_stop_trigger_r = 0.0
     cfg.trailing_dist_r = 0.0
-    cfg.dynamic_tp_enabled = True
+    cfg.dynamic_tp_enabled = False
     cfg.time_in_force_decay = 72
 
     # --- GLOBAL RISK DEFAULTS ---
@@ -62,7 +62,7 @@ def _strategy_overrides(cfg):
 
     # --- BASE-HIT INSTITUTIONAL GEOMETRY ---
     # Target a >50% true win-rate without breakeven tricks.
-    cfg.min_rr = 0.9
+    cfg.min_rr = 1.5
     cfg.atr_mult_sl = 1.0
     cfg.atr_mult_tp = 3.0           # 2.0 TP / 2.0 SL = 1:1 RR (Mathematically supports >50% WR)
 

@@ -1559,6 +1559,58 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         
         entry = cand['entry']
 
+        # ==========================================================
+        # MULTI-MODEL RISK & REWARD GEOMETRY
+        # ==========================================================
+
+        # 1. Stop Loss Assignment
+        if 'sl_override' in cand:
+            sl = cand['sl_override']
+            # Sanity clamp to prevent mathematically impossible physics
+            if side == 'long' and sl >= entry: sl = entry - (current_atr * 1.5)
+            if side == 'short' and sl <= entry: sl = entry + (current_atr * 1.5)
+        else:
+            # Fallback to dynamic ATR distance provided by the model
+            sl_dist_atr = cand.get('sl_dist_atr', 1.5)
+            if side == 'long':
+                sl = entry - (current_atr * sl_dist_atr)
+            else:
+                sl = entry + (current_atr * sl_dist_atr)
+
+        dynamic_risk = abs(entry - sl)
+        min_risk = current_atr * 0.5
+        if dynamic_risk < min_risk:
+            dynamic_risk = min_risk
+            if side == 'long': sl = entry - min_risk
+            else: sl = entry + min_risk
+
+        if dynamic_risk < 1e-9: continue
+
+        # 2. Dynamic Structural Take Profit
+        if 'tp_override' in cand:
+            tp = cand['tp_override']
+            if side == 'long' and tp <= entry: tp = entry + (dynamic_risk * (cfg.atr_mult_tp / cfg.atr_mult_sl))
+            if side == 'short' and tp >= entry: tp = entry - (dynamic_risk * (cfg.atr_mult_tp / cfg.atr_mult_sl))
+        else:
+            if getattr(cfg, 'dynamic_tp_enabled', True):
+                tp_dist = tp_atr_dist
+            else:
+                tp_dist = dynamic_risk * (cfg.atr_mult_tp / cfg.atr_mult_sl)
+            tp = entry + tp_dist if side == 'long' else entry - tp_dist
+
+        reward = abs(tp - entry)
+        implied_rr = reward / dynamic_risk
+
+        if implied_rr < cfg.min_rr:
+            continue
+
+        # INJECT CANDIDATE DNA INTO FEATURES
+        cand_feats = base.copy()
+        cand_feats["proposed_rr"] = float(implied_rr)
+        cand_feats["strat_alpha"] = 1.0 if "ALPHA" in cand['strat'] else 0.0
+        cand_feats["strat_gamma"] = 1.0 if "GAMMA" in cand['strat'] else 0.0
+        cand_feats["strat_zeta"] = 1.0 if "ZETA" in cand['strat'] else 0.0
+        cand_feats["strat_delta"] = 1.0 if "DEEP" in cand['strat'] else 0.0
 
         # DEFAULT BASELINE VARIABLES (If no brain is present)
         prob = 1.0
@@ -1566,7 +1618,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         score = cand['priority']
 
         if brain:
-            prob = brain.predict_prob(side, base, adv, iH, iM, iL, px, pre)
+            prob = brain.predict_prob(side, cand_feats, adv, iH, iM, iL, px, pre)
             min_prob = cfg.min_prob_long if side == 'long' else cfg.min_prob_short
             
             if prob < min_prob:
@@ -1617,45 +1669,6 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
             if cand['strat'] != 'PANIC_REVERSION_LONG' and cand['strat'] != 'PANIC_REVERSION_SHORT':
                 continue # We WANT high velocity for panic reversion, but reject for trend rides
 
-        # ==========================================================
-        # MULTI-MODEL RISK & REWARD GEOMETRY
-        # ==========================================================
-
-        # 1. Stop Loss Assignment
-        if 'sl_override' in cand:
-            sl = cand['sl_override']
-            # Sanity clamp to prevent mathematically impossible physics
-            if side == 'long' and sl >= entry: sl = entry - (current_atr * 1.5)
-            if side == 'short' and sl <= entry: sl = entry + (current_atr * 1.5)
-        else:
-            # Fallback to dynamic ATR distance provided by the model
-            sl_dist_atr = cand.get('sl_dist_atr', 1.5)
-            if side == 'long':
-                sl = entry - (current_atr * sl_dist_atr)
-            else:
-                sl = entry + (current_atr * sl_dist_atr)
-
-        dynamic_risk = abs(entry - sl)
-        if dynamic_risk < 1e-9: continue
-
-        # 2. Dynamic Structural Take Profit
-        if 'tp_override' in cand:
-            tp = cand['tp_override']
-            if side == 'long' and tp <= entry: tp = entry + (dynamic_risk * (cfg.atr_mult_tp / cfg.atr_mult_sl))
-            if side == 'short' and tp >= entry: tp = entry - (dynamic_risk * (cfg.atr_mult_tp / cfg.atr_mult_sl))
-        else:
-            if getattr(cfg, 'dynamic_tp_enabled', True):
-                tp_dist = tp_atr_dist
-            else:
-                tp_dist = dynamic_risk * (cfg.atr_mult_tp / cfg.atr_mult_sl)
-            tp = entry + tp_dist if side == 'long' else entry - tp_dist
-
-        reward = abs(tp - entry)
-        implied_rr = reward / dynamic_risk
-
-        if implied_rr < cfg.min_rr:
-            continue
-
         if score > best_score:
             best_score = score
             best_plan = {
@@ -1666,7 +1679,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 "rr": implied_rr,
                 "prob": prob,
                 "key": f"{cand['strat']}_{side}",
-                "features": base,
+                "features": cand_feats,
                 "risk_factor": risk_factor,
                 "strategy": cand['strat'],
                 "type": order_type
