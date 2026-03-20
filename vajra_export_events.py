@@ -52,8 +52,23 @@ def fetch_macro_trend(ticker_symbol: str, ltf_timestamps: pd.Series) -> np.ndarr
         start_dt = pd.to_datetime(ltf_timestamps.iloc[0], unit='ms')
         end_dt = pd.to_datetime(ltf_timestamps.iloc[-1], unit='ms')
         start_dt_padded = start_dt - pd.Timedelta(days=30)
-        df = yf.download(ticker_symbol, start=start_dt_padded, end=end_dt, interval="1d", progress=False, auto_adjust=True)
-        
+
+        fallback_tickers = [ticker_symbol]
+        if ticker_symbol == "DX=F":
+            fallback_tickers = ["DX-Y.NYB", "UUP", "DX=F"]
+        elif ticker_symbol == "ES=F":
+            fallback_tickers = ["^GSPC", "SPY", "ES=F"]
+
+        df = pd.DataFrame()
+        for t in fallback_tickers:
+            try:
+                temp_df = yf.download(t, start=start_dt_padded, end=end_dt, interval="1d", progress=False, auto_adjust=True)
+                if not temp_df.empty:
+                    df = temp_df
+                    break
+            except Exception:
+                continue
+
         if df.empty: return np.zeros(len(ltf_timestamps))
         
         if isinstance(df.columns, pd.MultiIndex):
@@ -84,9 +99,14 @@ def fetch_macro_trend(ticker_symbol: str, ltf_timestamps: pd.Series) -> np.ndarr
 
 def fetch_historical_funding_rates(exw: ExchangeWrapper, symbol: str, ltf_timestamps: pd.Series) -> np.ndarray:
     try:
+        target_symbol = symbol
+        if exw.client.id == 'bybit' and ':' not in symbol and '/' in symbol:
+            quote = symbol.split('/')[1]
+            target_symbol = f"{symbol}:{quote}"
+
         if exw.client.has.get('fetchFundingRateHistory'):
             # Fetch a larger history if possible, but CCXT often limits to 200/1000
-            funding = exw.client.fetch_funding_rate_history(symbol, limit=1000, params={'category': 'linear'})
+            funding = exw.client.fetch_funding_rate_history(target_symbol, limit=1000, params={'category': 'linear'})
             if not funding: return np.zeros(len(ltf_timestamps))
 
             df = pd.DataFrame(funding)

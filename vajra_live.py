@@ -60,10 +60,23 @@ class MacroFetcher(threading.Thread):
             if getattr(self.cfg, 'use_macro_data', False):
                 try:
                     import yfinance as yf
-                    dxy_c = yf.Ticker("DX=F").history(period="5d")['Close']
-                    spx_c = yf.Ticker("ES=F").history(period="5d")['Close']
-                    self.state["dxy_val"] = float(dxy_c.iloc[-2]) if len(dxy_c) > 1 else 0.0
-                    self.state["spx_val"] = float(spx_c.iloc[-2]) if len(spx_c) > 1 else 0.0
+                    for t in ["DX-Y.NYB", "UUP", "DX=F"]:
+                        try:
+                            dxy_c = yf.Ticker(t).history(period="5d")['Close']
+                            if not dxy_c.empty:
+                                self.state["dxy_val"] = float(dxy_c.iloc[-2]) if len(dxy_c) > 1 else 0.0
+                                break
+                        except Exception:
+                            continue
+
+                    for t in ["^GSPC", "SPY", "ES=F"]:
+                        try:
+                            spx_c = yf.Ticker(t).history(period="5d")['Close']
+                            if not spx_c.empty:
+                                self.state["spx_val"] = float(spx_c.iloc[-2]) if len(spx_c) > 1 else 0.0
+                                break
+                        except Exception:
+                            continue
                 except Exception as e:
                     log.debug(f"Macro Fetcher silent fail: {e}")
             time.sleep(300) # Update every 5 minutes

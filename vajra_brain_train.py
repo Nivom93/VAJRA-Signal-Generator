@@ -190,13 +190,16 @@ def main(argv=None):
         
         if w_tr.sum() > 0:
             w_tr = w_tr * (len(w_tr) / w_tr.sum())
+
+        spw = np.sum(y_tr == 0) / max(1, np.sum(y_tr == 1))
         
         clf = xgb.XGBClassifier(
-            n_estimators=400,
-            learning_rate=0.01,
-            max_depth=3,
+            n_estimators=args.n_estimators,
+            learning_rate=args.learning_rate,
+            max_depth=args.max_depth,
             reg_alpha=args.reg_alpha,
             reg_lambda=args.reg_lambda,
+            scale_pos_weight=spw,
             colsample_bytree=0.7,
             subsample=0.8,
             random_state=42,
@@ -241,12 +244,15 @@ def main(argv=None):
 
     X_top = X_all[:, top_indices]
 
+    spw_all = np.sum(y_all == 0) / max(1, np.sum(y_all == 1))
+
     final_base = xgb.XGBClassifier(
-        n_estimators=400,
-        learning_rate=0.01,
-        max_depth=3,
+        n_estimators=args.n_estimators,
+        learning_rate=args.learning_rate,
+        max_depth=args.max_depth,
         reg_alpha=args.reg_alpha,
         reg_lambda=args.reg_lambda,
+        scale_pos_weight=spw_all,
         colsample_bytree=0.7,
         subsample=0.8,
         random_state=42,

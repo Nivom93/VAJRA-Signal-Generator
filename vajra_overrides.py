@@ -70,8 +70,8 @@ def _strategy_overrides(cfg):
         cfg.min_conf_long = 1.0
         cfg.min_conf_short = 1.0
         # Realistic AI Gatekeeping for Calibrated Models
-        cfg.min_prob_long = 0.55
-        cfg.min_prob_short = 0.55
+        cfg.min_prob_long = 0.50
+        cfg.min_prob_short = 0.50
     else:
-        cfg.min_prob_long = 0.55
-        cfg.min_prob_short = 0.55
+        cfg.min_prob_long = 0.50
+        cfg.min_prob_short = 0.50
