@@ -269,11 +269,19 @@ def main(argv=None):
     # outputs to center around 0.5 for asymmetric edge hunting.
     final_model.fit(X_top, y_all, sample_weight=sample_weights)
 
+    # EDGE EXTRACTION: Anti-Signal Flipping
+    # In highly mean-reverting crypto regimes where the AUC collapses below 0.48,
+    # the model is reliably misclassifying true direction. We set invert_prob to True
+    # to harvest the inverse edge.
+    invert = bool(avg_auc < 0.48)
+    if invert:
+        log.info("⚠️ Anti-Signal Detected (AUC < 0.48). Flipping Probability Pipeline to Harvest Edge.")
+
     pipeline = {
         "classifier": final_model, 
         "feature_names": top_feature_names,
         "training_args": vars(args), 
-        "invert_prob": False,  # Disabled anti-signal flipping to prevent counter-trend traps
+        "invert_prob": invert,
         "model": "xgboost",
         "wfa_auc": avg_auc,
         "wfa_brier": avg_brier

@@ -293,7 +293,7 @@ def main():
             if meta:
                 open_meta.remove(meta)
                 # PURE SIGNAL EDGE: 1.0 strictly if it exceeds minimum acceptable asymmetric payout.
-                meta_label = 1.0 if cl.get("pnl_r", 0.0) >= 2.4 else 0.0
+                meta_label = 1.0 if cl.get("pnl_r", 0.0) >= (cfg.min_rr * 0.95) else 0.0
                 
                 if -50 < cl["pnl_r"] < 50:
                     events.append({

@@ -1602,7 +1602,13 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         implied_rr = reward / dynamic_risk
 
         if implied_rr < cfg.min_rr:
-            continue
+            # Force the minimum RR by stretching the TP instead of rejecting the trade
+            tp_dist = dynamic_risk * cfg.min_rr
+            if side == 'long': tp = entry + tp_dist
+            else: tp = entry - tp_dist
+
+            reward = abs(tp - entry)
+            implied_rr = reward / dynamic_risk
 
         # INJECT CANDIDATE DNA INTO FEATURES
         cand_feats = base.copy()

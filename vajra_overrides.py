@@ -50,8 +50,8 @@ def _strategy_overrides(cfg):
     cfg.strat_gamma_enabled = True  
     cfg.strat_delta_enabled = True 
     cfg.strat_epsilon_enabled = True  
-    cfg.strat_omega_enabled = False    # Disable mean reversion (Anti-Trend trap)
-    cfg.strat_zeta_enabled = False     # Disable mean reversion (Anti-Trend trap)
+    cfg.strat_omega_enabled = True
+    cfg.strat_zeta_enabled = True
 
    # ==========================================================
     # 2. COIN-SPECIFIC MATRIX (Max Win Rate)
@@ -69,9 +69,8 @@ def _strategy_overrides(cfg):
     if "BTC" in symbol or "ETH" in symbol:
         cfg.min_conf_long = 1.0
         cfg.min_conf_short = 1.0
-        # Restoring native probability gates (Uncalibrated base models map to 0.5)
-        cfg.min_prob_long = 0.50
-        cfg.min_prob_short = 0.50
+        cfg.min_prob_long = 0.40
+        cfg.min_prob_short = 0.40
     else:
-        cfg.min_prob_long = 0.50
-        cfg.min_prob_short = 0.50
+        cfg.min_prob_long = 0.40
+        cfg.min_prob_short = 0.40
