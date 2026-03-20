@@ -262,27 +262,18 @@ def main(argv=None):
     final_model = final_base
     
     log.info("Training Final Production Model on FULL DATASET (Weighted) with Top Features...")
-    if args.calibrate:
-        final_cal = CalibratedClassifierCV(final_base, method='sigmoid', cv=TimeSeriesSplit(n_splits=5))
-        try: final_cal.fit(X_top, y_all, sample_weight=sample_weights)
-        except: final_cal.fit(X_top, y_all)
-        final_model = final_cal
-    else:
-        final_model.fit(X_top, y_all, sample_weight=sample_weights)
 
-    # EDGE EXTRACTION: Anti-Signal Flipping
-    # If the WFA AUC is significantly below 0.5 (e.g. 0.45), the model is perfectly
-    # identifying losers. In highly mean-reverting crypto regimes, this is common.
-    # We set invert_prob to True to harvest the inverse edge.
-    invert = bool(avg_auc < 0.5)
-    if invert:
-        log.info("⚠️ Anti-Signal Detected (AUC < 0.50). Flipping Probability Pipeline to Harvest Edge.")
+    # Removed CalibratedClassifierCV.
+    # Calibration natively suppresses scale_pos_weight forcing the outputs
+    # back to raw sample distribution percentages. We want raw uncalibrated
+    # outputs to center around 0.5 for asymmetric edge hunting.
+    final_model.fit(X_top, y_all, sample_weight=sample_weights)
 
     pipeline = {
         "classifier": final_model, 
         "feature_names": top_feature_names,
         "training_args": vars(args), 
-        "invert_prob": invert,
+        "invert_prob": False,  # Disabled anti-signal flipping to prevent counter-trend traps
         "model": "xgboost",
         "wfa_auc": avg_auc,
         "wfa_brier": avg_brier

@@ -1435,24 +1435,24 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
             dist = abs(px - ob_bull_top) / current_atr
             if dist <= 1.0:
                 entry = min(px, ob_bull_top)
-                sl = ob_bull_bot - (0.5 * current_atr)
+                sl = ob_bull_bot - (1.0 * current_atr)
                 tp = ob_bear_bot if ob_bear_bot > px else base.get("last_swing_high", px + current_atr * 3)
                 if sl < entry and tp > entry:
                     candidates.append({
                         "strat": "ALPHA_OB_LONG", "priority": 4.0, "side": "long", "entry": entry,
-                        "sl_override": min(sl, entry - (0.5 * current_atr)), "tp_override": tp, "risk_mult": 1.2, "type": "limit"
+                        "sl_override": min(sl, entry - (1.0 * current_atr)), "tp_override": tp, "risk_mult": 1.2, "type": "limit"
                     })
 
         if can_short and ob_bear_bot > 0 and px <= ob_bear_top:
             dist = abs(px - ob_bear_bot) / current_atr
             if dist <= 1.0:
                 entry = max(px, ob_bear_bot)
-                sl = ob_bear_top + (0.5 * current_atr)
+                sl = ob_bear_top + (1.0 * current_atr)
                 tp = ob_bull_top if (0 < ob_bull_top < px) else base.get("last_swing_low", px - current_atr * 3)
                 if sl > entry and tp < entry:
                     candidates.append({
                         "strat": "ALPHA_OB_SHORT", "priority": 4.0, "side": "short", "entry": entry,
-                        "sl_override": max(sl, entry + (0.5 * current_atr)), "tp_override": tp, "risk_mult": 1.2, "type": "limit"
+                        "sl_override": max(sl, entry + (1.0 * current_atr)), "tp_override": tp, "risk_mult": 1.2, "type": "limit"
                     })
 
     # ----------------------------------------------------------
@@ -1469,7 +1469,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 "priority": 3.5,
                 "side": "long",
                 "entry": px,  # Market execution on confirmation
-                "sl_override": sweep_low - (current_atr * 0.5),
+                "sl_override": sweep_low - (current_atr * 1.0),
                 "tp_override": base.get("asian_high", px + current_atr * 2),
                 "risk_mult": 1.5,
                 "type": "market"
@@ -1482,7 +1482,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 "priority": 3.5,
                 "side": "short",
                 "entry": px,
-                "sl_override": sweep_high + (current_atr * 0.5),
+                "sl_override": sweep_high + (current_atr * 1.0),
                 "tp_override": base.get("asian_low", px - current_atr * 2),
                 "risk_mult": 1.5,
                 "type": "market"
@@ -1531,7 +1531,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                     "priority": 2.0,
                     "side": "long",
                     "entry": fib_786_long,
-                    "sl_override": min(base.get("last_swing_low", fib_786_long - current_atr) - (0.5 * current_atr), fib_786_long - (1.0 * current_atr)),
+                    "sl_override": min(base.get("last_swing_low", fib_786_long - current_atr) - (1.0 * current_atr), fib_786_long - (1.5 * current_atr)),
                     "tp_override": base.get("last_swing_high", px + current_atr * 2),
                     "risk_mult": 1.0,
                     "type": "limit"
@@ -1543,7 +1543,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                     "priority": 2.0,
                     "side": "short",
                     "entry": fib_786_short,
-                    "sl_override": max(base.get("last_swing_high", fib_786_short + current_atr) + (0.5 * current_atr), fib_786_short + (1.0 * current_atr)),
+                    "sl_override": max(base.get("last_swing_high", fib_786_short + current_atr) + (1.0 * current_atr), fib_786_short + (1.5 * current_atr)),
                     "tp_override": base.get("last_swing_low", px - current_atr * 2),
                     "risk_mult": 1.0,
                     "type": "limit"
@@ -1567,8 +1567,8 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         if 'sl_override' in cand:
             sl = cand['sl_override']
             # Sanity clamp to prevent mathematically impossible physics
-            if side == 'long' and sl >= entry: sl = entry - (current_atr * 1.5)
-            if side == 'short' and sl <= entry: sl = entry + (current_atr * 1.5)
+            if side == 'long' and sl >= entry: sl = entry - (current_atr * 2.0)
+            if side == 'short' and sl <= entry: sl = entry + (current_atr * 2.0)
         else:
             # Fallback to dynamic ATR distance provided by the model
             sl_dist_atr = cand.get('sl_dist_atr', 1.5)
@@ -1578,7 +1578,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 sl = entry + (current_atr * sl_dist_atr)
 
         dynamic_risk = abs(entry - sl)
-        min_risk = current_atr * 0.5
+        min_risk = current_atr * 1.0
         if dynamic_risk < min_risk:
             dynamic_risk = min_risk
             if side == 'long': sl = entry - min_risk
@@ -1645,8 +1645,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         if getattr(cfg, 'filter_htf_trend', False):
             is_counter = (side == 'short' and btc_bullish > 0.5) or (side == 'long' and btc_bullish < 0.5)
             if is_counter:
-                score *= 0.5
-                risk_factor *= 0.5
+                continue
 
         # STAGE 1: Convert Hard Gates to "Soft" Features
         # Derivatives, Volume Profile Confluence are now handled entirely by XGBoost features
