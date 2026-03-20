@@ -57,6 +57,10 @@ def run_backtest_with_brain(args, preloaded=None):
     if preloaded is None: pre = bt_helpers._preload_or_fetch(args)
     else: pre = preloaded
     htf, mtf, ltf = pre.htf, pre.mtf, pre.ltf
+
+    for df in (htf, mtf, ltf):
+        df.sort_values("timestamp", inplace=True, ignore_index=True)
+
     btc = pre.btc if pre.btc is not None else htf.copy()
 
     # --- CALC BTC TREND (Aligned) ---

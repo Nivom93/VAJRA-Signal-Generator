@@ -348,7 +348,6 @@ def main():
                      full_feats[k] = float(val) if np.isfinite(val) else 0.0
 
             px = bar["c"]
-            full_feats["rsi_14"] = float(pre_l.rsi14[iL]) if iL < len(pre_l.rsi14) else 50.0
             
             entry_dt = pd.to_datetime(ts, unit="ms", utc=True)
             full_feats["hour_of_day"] = entry_dt.hour

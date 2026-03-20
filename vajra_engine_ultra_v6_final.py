@@ -1046,7 +1046,8 @@ def precompute_v6_features(ph, pm, pl, htf, mtf, ltf, btc_close_arr=None):
     # ---------------------------------------------------------
     keys_to_drop = [
         'ema20_L', 'ema50_L', 'ema100_L',
-        'mtf_ema200_arr', 'atr14_L', 'atr7_L'
+        'mtf_ema200_arr', 'atr14_L', 'atr7_L',
+        'trend_strength_mtf_arr'
     ]
     for k in keys_to_drop:
         if k in f:
