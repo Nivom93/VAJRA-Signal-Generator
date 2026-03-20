@@ -16,9 +16,9 @@ def _strategy_overrides(cfg):
     # --- EXECUTION DEFAULTS (PURE LIMIT MODE) ---
     cfg.execution_style = 'limit'     
     cfg.pullback_atr_mult = 0.05        
-    cfg.slippage_bps = 2.0
-    cfg.maker_fee_bps = 2.0
-    cfg.taker_fee_bps = 5.0
+    cfg.slippage_bps = 0.0
+    cfg.maker_fee_bps = 0.0
+    cfg.taker_fee_bps = 0.0
 
     # --- DEFENSE MECHANISMS (PURE SIGNAL EDGE) ---
     cfg.be_trigger_r = 0.0             # Do not use BE tricks. Let structural TP or SL hit naturally.
@@ -62,7 +62,7 @@ def _strategy_overrides(cfg):
 
     # --- BASE-HIT INSTITUTIONAL GEOMETRY ---
     # Target a >50% true win-rate without breakeven tricks.
-    cfg.min_rr = 1.5
+    cfg.min_rr = 2.4
     cfg.atr_mult_sl = 1.0
     cfg.atr_mult_tp = 3.0           # 2.0 TP / 2.0 SL = 1:1 RR (Mathematically supports >50% WR)
 

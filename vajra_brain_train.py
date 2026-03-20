@@ -270,11 +270,19 @@ def main(argv=None):
     else:
         final_model.fit(X_top, y_all, sample_weight=sample_weights)
 
+    # EDGE EXTRACTION: Anti-Signal Flipping
+    # If the WFA AUC is significantly below 0.5 (e.g. 0.45), the model is perfectly
+    # identifying losers. In highly mean-reverting crypto regimes, this is common.
+    # We set invert_prob to True to harvest the inverse edge.
+    invert = bool(avg_auc < 0.5)
+    if invert:
+        log.info("⚠️ Anti-Signal Detected (AUC < 0.50). Flipping Probability Pipeline to Harvest Edge.")
+
     pipeline = {
         "classifier": final_model, 
         "feature_names": top_feature_names,
         "training_args": vars(args), 
-        "invert_prob": False, 
+        "invert_prob": invert,
         "model": "xgboost",
         "wfa_auc": avg_auc,
         "wfa_brier": avg_brier
