@@ -1261,7 +1261,8 @@ class TradeManager:
                 t['can_tp_this_bar'] = True
 
             # Real-time PnL calc for Management
-            raw_risk = max(abs(t['entry'] - t['sl']), 1e-9)
+            # FIX: Use locked initial_risk_unit to prevent division-by-zero explosion on Breakeven/Trailing
+            raw_risk = max(t.get('initial_risk_unit', abs(t['entry'] - t['sl'])), 1e-9)
 
             # Unrealized PnL Calculation
             curr_pnl = (c - entry) if side == 'long' else (entry - c)
