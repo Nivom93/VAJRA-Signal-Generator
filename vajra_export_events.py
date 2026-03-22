@@ -292,8 +292,9 @@ def main():
             meta = next((m for m in open_meta if m["key"] == cl.get("key")), None)
             if meta:
                 open_meta.remove(meta)
-                # PURE SIGNAL EDGE: 1.0 strictly if it exceeds minimum acceptable asymmetric payout.
-                meta_label = 1.0 if cl.get("pnl_r", 0.0) >= (cfg.min_rr * 0.95) else 0.0
+                # PURE SIGNAL EDGE: 1.0 if the trade ever reached +1.0R (Maximum Favorable Excursion), regardless of exit reason.
+                max_unrealized = cl.get("max_unrealized_pnl_r", cl.get("pnl_r", 0.0))
+                meta_label = 1.0 if max_unrealized >= 1.0 else 0.0
                 
                 if -50 < cl["pnl_r"] < 50:
                     events.append({

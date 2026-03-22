@@ -1266,6 +1266,15 @@ class TradeManager:
             # Unrealized PnL Calculation
             curr_pnl = (c - entry) if side == 'long' else (entry - c)
             t['pnl_r'] = (curr_pnl / raw_risk) - fee
+
+            # True Intra-Bar Maximum Favorable Excursion (MFE)
+            if side == 'long':
+                intra_max_pnl = (h - entry)
+            else:
+                intra_max_pnl = (entry - l)
+            intra_max_pnl_r = (intra_max_pnl / raw_risk) - fee
+
+            t['max_unrealized_pnl_r'] = max(t.get('max_unrealized_pnl_r', -999.0), t['pnl_r'], intra_max_pnl_r)
             
             hit_sl = False
             hit_tp = False
@@ -1279,13 +1288,12 @@ class TradeManager:
                 elif l <= tp and can_tp: hit_tp = True; exit_reason = 'tp'
 
             # TIME-IN-FORCE DECAY (Institutional Capital Velocity)
-            # DIRECTIVE 4: Disabled to allow macro structures to play out without arbitrary time limits.
-            # if not hit_sl and not hit_tp:
-            #     decay_limit = getattr(self.cfg, 'time_in_force_decay', 8)
-            #     if t['bars_open'] > decay_limit and t['pnl_r'] <= 0:
-            #         hit_sl = True
-            #         t['sl'] = c  # Force execution at close
-            #         exit_reason = 'time_decay'
+            if not hit_sl and not hit_tp:
+                decay_limit = getattr(self.cfg, 'time_in_force_decay', 0)
+                if decay_limit > 0 and t['bars_open'] > decay_limit and t['pnl_r'] <= 0.0:
+                    hit_sl = True
+                    t['sl'] = c  # Force execution at close
+                    exit_reason = 'time_decay'
 
             if hit_sl or hit_tp:
                 if hit_sl:
@@ -1306,10 +1314,13 @@ class TradeManager:
                 continue
 
             # AUTO-BREAKEVEN
-            #if not t.get('be_locked', False) and t['pnl_r'] >= 1.0:
-                #if side == 'long': t['sl'] = entry + (entry * fee * 2) 
-                #else: t['sl'] = entry - (entry * fee * 2)
-                #t['be_locked'] = True
+            be_trigger = getattr(self.cfg, 'be_trigger_r', 0.0)
+            if be_trigger > 0 and not t.get('be_locked', False) and t.get('max_unrealized_pnl_r', 0.0) >= be_trigger:
+                if side == 'long':
+                    t['sl'] = max(t['sl'], entry + (entry * fee * 2))
+                else:
+                    t['sl'] = min(t['sl'], entry - (entry * fee * 2))
+                t['be_locked'] = True
                 
             # STRUCTURAL TRAILING
             #if side == 'long' and swing_low > 0 and swing_low > t['sl'] and swing_low < c:

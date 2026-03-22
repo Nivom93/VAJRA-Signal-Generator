@@ -20,12 +20,12 @@ def _strategy_overrides(cfg):
     cfg.maker_fee_bps = 0.0
     cfg.taker_fee_bps = 0.0
 
-    # --- DEFENSE MECHANISMS (PURE SIGNAL EDGE) ---
-    cfg.be_trigger_r = 0.0             # Do not use BE tricks. Let structural TP or SL hit naturally.
-    cfg.trailing_stop_trigger_r = 0.0
-    cfg.trailing_dist_r = 0.0
-    cfg.dynamic_tp_enabled = False
-    cfg.time_in_force_decay = 72
+    # --- DEFENSE MECHANISMS (ACTIVATED) ---
+    cfg.be_trigger_r = 1.0             # Move SL to breakeven at +1.0R
+    cfg.trailing_stop_trigger_r = 1.5  # Start standard trailing at +1.5R
+    cfg.trailing_dist_r = 0.5          # Trail price by 0.5R
+    cfg.dynamic_tp_enabled = True      # Let the engine take profit at BB expansions
+    cfg.time_in_force_decay = 24       # Kill stagnant trades after 24 bars
 
     # --- GLOBAL RISK DEFAULTS ---
     cfg.risk_per_trade = 0.01          
@@ -38,10 +38,10 @@ def _strategy_overrides(cfg):
     cfg.filter_btc_regime = True       
     cfg.filter_funding_check = False    
     cfg.filter_btcd_regime = False      
-    cfg.filter_rvol_breakout = False   # Disabled: Let ML score it
-    cfg.filter_adx_chop = False        # Disabled: Let ML score it
+    cfg.filter_rvol_breakout = False
+    cfg.filter_adx_chop = False
     cfg.filter_time_of_day = False
-    cfg.filter_hurst_strict = False    # Disabled: Let ML score it
+    cfg.filter_hurst_strict = False
     cfg.use_macro_data = True
     cfg.use_meta_labeling = True
 
@@ -60,17 +60,17 @@ def _strategy_overrides(cfg):
     cfg.use_dca = False
     cfg.dca_max_safety_orders = 0
 
-    # --- BASE-HIT INSTITUTIONAL GEOMETRY ---
-    # Target a >50% true win-rate without breakeven tricks.
-    cfg.min_rr = 2.4
-    cfg.atr_mult_sl = 1.0
-    cfg.atr_mult_tp = 3.0           # 2.0 TP / 2.0 SL = 1:1 RR (Mathematically supports >50% WR)
+    # --- SURVIVAL GEOMETRY ---
+    cfg.min_rr = 1.5                # Lower math constraint to prevent target stretching
+    cfg.atr_mult_sl = 1.5           # Widen stops to survive MM sweeps
+    cfg.atr_mult_tp = 2.5           # Natural target distance
 
+    # --- STRICT AI GATES ---
     if "BTC" in symbol or "ETH" in symbol:
         cfg.min_conf_long = 1.0
         cfg.min_conf_short = 1.0
-        cfg.min_prob_long = 0.40
-        cfg.min_prob_short = 0.40
+        cfg.min_prob_long = 0.52    # Demand true ML confidence
+        cfg.min_prob_short = 0.52   # Demand true ML confidence
     else:
-        cfg.min_prob_long = 0.40
-        cfg.min_prob_short = 0.40
+        cfg.min_prob_long = 0.52
+        cfg.min_prob_short = 0.52

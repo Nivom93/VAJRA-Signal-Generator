@@ -270,12 +270,12 @@ def main(argv=None):
     final_model.fit(X_top, y_all, sample_weight=sample_weights)
 
     # EDGE EXTRACTION: Anti-Signal Flipping
-    # In highly mean-reverting crypto regimes where the AUC collapses below 0.48,
+    # In highly mean-reverting crypto regimes where the AUC collapses below 0.40,
     # the model is reliably misclassifying true direction. We set invert_prob to True
     # to harvest the inverse edge.
-    invert = bool(avg_auc < 0.48)
+    invert = bool(avg_auc < 0.40)
     if invert:
-        log.info("⚠️ Anti-Signal Detected (AUC < 0.48). Flipping Probability Pipeline to Harvest Edge.")
+        log.info("⚠️ Severe Anti-Signal Detected (AUC < 0.40). Flipping Probability Pipeline to Harvest Edge.")
 
     pipeline = {
         "classifier": final_model, 
