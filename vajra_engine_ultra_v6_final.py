@@ -1352,28 +1352,63 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         if score > best_score:
             best_score = score
             
-            # STRICT 1:3 GEOMETRY LOCK
-            if 'sl_override' in cand:
-                sl = cand['sl_override']
-                dynamic_risk = abs(entry - sl)
-                tp_dist = (cfg.atr_mult_tp / cfg.atr_mult_sl) * dynamic_risk
-                if side == 'long':
-                    tp = entry + tp_dist
-                else:
-                    tp = entry - tp_dist
-            else:
-                # Normal Atr Based Logic (Strictly Enforced)
-                sl_dist = current_atr * cfg.atr_mult_sl
-                tp_dist = current_atr * cfg.atr_mult_tp
+            # STRUCTURE-AWARE GEOMETRY:
+            # The Engine must use structural boundaries (Order Blocks, Swings, VAH/VAL) rather than pure mathematics.
+            struct_sl = cand.get('sl_override', None)
+            struct_tp = cand.get('tp_target', None)
 
+            # 1. Structural Stop Loss Logic
+            if struct_sl is None:
                 if side == 'long':
-                    sl = entry - sl_dist
-                    tp = entry + tp_dist
+                    ob_bull = base.get("ob_bull_price", 0)
+                    swing_l = base.get("last_swing_low", 0)
+                    valid_levels = [l for l in [ob_bull, swing_l] if l > 0 and l < entry]
+                    if valid_levels:
+                        struct_sl = max(valid_levels) - (current_atr * 0.2)
+                    else:
+                        struct_sl = entry - (current_atr * cfg.atr_mult_sl)
                 else:
-                    sl = entry + sl_dist
-                    tp = entry - tp_dist
+                    ob_bear = base.get("ob_bear_price", 0)
+                    swing_h = base.get("last_swing_high", 0)
+                    valid_levels = [h for h in [ob_bear, swing_h] if h > entry]
+                    if valid_levels:
+                        struct_sl = min(valid_levels) + (current_atr * 0.2)
+                    else:
+                        struct_sl = entry + (current_atr * cfg.atr_mult_sl)
+
+            # SL Bound Protection (Do not allow SLs that are completely loose or invert the structure)
+            sl = struct_sl
+            if side == 'long':
+                sl = min(sl, entry - (current_atr * 0.5))
+            else:
+                sl = max(sl, entry + (current_atr * 0.5))
+
+            dynamic_risk = abs(entry - sl)
+
+            # 2. Structural Take Profit Logic
+            if struct_tp is None:
+                if side == 'long':
+                    ob_bear = base.get("ob_bear_price", 0)
+                    swing_h = base.get("last_swing_high", 0)
+                    vah = base.get("vah", 0)
+                    valid_targets = [t for t in [ob_bear, swing_h, vah] if t > entry + (dynamic_risk * 1.5)]
+                    if valid_targets:
+                        struct_tp = max(valid_targets)
+                    else:
+                        struct_tp = entry + (dynamic_risk * cfg.atr_mult_tp / max(1e-12, cfg.atr_mult_sl))
+                else:
+                    ob_bull = base.get("ob_bull_price", 0)
+                    swing_l = base.get("last_swing_low", 0)
+                    val = base.get("val", 0)
+                    valid_targets = [t for t in [ob_bull, swing_l, val] if t > 0 and t < entry - (dynamic_risk * 1.5)]
+                    if valid_targets:
+                        struct_tp = min(valid_targets)
+                    else:
+                        struct_tp = entry - (dynamic_risk * cfg.atr_mult_tp / max(1e-12, cfg.atr_mult_sl))
+
+            tp = struct_tp
             
-            rr = abs(tp - entry) / max(1e-12, abs(entry - sl))
+            rr = abs(tp - entry) / max(1e-12, dynamic_risk)
             
             if rr >= cfg.min_rr:
                 best_plan = {

@@ -50,7 +50,7 @@ def _strategy_overrides(cfg):
     cfg.strat_gamma_enabled = True  
     cfg.strat_delta_enabled = True 
     cfg.strat_epsilon_enabled = True  
-    cfg.strat_omega_enabled = False    # Disable mean reversion (often low win-rate in crypto)
+    cfg.strat_omega_enabled = True     # Ranging environments provide the deepest structure limits for massive RR
     cfg.strat_zeta_enabled = False     
 
    # ==========================================================
@@ -60,18 +60,18 @@ def _strategy_overrides(cfg):
     cfg.use_dca = False
     cfg.dca_max_safety_orders = 0
 
-    # --- BASE-HIT INSTITUTIONAL GEOMETRY ---
-    # Target a >50% true win-rate without breakeven tricks.
-    cfg.min_rr = 0.9
-    cfg.atr_mult_sl = 2.0
-    cfg.atr_mult_tp = 2.0           # 2.0 TP / 2.0 SL = 1:1 RR (Mathematically supports >50% WR)
+    # --- STRUCTURAL SNIPER GEOMETRY ---
+    # Target >50% WR with >2.4 RR natively via structural alignment (Order Blocks/Swings)
+    cfg.min_rr = 2.4                # Rigid minimum RR enforcement
+    cfg.atr_mult_sl = 1.0           # Mathematical fallback for very tight snipes
+    cfg.atr_mult_tp = 2.5           # Mathematical fallback to achieve >= 2.4 RR baseline
 
     if "BTC" in symbol or "ETH" in symbol:
         cfg.min_conf_long = 1.0
         cfg.min_conf_short = 1.0
-        # Realistic AI Gatekeeping: Capture the optimal quartile of AI predictions
-        cfg.min_prob_long = 0.50
-        cfg.min_prob_short = 0.50
+        # Optimal probability threshold to find ~250+ trades with highest structural confidence
+        cfg.min_prob_long = 0.55
+        cfg.min_prob_short = 0.55
     else:
-        cfg.min_prob_long = 0.50
-        cfg.min_prob_short = 0.50
+        cfg.min_prob_long = 0.55
+        cfg.min_prob_short = 0.55
