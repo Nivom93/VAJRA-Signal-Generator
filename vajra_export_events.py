@@ -107,7 +107,7 @@ def fetch_delta_oi(exw: ExchangeWrapper, symbol: str, timeframe: str, ltf_timest
                 return np.zeros(len(ltf_timestamps))
             
             df['openInterestValue'] = pd.to_numeric(df['openInterestValue'], errors='coerce')
-            vals = df['openInterestValue'].ffill().bfill().values
+            vals = df['openInterestValue'].ffill().fillna(0.0).values
             
             if len(vals) > 1:
                 delta = np.zeros_like(vals)
@@ -187,7 +187,7 @@ def main():
     pre_h, pre_m, pre_l = Precomp(htf), Precomp(mtf), Precomp(ltf)
     pre_map = {"htf": pre_h, "mtf": pre_m, "ltf": pre_l}
 
-    btc_s_close = pd.Series(btc_c, index=btc["timestamp"]).shift(1).reindex(ltf["timestamp"], method='ffill').bfill().values
+    btc_s_close = pd.Series(btc_c, index=btc["timestamp"]).shift(1).reindex(ltf["timestamp"], method='ffill').fillna(0.0).values
     if len(btc_s_close) != len(ltf):
         btc_s_close = np.resize(btc_s_close, len(ltf))
 

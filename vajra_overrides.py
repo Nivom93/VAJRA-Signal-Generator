@@ -16,12 +16,12 @@ def _strategy_overrides(cfg):
     # --- EXECUTION DEFAULTS (PURE LIMIT MODE) ---
     cfg.execution_style = 'limit'     
     cfg.pullback_atr_mult = 0.05        
-    cfg.slippage_bps = 0.0             
-    cfg.maker_fee_bps = 0.0            
-    cfg.taker_fee_bps = 0.0            
+    cfg.slippage_bps = 2.0
+    cfg.maker_fee_bps = 2.0
+    cfg.taker_fee_bps = 6.0
 
     # --- DEFENSE MECHANISMS (WIN-RATE ENHANCEMENTS) ---
-    cfg.be_trigger_r = 0.0             # Still avoiding pure breakeven to not choke edge
+    cfg.be_trigger_r = 1.0             # Move SL to entry + fees to protect capital
     # Trailing TP locking logic!
     # If the trade hits +1.5R, we lock the SL at +1.0R (1.5 - 0.5 = 1.0).
     # Since meta-labels count >0.5R as a win, this structurally protects massive chunks of wins from turning into full -1.0R losses.

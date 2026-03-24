@@ -205,7 +205,7 @@ def run_backtest(args, preloaded: Optional[Preloaded]=None, markets_data=None):
     btc_aligned = btc_s.reindex(ltf["timestamp"], method='ffill').fillna(1.0).values 
 
     # Align BTC Close for relative strength features
-    btc_s_close = pd.Series(btc_c, index=btc["timestamp"]).shift(1).reindex(ltf["timestamp"], method='ffill').fillna(method='bfill').values
+    btc_s_close = pd.Series(btc_c, index=btc["timestamp"]).shift(1).reindex(ltf["timestamp"], method='ffill').fillna(0.0).values
     if len(btc_s_close) != len(ltf):
         btc_s_close = np.resize(btc_s_close, len(ltf))
 

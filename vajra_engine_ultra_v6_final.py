@@ -931,8 +931,7 @@ class TradeManager:
         still_open = []
         still_pending = []
         
-        # ZERO FEES FOR PURE STRUCTURAL SIGNAL DISCOVERY
-        fee = 0.0
+        fee = (self.cfg.taker_fee_bps + self.cfg.slippage_bps) / 10000.0
         trail_trig = self.cfg.trailing_stop_trigger_r
         trail_dist = self.cfg.trailing_dist_r
         
@@ -958,6 +957,9 @@ class TradeManager:
                     if h >= entry_target:
                         triggered = True
                         fill_px = max(o, entry_target)
+            elif order_type == 'market':
+                triggered = True
+                fill_px = o
             else:
                 if side == 'long':
                     if h >= entry_target:
@@ -1020,12 +1022,18 @@ class TradeManager:
             hit_tp = False
             exit_reason = ''
             
+            is_entry_bar = (t.get('bars_open', 1) == 1)
+
             if side == 'long':
-                if l <= sl: hit_sl = True; exit_reason = 'sl'
-                elif h >= tp: hit_tp = True; exit_reason = 'tp'
+                if l <= sl:
+                    hit_sl = True; exit_reason = 'sl'
+                elif (not is_entry_bar and h >= tp) or (is_entry_bar and c >= tp):
+                    hit_tp = True; exit_reason = 'tp'
             else:
-                if h >= sl: hit_sl = True; exit_reason = 'sl'
-                elif l <= tp: hit_tp = True; exit_reason = 'tp'
+                if h >= sl:
+                    hit_sl = True; exit_reason = 'sl'
+                elif (not is_entry_bar and l <= tp) or (is_entry_bar and c <= tp):
+                    hit_tp = True; exit_reason = 'tp'
 
             # TIME-IN-FORCE DECAY (Institutional Capital Velocity)
             if not hit_sl and not hit_tp:
@@ -1055,10 +1063,10 @@ class TradeManager:
                 continue
 
             # AUTO-BREAKEVEN
-            #if not t.get('be_locked', False) and t['pnl_r'] >= 1.0:
-                #if side == 'long': t['sl'] = entry + (entry * fee * 2) 
-                #else: t['sl'] = entry - (entry * fee * 2)
-                #t['be_locked'] = True
+            if self.cfg.be_trigger_r > 0 and not t.get('be_locked', False) and t['pnl_r'] >= self.cfg.be_trigger_r:
+                if side == 'long': t['sl'] = entry + (entry * fee * 2)
+                else: t['sl'] = entry - (entry * fee * 2)
+                t['be_locked'] = True
                 
             # STRUCTURAL TRAILING
             #if side == 'long' and swing_low > 0 and swing_low > t['sl'] and swing_low < c:
@@ -1186,34 +1194,34 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     # STRATEGY ARSENAL (Restored and Un-truncated)
     # ==========================================================
 
-    # GAMMA (Order Block Snipe - Limit) - Explicit Exact Entry
+    # GAMMA (Order Block Breakout Confirmation - Market)
     if getattr(cfg, 'strat_gamma_enabled', True):
         if can_long and base.get("ob_bull_price", 0) > 0 and base.get("ob_bull_dist", 99) < 1.0:
             if base.get("engulf_bull", 0) > 0 or base.get("pin_bull", 0) > 0:
                 candidates.append({
                     "strat": "GAMMA_LONG", "priority": 1.5, "side": "long",
-                    "entry": base.get("ob_bull_price", px), "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "limit"
+                    "entry": px, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "market"
                 })
         if can_short and base.get("ob_bear_price", 0) > 0 and base.get("ob_bear_dist", 99) < 1.0:
             if base.get("engulf_bear", 0) > 0 or base.get("pin_bear", 0) > 0:
                 candidates.append({
                     "strat": "GAMMA_SHORT", "priority": 1.5, "side": "short",
-                    "entry": base.get("ob_bear_price", px), "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "limit"
+                    "entry": px, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "market"
                 })
 
-    # EPSILON (Fractal Liquidity Sweep - Limit) - Explicit Exact Entry
+    # EPSILON (Fractal Liquidity Sweep Confirmation - Market)
     if getattr(cfg, 'strat_epsilon_enabled', True):
         is_fractal_bull = (abs(px - htf_sl) < current_atr * 0.5) or (abs(px - mtf_sl) < current_atr * 0.5)
         is_fractal_bear = (abs(px - htf_sh) < current_atr * 0.5) or (abs(px - mtf_sh) < current_atr * 0.5)
         if can_long and sweep_bull > 0 and is_fractal_bull:
             candidates.append({
                 "strat": "EPSILON_LONG", "priority": 2.0, "side": "long",
-                "entry": base.get("last_swing_low", px), "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.25, "type": "limit"
+                "entry": px, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.25, "type": "market"
             })
         if can_short and sweep_bear > 0 and is_fractal_bear:
             candidates.append({
                 "strat": "EPSILON_SHORT", "priority": 2.0, "side": "short",
-                "entry": base.get("last_swing_high", px), "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.25, "type": "limit"
+                "entry": px, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.25, "type": "market"
             })
 
     # DELTA (VWAP Trend Retest - Market) - Explicit Exact Entry

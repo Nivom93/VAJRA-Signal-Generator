@@ -153,11 +153,11 @@ def main(argv=None):
     ap.add_argument("--events", nargs="+", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--min-win-r", type=float, default=0.0)
-    ap.add_argument("--n-estimators", type=int, default=300)
+    ap.add_argument("--n-estimators", type=int, default=100)
     ap.add_argument("--learning-rate", type=float, default=0.05)
     ap.add_argument("--max-depth", type=int, default=3)
     ap.add_argument("--reg-alpha", type=float, default=0.1)
-    ap.add_argument("--reg-lambda", type=float, default=1.0)
+    ap.add_argument("--reg-lambda", type=float, default=5.0)
     ap.add_argument("--calibrate", action="store_true")
     ap.add_argument("--filter-side", choices=["all","long","short"], default="all")
     ap.add_argument("--exclude-cols", type=str, default="")
@@ -181,7 +181,7 @@ def main(argv=None):
     X_all = _sanitize_data(X_all)
 
     log.info(f"Running Walk-Forward Analysis ({args.wfa_folds} folds)...")
-    tscv = TimeSeriesSplit(n_splits=args.wfa_folds)
+    tscv = TimeSeriesSplit(n_splits=args.wfa_folds, gap=10)
     
     auc_scores = []
     brier_scores = []

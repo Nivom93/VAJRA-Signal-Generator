@@ -469,7 +469,7 @@ def run_bot(args):
                 btc_close_aligned = None
                 if not btc_ltf.empty and not ltf.empty:
                     btc_s_close = pd.Series(btc_ltf.close.values, index=btc_ltf["timestamp"])
-                    btc_close_aligned = btc_s_close.reindex(ltf["timestamp"], method='ffill').bfill().values
+                    btc_close_aligned = btc_s_close.reindex(ltf["timestamp"], method='ffill').fillna(0.0).values
 
                 adv_features = precompute_v6_features(
                     pre_map["htf"], pre_map["mtf"], pre_l, htf, mtf, ltf, 
