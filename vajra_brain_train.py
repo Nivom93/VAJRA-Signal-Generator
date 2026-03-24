@@ -207,8 +207,8 @@ def main(argv=None):
         
         clf = xgb.XGBClassifier(
             n_estimators=args.n_estimators,
-            learning_rate=0.02,
-            max_depth=3,
+            learning_rate=args.learning_rate,
+            max_depth=args.max_depth,
             reg_alpha=args.reg_alpha,
             reg_lambda=args.reg_lambda,
             colsample_bytree=0.7,
@@ -263,8 +263,8 @@ def main(argv=None):
 
     final_base = xgb.XGBClassifier(
         n_estimators=args.n_estimators,
-        learning_rate=0.02,
-        max_depth=3,
+        learning_rate=args.learning_rate,
+        max_depth=args.max_depth,
         reg_alpha=args.reg_alpha,
         reg_lambda=args.reg_lambda,
         colsample_bytree=0.7,
