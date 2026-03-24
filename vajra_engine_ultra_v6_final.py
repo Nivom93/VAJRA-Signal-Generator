@@ -750,6 +750,17 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     f["trend_align_up_3tf"] = f.get("htf_up",0) + f.get("mtf_up",0) + ema20_gt
     f["trend_align_down_3tf"] = f.get("htf_down",0) + f.get("mtf_down",0) + (1.0 - ema20_gt)
 
+    # ==========================================================
+    # TREND TENSOR: MULTIDIMENSIONAL MARKET PERCEPTION
+    # ==========================================================
+    regime_raw = (
+        0.4 * f.get("trend_align_up_3tf", 0.0) +
+        0.3 * f.get("cvd_roc", 0.0) +
+        0.2 * f.get("market_efficiency_ratio", 0.0) +
+        0.1 * f.get("macro_sentiment", 0.0)
+    )
+    f["sentient_regime_score"] = float(np.tanh(regime_raw))
+
     return f
 
 def precompute_v6_features(ph, pm, pl, htf, mtf, ltf, btc_close_arr=None):
@@ -1292,6 +1303,14 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         order_type = cand.get('type', cfg.execution_style)
         
         entry = cand['entry']
+
+        # ==========================================================
+        # LIQUIDITY GRAVITY WELL: OPTIMAL LIMIT PLACEMENT
+        # ==========================================================
+        if "ALPHA_OB" in cand['strat'] or "GAMMA_LIQ" in cand['strat']:
+            poc_val = base.get("poc", px)
+            if entry > 1e-12 and abs(entry - poc_val) / entry < 0.005:
+                entry = poc_val
 
         # DEFAULT BASELINE VARIABLES (If no brain is present)
         prob = 1.0

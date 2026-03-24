@@ -126,6 +126,11 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
     df["entry_ts_dt"] = pd.to_datetime(df["entry_ts"], unit="ms", utc=True)
     
     candidates = [c for c in df.columns if is_feature_column(df, c, extra_exclude)]
+
+    # FORCE INCLUSION OF NEW SENTIENT REGIME SCORE
+    if "sentient_regime_score" in df.columns and "sentient_regime_score" not in candidates:
+        candidates.append("sentient_regime_score")
+
     keep = []
     for c in candidates:
         s = pd.to_numeric(df[c], errors='coerce')
