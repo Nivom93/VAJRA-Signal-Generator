@@ -1385,6 +1385,13 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
 
             dynamic_risk = abs(entry - sl)
 
+            # SMART TRADE INVALIDATION (Win-Rate Booster)
+            # If the required structural Stop Loss is too wide (> 1.2 ATR), the 2.2 RR Take Profit
+            # will be mathematically pushed too far away, completely destroying the win rate.
+            # We strictly reject these loose setups to force ultra-tight invalidations.
+            if dynamic_risk > current_atr * 1.2:
+                continue
+
             # 2. Structural Take Profit Logic
             if struct_tp is None:
                 if side == 'long':

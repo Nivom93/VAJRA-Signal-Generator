@@ -20,12 +20,15 @@ def _strategy_overrides(cfg):
     cfg.maker_fee_bps = 0.0            
     cfg.taker_fee_bps = 0.0            
 
-    # --- DEFENSE MECHANISMS (PURE SIGNAL EDGE) ---
-    cfg.be_trigger_r = 0.0             # Do not use BE tricks. Let structural TP or SL hit naturally.
-    cfg.trailing_stop_trigger_r = 0.0
-    cfg.trailing_dist_r = 0.0
+    # --- DEFENSE MECHANISMS (WIN-RATE ENHANCEMENTS) ---
+    cfg.be_trigger_r = 0.0             # Still avoiding pure breakeven to not choke edge
+    # Trailing TP locking logic!
+    # If the trade hits +1.5R, we lock the SL at +1.0R (1.5 - 0.5 = 1.0).
+    # Since meta-labels count >0.5R as a win, this structurally protects massive chunks of wins from turning into full -1.0R losses.
+    cfg.trailing_stop_trigger_r = 1.5
+    cfg.trailing_dist_r = 0.5
     cfg.dynamic_tp_enabled = False
-    cfg.time_in_force_decay = 72
+    cfg.time_in_force_decay = 9999     # Disable time decay, letting the structural levels play out completely
 
     # --- GLOBAL RISK DEFAULTS ---
     cfg.risk_per_trade = 0.01          
