@@ -72,7 +72,17 @@ def fetch_macro_trend(ticker_symbol: str, ltf_timestamps: pd.Series) -> np.ndarr
         trend_series = pd.Series(trend, index=df.index.view('int64') // 10**6)
         trend_series.index = trend_series.index + 86400000 
         
-        aligned = trend_series.shift(1).reindex(ltf_timestamps, method='ffill').fillna(0.0).values
+        # PREVENT DUPLICATE INDEX CRASHES (Source)
+        trend_series = trend_series[~trend_series.index.duplicated(keep='last')]
+
+        # PREVENT DUPLICATE INDEX CRASHES (Target)
+        # Reindex against unique timestamps first, then map back to the original full length
+        unique_ltf = ltf_timestamps.drop_duplicates()
+        aligned_unique = trend_series.shift(1).reindex(unique_ltf, method='ffill').fillna(0.0)
+
+        # Create a series with original ltf_timestamps and map the unique values to it
+        aligned = pd.Series(index=ltf_timestamps).fillna(aligned_unique).values
+
         return aligned
     except Exception as e:
         log.warning(f"yfinance failed for {ticker_symbol}: {e}")

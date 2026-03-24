@@ -433,7 +433,7 @@ class AadhiraayanEngineConfig:
     min_prob: float = 0.65; min_conf_long: float = 3.0; min_conf_short: float = 3.0
     min_prob_long: float = 0.65; min_prob_short: float = 0.65
     max_concurrent: int = 3; max_concurrent_buy: int = 0; max_concurrent_sell: int = 0
-    maker_fee_bps: float = 1.0; taker_fee_bps: float = 5.0; slippage_bps: float = 2.0
+    maker_fee_bps: float = 0.0; taker_fee_bps: float = 0.0; slippage_bps: float = 0.0
     account_notional: float = 1000.0; db_path: str = "vajra.sqlite"
     verbose: bool = True; dynamic_confluence: bool = True; dvol_enable: bool = False
     skip_log_throttle: int = 50; paper_mode: bool = True
@@ -931,7 +931,8 @@ class TradeManager:
         still_open = []
         still_pending = []
         
-        fee = (self.cfg.taker_fee_bps + self.cfg.slippage_bps) / 10000.0
+        # ZERO FEES FOR PURE STRUCTURAL SIGNAL DISCOVERY
+        fee = 0.0
         trail_trig = self.cfg.trailing_stop_trigger_r
         trail_dist = self.cfg.trailing_dist_r
         

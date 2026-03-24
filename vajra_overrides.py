@@ -63,15 +63,15 @@ def _strategy_overrides(cfg):
     # --- BASE-HIT INSTITUTIONAL GEOMETRY ---
     # Target a >50% true win-rate without breakeven tricks.
     cfg.min_rr = 0.9
-    cfg.atr_mult_sl = 1.0
-    cfg.atr_mult_tp = 3.0           # 2.0 TP / 2.0 SL = 1:1 RR (Mathematically supports >50% WR)
+    cfg.atr_mult_sl = 2.0
+    cfg.atr_mult_tp = 2.0           # 2.0 TP / 2.0 SL = 1:1 RR (Mathematically supports >50% WR)
 
     if "BTC" in symbol or "ETH" in symbol:
         cfg.min_conf_long = 1.0
         cfg.min_conf_short = 1.0
         # Realistic AI Gatekeeping: Capture the optimal quartile of AI predictions
-        cfg.min_prob_long = 0.70
-        cfg.min_prob_short = 0.70
+        cfg.min_prob_long = 0.50
+        cfg.min_prob_short = 0.50
     else:
-        cfg.min_prob_long = 0.70
-        cfg.min_prob_short = 0.70
+        cfg.min_prob_long = 0.50
+        cfg.min_prob_short = 0.50
