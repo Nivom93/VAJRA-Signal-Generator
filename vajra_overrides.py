@@ -61,10 +61,10 @@ def _strategy_overrides(cfg):
     cfg.dca_max_safety_orders = 0
 
     # --- STRUCTURAL SNIPER GEOMETRY ---
-    # Target >50% WR with >2.4 RR natively via structural alignment (Order Blocks/Swings)
-    cfg.min_rr = 2.4                # Rigid minimum RR enforcement
+    # Target >50% WR with >2.2 RR natively via structural alignment (Order Blocks/Swings)
+    cfg.min_rr = 2.2                # Rigid minimum RR enforcement
     cfg.atr_mult_sl = 1.0           # Mathematical fallback for very tight snipes
-    cfg.atr_mult_tp = 2.5           # Mathematical fallback to achieve >= 2.4 RR baseline
+    cfg.atr_mult_tp = 2.2           # Mathematical fallback to achieve >= 2.2 RR baseline
 
     if "BTC" in symbol or "ETH" in symbol:
         cfg.min_conf_long = 1.0

@@ -1391,18 +1391,20 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                     ob_bear = base.get("ob_bear_price", 0)
                     swing_h = base.get("last_swing_high", 0)
                     vah = base.get("vah", 0)
-                    valid_targets = [t for t in [ob_bear, swing_h, vah] if t > entry + (dynamic_risk * 1.5)]
+                    # Win Rate Booster: Target the CLOSEST valid structural level that satisfies the minimum RR
+                    valid_targets = [t for t in [ob_bear, swing_h, vah] if t >= entry + (dynamic_risk * cfg.min_rr)]
                     if valid_targets:
-                        struct_tp = max(valid_targets)
+                        struct_tp = min(valid_targets)
                     else:
                         struct_tp = entry + (dynamic_risk * cfg.atr_mult_tp / max(1e-12, cfg.atr_mult_sl))
                 else:
                     ob_bull = base.get("ob_bull_price", 0)
                     swing_l = base.get("last_swing_low", 0)
                     val = base.get("val", 0)
-                    valid_targets = [t for t in [ob_bull, swing_l, val] if t > 0 and t < entry - (dynamic_risk * 1.5)]
+                    # Win Rate Booster: Target the CLOSEST valid structural level that satisfies the minimum RR
+                    valid_targets = [t for t in [ob_bull, swing_l, val] if t > 0 and t <= entry - (dynamic_risk * cfg.min_rr)]
                     if valid_targets:
-                        struct_tp = min(valid_targets)
+                        struct_tp = max(valid_targets)
                     else:
                         struct_tp = entry - (dynamic_risk * cfg.atr_mult_tp / max(1e-12, cfg.atr_mult_sl))
 
