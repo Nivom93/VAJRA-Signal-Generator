@@ -1329,14 +1329,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
 
         if brain:
             prob = brain.predict_prob(side, base, adv, iH, iM, iL, px, pre)
-            min_prob = cfg.min_prob_long if side == 'long' else cfg.min_prob_short
-            
-            if prob < min_prob:
-                continue 
-            
-            edge = prob - min_prob
-            base_risk = 1.0 + (edge * 15.0) 
-            risk_factor = min(base_risk * cand.get('risk_mult', 1.0), getattr(cfg, 'max_risk_factor', 2.0))
+            # DYNAMIC EV GATE: Evaluation moved to the bottom where RR is known
             score = prob * cand['priority']
             
         # CVD DIVERGENCE BOOST
@@ -1394,13 +1387,6 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
 
             dynamic_risk = abs(entry - sl)
 
-            # SMART TRADE INVALIDATION (Win-Rate Booster)
-            # If the required structural Stop Loss is too wide (> 1.2 ATR), the 2.2 RR Take Profit
-            # will be mathematically pushed too far away, completely destroying the win rate.
-            # We strictly reject these loose setups to force ultra-tight invalidations.
-            if dynamic_risk > current_atr * 1.2:
-                continue
-
             # 2. Structural Take Profit Logic
             if struct_tp is None:
                 if side == 'long':
@@ -1429,6 +1415,18 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
             rr = abs(tp - entry) / max(1e-12, dynamic_risk)
             
             if rr >= cfg.min_rr:
+                if brain:
+                    # DYNAMIC EV GATE BASED ON EXACT REWARD/RISK
+                    edge_buffer = 0.03 # Require a 3% mathematical edge over breakeven
+                    required_prob = (1.0 / (1.0 + rr)) + edge_buffer
+
+                    if prob < required_prob:
+                        continue
+
+                    edge = prob - required_prob
+                    base_risk = 1.0 + (edge * 10.0)
+                    risk_factor = min(base_risk * cand.get('risk_mult', 1.0), getattr(cfg, 'max_risk_factor', 2.0))
+
                 best_plan = {
                     "side": side,
                     "entry": entry,

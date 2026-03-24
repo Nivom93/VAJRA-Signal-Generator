@@ -166,6 +166,10 @@ def main(argv=None):
     
     args = ap.parse_args(argv)
 
+    # BULLETPROOF TRAINING PARAMS: Forcefully prevent users from extreme overfitting via CLI
+    args.max_depth = min(args.max_depth, 3)
+    args.n_estimators = min(args.n_estimators, 120)
+
     try:
         df, feature_names = load_events_df(args.events, args.min_win_r, args.filter_side, set(_parse_extras(args.exclude_cols)))
     except Exception as e: 
