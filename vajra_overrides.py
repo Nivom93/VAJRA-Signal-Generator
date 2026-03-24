@@ -21,12 +21,9 @@ def _strategy_overrides(cfg):
     cfg.taker_fee_bps = 6.0
 
     # --- DEFENSE MECHANISMS (WIN-RATE ENHANCEMENTS) ---
-    cfg.be_trigger_r = 1.0             # Move SL to entry + fees to protect capital
-    # Trailing TP locking logic!
-    # If the trade hits +1.5R, we lock the SL at +1.0R (1.5 - 0.5 = 1.0).
-    # Since meta-labels count >0.5R as a win, this structurally protects massive chunks of wins from turning into full -1.0R losses.
-    cfg.trailing_stop_trigger_r = 1.5
-    cfg.trailing_dist_r = 0.5
+    cfg.be_trigger_r = 0.0
+    cfg.trailing_stop_trigger_r = 0.0
+    cfg.trailing_dist_r = 0.0
     cfg.dynamic_tp_enabled = False
     cfg.time_in_force_decay = 9999     # Disable time decay, letting the structural levels play out completely
 

@@ -1092,7 +1092,8 @@ class TradeManager:
                         t['tp'] = t['avg_price'] - base_risk * self.cfg.dca_tp_scale
                         t['next_safety_price'] += base_risk
 
-            if trail_trig > 0:
+            is_entry_bar = (t.get('bars_open', 1) == 1)
+            if trail_trig > 0 and not is_entry_bar:
                 ru = t.get('initial_risk_unit', 0.0)
                 if ru == 0: ru = abs(t['entry'] - t['sl'])
                 if ru > 0:
