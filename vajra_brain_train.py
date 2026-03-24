@@ -217,7 +217,6 @@ def main(argv=None):
             reg_lambda=args.reg_lambda,
             colsample_bytree=0.7,
             subsample=0.8,
-            scale_pos_weight=spw,
             random_state=42,
             eval_metric='logloss'
         )
@@ -225,7 +224,7 @@ def main(argv=None):
         clf.fit(X_tr, y_tr, sample_weight=w_tr)
         
         if args.calibrate:
-            cal_clf = CalibratedClassifierCV(clf, method='isotonic', cv=3) 
+            cal_clf = CalibratedClassifierCV(clf, method='sigmoid', cv=3)
             try: cal_clf.fit(X_tr, y_tr, sample_weight=w_tr)
             except: cal_clf.fit(X_tr, y_tr) 
             model = cal_clf
@@ -273,7 +272,6 @@ def main(argv=None):
         reg_lambda=args.reg_lambda,
         colsample_bytree=0.7,
         subsample=0.8,
-        scale_pos_weight=spw_all,
         random_state=42,
         eval_metric='logloss'
     )
@@ -281,7 +279,7 @@ def main(argv=None):
     final_model = final_base
     
     if args.calibrate:
-        final_cal = CalibratedClassifierCV(final_base, method='isotonic', cv=5)
+        final_cal = CalibratedClassifierCV(final_base, method='sigmoid', cv=5)
         try: final_cal.fit(X_all_s, y_all, sample_weight=sample_weights)
         except: final_cal.fit(X_all_s, y_all)
         final_model = final_cal

@@ -272,9 +272,10 @@ def send_discord_signal_alert(plan, webhook_url, symbol):
                     {"name": "Stop Loss", "value": f"{plan['sl']:.4f}", "inline": True},
                     {"name": "Take Profit", "value": f"{plan['tp']:.4f}", "inline": True},
                     {"name": "R:R", "value": f"{plan['rr']:.2f}", "inline": True},
-                    {"name": "Risk Factor", "value": f"{plan.get('risk_factor', 1.0):.2f}x", "inline": True}
+                    {"name": "Risk Factor", "value": f"{plan.get('risk_factor', 1.0):.2f}x", "inline": True},
+                    {"name": "🧠 Analyst Insight", "value": plan.get("analysis", "No insight provided."), "inline": False}
                 ],
-                "footer": {"text": f"Vajra AI Engine v34 • {datetime.now().strftime('%H:%M:%S')}"}
+                "footer": {"text": f"Vajra AI Elite Terminal • {datetime.now().strftime('%H:%M:%S')}"}
             }
             requests.post(webhook_url, json={"embeds": [embed]}, timeout=5)
         except Exception as e: log.error(f"Discord send failed: {e}")

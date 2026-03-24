@@ -225,8 +225,9 @@ def main():
             meta = next((m for m in open_meta if m["key"] == cl.get("key")), None)
             if meta:
                 open_meta.remove(meta)
-                # STRICT META-LABELING: 1.0 strictly if it hits structural TP without early reversal
-                meta_label = 1.0 if cl.get("exit_reason") == "tp" else 0.0
+                # PURE "SET AND FORGET" MFE META-LABELING:
+                # 1.0 if it hits TP, or if the trade surged massively (+2.0R) before noise took it out
+                meta_label = 1.0 if cl.get("exit_reason") == "tp" or cl.get("max_pnl_r", 0.0) >= 2.0 else 0.0
                 
                 if -50 < cl["pnl_r"] < 50:
                     events.append({
