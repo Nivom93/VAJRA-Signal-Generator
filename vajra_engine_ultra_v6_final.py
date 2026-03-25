@@ -1193,181 +1193,108 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     reversion_penalty = 1.0
     if adx_val > 30: reversion_penalty = 0.5 
     
-    candidates = []
+    # ==========================================================
+    # THE UNIFIED CONFLUENCE MATRIX (Traps, Pullbacks, Breakouts, Reversals)
+    # ==========================================================
+    setup_type = None
+    logic_desc = ""
+    entry_target = px
+    side = None
+
+    if can_long:
+        side = 'long'
+        if sweep_bull > 0 and (base.get("pin_bull", 0) > 0 or base.get("engulf_bull", 0) > 0):
+            setup_type = "LIQUIDITY_TRAP_LONG"
+            entry_target = base.get("last_swing_low", px - current_atr * 0.5)
+            logic_desc = "Retail stops hunted below Swing Low; bullish rejection confirmed. Bidding the trapped liquidity."
+        elif base.get("trend_align_up_3tf", 0) >= 2.0:
+            setup_type = "TREND_PULLBACK_LONG"
+            ob = base.get("ob_bull_price", 0)
+            entry_target = ob if ob > 0 else base.get("fib_786_long", px - current_atr * 0.5)
+            logic_desc = "Macro trend is bullish across 3 TFs. Bidding structural discount."
+        elif base.get("squeeze_fired", 0) > 0 and base.get("bos_up", 0) > 0:
+            setup_type = "BREAKOUT_RETEST_LONG"
+            entry_target = base.get("last_swing_high", px - current_atr * 0.5)
+            logic_desc = "Volatility Breakout. Bidding the retest of broken structural resistance."
+        elif rsi < 30 and base.get("cvd_div_bull", 0) > 0:
+            setup_type = "MACRO_REVERSAL_LONG"
+            entry_target = px - (current_atr * 0.5)
+            logic_desc = "RSI Oversold with Bullish CVD Divergence. Fading the extreme."
+
+    elif can_short:
+        side = 'short'
+        if sweep_bear > 0 and (base.get("pin_bear", 0) > 0 or base.get("engulf_bear", 0) > 0):
+            setup_type = "LIQUIDITY_TRAP_SHORT"
+            entry_target = base.get("last_swing_high", px + current_atr * 0.5)
+            logic_desc = "Retail stops hunted above Swing High; bearish rejection confirmed. Offering the trapped liquidity."
+        elif base.get("trend_align_down_3tf", 0) >= 2.0:
+            setup_type = "TREND_PULLBACK_SHORT"
+            ob = base.get("ob_bear_price", 0)
+            entry_target = ob if ob > 0 else base.get("fib_786_short", px + current_atr * 0.5)
+            logic_desc = "Macro trend is bearish across 3 TFs. Offering structural premium."
+        elif base.get("squeeze_fired", 0) > 0 and base.get("bos_down", 0) > 0:
+            setup_type = "BREAKOUT_RETEST_SHORT"
+            entry_target = base.get("last_swing_low", px + current_atr * 0.5)
+            logic_desc = "Volatility Breakdown. Offering the retest of broken structural support."
+        elif rsi > 70 and base.get("cvd_div_bear", 0) > 0:
+            setup_type = "MACRO_REVERSAL_SHORT"
+            entry_target = px + (current_atr * 0.5)
+            logic_desc = "RSI Overbought with Bearish CVD Divergence. Fading the extreme."
+
+    if not setup_type:
+        return None
 
     # ==========================================================
-    # ELITE 4-PILLAR MULTI-STRATEGY ARSENAL (Context & Discount Entries)
+    # DYNAMIC GEOMETRY (SL: 1.0-1.5 ATR | TP: 2.2-3.0 RR)
     # ==========================================================
+    # 1. DYNAMIC STOP LOSS (Strictly constrained between 1.0 and 1.5 ATR to defeat fee drag)
+    if side == 'long':
+        struct_sl = base.get("last_swing_low", entry_target - current_atr) - (current_atr * 0.1)
+        sl = max(entry_target - (current_atr * 1.5), min(struct_sl, entry_target - (current_atr * 1.0)))
+    else:
+        struct_sl = base.get("last_swing_high", entry_target + current_atr) + (current_atr * 0.1)
+        sl = min(entry_target + (current_atr * 1.5), max(struct_sl, entry_target + (current_atr * 1.0)))
 
-    # Strategy 1: LIQUIDITY_TRAP (Judas Swing)
-    if can_long and sweep_bull > 0 and (base.get("pin_bull", 0) > 0 or base.get("engulf_bull", 0) > 0):
-        entry_target = base.get("last_swing_low", px)
-        if entry_target > 0:
-            candidates.append({
-                "strat": "LIQUIDITY_TRAP_LONG", "priority": 2.0, "side": "long",
-                "entry": entry_target, "type": "limit", "logic": "Retail stops hunted below Swing Low; bullish rejection confirmed."
-            })
+    dynamic_risk = abs(entry_target - sl)
 
-    if can_short and sweep_bear > 0 and (base.get("pin_bear", 0) > 0 or base.get("engulf_bear", 0) > 0):
-        entry_target = base.get("last_swing_high", px)
-        if entry_target > 0:
-            candidates.append({
-                "strat": "LIQUIDITY_TRAP_SHORT", "priority": 2.0, "side": "short",
-                "entry": entry_target, "type": "limit", "logic": "Retail stops hunted above Swing High; bearish rejection confirmed."
-            })
+    # 2. DYNAMIC TAKE PROFIT (Constrained between 2.2 and 3.0 RR)
+    if side == 'long':
+        valid_targets = [t for t in [base.get("ob_bear_price", 0), base.get("last_swing_high", 0), base.get("vah", 0)] if t > entry_target + (dynamic_risk * 2.2)]
+        tp_struct = min(valid_targets) if valid_targets else entry_target + (dynamic_risk * 3.0)
+        tp = min(tp_struct, entry_target + (dynamic_risk * 3.0))
+    else:
+        valid_targets = [t for t in [base.get("ob_bull_price", 0), base.get("last_swing_low", 0), base.get("val", 0)] if 0 < t < entry_target - (dynamic_risk * 2.2)]
+        tp_struct = max(valid_targets) if valid_targets else entry_target - (dynamic_risk * 3.0)
+        tp = max(tp_struct, entry_target - (dynamic_risk * 3.0))
 
-    # Strategy 2: TREND_PULLBACK (Continuation)
-    trend_align_up = base.get("trend_align_up_3tf", 0.0)
-    trend_align_dn = base.get("trend_align_down_3tf", 0.0)
-    if can_long and trend_align_up >= 2.0:
-        ob_bull = base.get("ob_bull_price", 0.0)
-        entry_target = ob_bull if ob_bull > 0 else px - (current_atr * 0.5)
-        candidates.append({
-            "strat": "TREND_PULLBACK_LONG", "priority": 1.8, "side": "long",
-            "entry": entry_target, "type": "limit", "logic": "Macro trend is bullish across 3 TFs. Price retracing to structural discount."
-        })
+    rr = abs(tp - entry_target) / max(1e-12, dynamic_risk)
 
-    if can_short and trend_align_dn >= 2.0:
-        ob_bear = base.get("ob_bear_price", 0.0)
-        entry_target = ob_bear if ob_bear > 0 else px + (current_atr * 0.5)
-        candidates.append({
-            "strat": "TREND_PULLBACK_SHORT", "priority": 1.8, "side": "short",
-            "entry": entry_target, "type": "limit", "logic": "Macro trend is bearish across 3 TFs. Price retracing to structural premium."
-        })
+    # ==========================================================
+    # THE ANALYST RATIONALE & MANUAL INVALIDATION
+    # ==========================================================
+    analysis_str = f"SETUP: {setup_type}. LOGIC: {logic_desc} ENTRY: Limit @ {entry_target:.2f}. TARGET: Structural Node @ {tp:.2f} ({rr:.2f} RR). INVALIDATION: The structural premise is broken if a 1H candle closes beyond {sl:.2f}. Close manually if this occurs. Risk clamped to {dynamic_risk/current_atr:.2f} ATR."
 
-    # Strategy 3: BREAKOUT_RETEST (S/R Flip)
-    if can_long and base.get("squeeze_fired", 0) > 0 and base.get("bos_up", 0) > 0:
-        entry_target = base.get("last_swing_high", px)
-        if entry_target > 0 and px > entry_target:
-            candidates.append({
-                "strat": "BREAKOUT_RETEST_LONG", "priority": 1.6, "side": "long",
-                "entry": entry_target, "type": "limit", "logic": "Momentum Breakout of Market Structure. Buying the retest of the broken Swing High."
-            })
-
-    if can_short and base.get("squeeze_fired", 0) > 0 and base.get("bos_down", 0) > 0:
-        entry_target = base.get("last_swing_low", px)
-        if entry_target > 0 and px < entry_target:
-            candidates.append({
-                "strat": "BREAKOUT_RETEST_SHORT", "priority": 1.6, "side": "short",
-                "entry": entry_target, "type": "limit", "logic": "Momentum Breakdown of Market Structure. Selling the retest of the broken Swing Low."
-            })
-
-    # Strategy 4: MACRO_REVERSAL (Mean Reversion)
-    ema50 = pre.ema50[iL] if pre and iL < len(pre.ema50) else px
-    if can_long and rsi < 30 and base.get("cvd_div_bull", 0) > 0 and px < ema50:
-        entry_target = px - (current_atr * 0.382)
-        candidates.append({
-            "strat": "MACRO_REVERSAL_LONG", "priority": 1.4, "side": "long",
-            "entry": entry_target, "type": "limit", "logic": "RSI Oversold with Bullish CVD Divergence deeply below 50 EMA. Fading the extreme at 0.382 ATR discount."
-        })
-
-    if can_short and rsi > 70 and base.get("cvd_div_bear", 0) > 0 and px > ema50:
-        entry_target = px + (current_atr * 0.382)
-        candidates.append({
-            "strat": "MACRO_REVERSAL_SHORT", "priority": 1.4, "side": "short",
-            "entry": entry_target, "type": "limit", "logic": "RSI Overbought with Bearish CVD Divergence deeply above 50 EMA. Fading the extreme at 0.382 ATR premium."
-        })
-
-    # EVALUATE ALL CANDIDATES (1:3 Precision)
-    best_plan = None
-    best_score = -999.0
-    
-    for cand in candidates:
-        side = cand['side']
-        order_type = cand.get('type', cfg.execution_style)
+    # ==========================================================
+    # DYNAMIC EV GATE & AI OVERFIT PURGE
+    # ==========================================================
+    prob = 1.0
+    risk_factor = 1.0
+    if brain:
+        prob = brain.predict_prob(side, base, adv, iH, iM, iL, px, pre)
+        required_ev_prob = (1.0 / (1.0 + rr)) + 0.02 # Mathematical Breakeven + 2% Edge
+        min_user_prob = cfg.min_prob_long if side == 'long' else cfg.min_prob_short
+        final_required_prob = max(required_ev_prob, min_user_prob)
+        if prob < final_required_prob:
+            return None
         
-        entry = cand['entry']
+        edge = prob - final_required_prob
+        base_risk = 1.0 + (edge * 10.0)
+        risk_factor = min(base_risk, getattr(cfg, 'max_risk_factor', 2.0))
 
-        # ==========================================================
-        # LIQUIDITY GRAVITY WELL: OPTIMAL LIMIT PLACEMENT
-        # ==========================================================
-        if "ALPHA_OB" in cand['strat'] or "GAMMA_LIQ" in cand['strat']:
-            poc_val = base.get("poc", px)
-            if entry > 1e-12 and abs(entry - poc_val) / entry < 0.005:
-                entry = poc_val
-
-        # DEFAULT BASELINE VARIABLES (If no brain is present)
-        prob = 1.0
-        risk_factor = cand.get('risk_mult', 1.0)
-        score = cand['priority']
-
-        if brain:
-            prob = brain.predict_prob(side, base, adv, iH, iM, iL, px, pre)
-            # DYNAMIC EV GATE: Evaluation moved to the bottom where RR is known
-            score = prob * cand['priority']
-            
-        # CVD DIVERGENCE BOOST
-        if side == 'long' and base.get("cvd_div_bull", 0) > 0 and "GAMMA" in cand['strat']:
-            score += 0.2
-            risk_factor *= 1.2
-        elif side == 'short' and base.get("cvd_div_bear", 0) > 0 and "GAMMA" in cand['strat']:
-            score += 0.2
-            risk_factor *= 1.2
-
-        # LIQUIDATION SQUEEZE CASCADE
-        if delta_oi > 0.05 and funding < -0.01: # 5% jump + high negative funding
-            if side == 'long' and "GAMMA" in cand['strat']:
-                risk_factor *= 1.5
-                
-        if getattr(cfg, 'filter_htf_trend', False):
-            is_counter = (side == 'short' and btc_bullish > 0.5) or (side == 'long' and btc_bullish < 0.5)
-            if is_counter:
-                score *= 0.5
-                risk_factor *= 0.5
-
-        if score > best_score:
-            # STRICT 1:3 GEOMETRY & 1.5 ATR CAP
-            if side == 'long':
-                sl_struct = base.get("last_swing_low", entry - current_atr) - (current_atr * 0.2)
-                sl = min(sl_struct, entry - (current_atr * 0.5))
-            else:
-                sl_struct = base.get("last_swing_high", entry + current_atr) + (current_atr * 0.2)
-                sl = max(sl_struct, entry + (current_atr * 0.5))
-
-            dynamic_risk = abs(entry - sl)
-
-            # Max SL Cap (EV Protection)
-            if dynamic_risk > (current_atr * 1.5) or dynamic_risk < (current_atr * 0.2):
-                continue
-
-            # Exact 1:3 Take Profit
-            if side == 'long':
-                tp = entry + (dynamic_risk * 3.0)
-            else:
-                tp = entry - (dynamic_risk * 3.0)
-
-            rr = 3.0
-
-            if brain:
-                # DYNAMIC EV GATE
-                required_ev_prob = (1.0 / (1.0 + rr)) + 0.02 # EV Breakeven + 2% edge
-                min_user_prob = cfg.min_prob_long if side == 'long' else cfg.min_prob_short
-                final_required_prob = max(required_ev_prob, min_user_prob)
-
-                if prob < final_required_prob:
-                    continue
-
-                edge = prob - final_required_prob
-                base_risk = 1.0 + (edge * 10.0)
-                risk_factor = min(base_risk * cand.get('risk_mult', 1.0), getattr(cfg, 'max_risk_factor', 2.0))
-            
-            best_score = score
-
-            analysis_str = f"SETUP: {cand['strat']}. LOGIC: {cand.get('logic', 'Structural Confluence')}. ENTRY: Limit @ {entry:.2f}. TARGET: {tp:.2f} (1:3 RR). INVALIDATION: Manually close position immediately if a 1H candle closes below {sl:.2f}. No automated breakeven required; let structure hold."
-
-            best_plan = {
-                "side": side,
-                "entry": entry,
-                "sl": sl,
-                "tp": tp,
-                "rr": rr,
-                "prob": prob,
-                "key": f"{cand['strat']}_{side}",
-                "features": base,
-                "risk_factor": risk_factor,
-                "strategy": cand['strat'],
-                "type": order_type,
-                "analysis": analysis_str
-            }
-
+    best_plan = {
+        "side": side, "entry": entry_target, "sl": sl, "tp": tp, "rr": rr,
+        "prob": prob, "key": f"{setup_type}_{side}", "features": base,
+        "risk_factor": risk_factor, "strategy": setup_type, "type": "limit",
+        "analysis": analysis_str
+    }
     return best_plan
