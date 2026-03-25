@@ -168,7 +168,7 @@ def main(argv=None):
 
     # BULLETPROOF TRAINING PARAMS: Forcefully prevent users from extreme overfitting via CLI
     args.max_depth = min(args.max_depth, 3)
-    args.n_estimators = min(args.n_estimators, 120)
+    args.n_estimators = min(args.n_estimators, 100)
 
     try:
         df, feature_names = load_events_df(args.events, args.min_win_r, args.filter_side, set(_parse_extras(args.exclude_cols)))
@@ -204,10 +204,10 @@ def main(argv=None):
         if w_tr.sum() > 0:
             w_tr = w_tr * (len(w_tr) / w_tr.sum())
 
-        # FIX MINORITY CLASS STARVATION
+        # DAMPENED MINORITY CLASS STARVATION (Prevent AI from predicting 0 exclusively)
         num_pos = int(np.sum(y_tr.astype(int)))
         num_neg = int(len(y_tr)) - num_pos
-        spw = min(num_neg / max(num_pos, 1), 5.0)
+        spw = np.sqrt(num_neg / max(num_pos, 1))
         
         clf = xgb.XGBClassifier(
             n_estimators=args.n_estimators,
@@ -217,6 +217,7 @@ def main(argv=None):
             reg_lambda=args.reg_lambda,
             colsample_bytree=0.7,
             subsample=0.8,
+            scale_pos_weight=spw,
             random_state=42,
             eval_metric='logloss'
         )
@@ -259,10 +260,10 @@ def main(argv=None):
     scaler = RobustScaler()
     X_all_s = scaler.fit_transform(imputer.fit_transform(X_all))
     
-    # FIX MINORITY CLASS STARVATION (FULL DATASET)
+    # DAMPENED MINORITY CLASS STARVATION (FULL DATASET)
     num_pos_all = int(np.sum(y_all.astype(int)))
     num_neg_all = int(len(y_all)) - num_pos_all
-    spw_all = min(num_neg_all / max(num_pos_all, 1), 5.0)
+    spw_all = np.sqrt(num_neg_all / max(num_pos_all, 1))
 
     final_base = xgb.XGBClassifier(
         n_estimators=args.n_estimators,
@@ -272,6 +273,7 @@ def main(argv=None):
         reg_lambda=args.reg_lambda,
         colsample_bytree=0.7,
         subsample=0.8,
+        scale_pos_weight=spw_all,
         random_state=42,
         eval_metric='logloss'
     )
