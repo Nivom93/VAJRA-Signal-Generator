@@ -226,8 +226,8 @@ def main():
             if meta:
                 open_meta.remove(meta)
                 # PURE "SET AND FORGET" MFE META-LABELING:
-                # 1.0 if it hits TP, or if the trade surged massively (+2.0R) before noise took it out
-                meta_label = 1.0 if cl.get("exit_reason") == "tp" or cl.get("max_pnl_r", 0.0) >= 2.0 else 0.0
+                # 1.0 if it hits TP, or if the trade surged massively (+2.2R) before noise took it out
+                meta_label = 1.0 if cl.get("exit_reason") == "tp" or cl.get("max_pnl_r", 0.0) >= 2.2 else 0.0
                 
                 if -50 < cl["pnl_r"] < 50:
                     events.append({

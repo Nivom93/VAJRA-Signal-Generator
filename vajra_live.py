@@ -457,8 +457,8 @@ def run_bot(args):
                 try:
                     ob = ex.client.fetch_order_book(symbol, limit=20)
                     if ob and 'bids' in ob and 'asks' in ob:
-                        total_bids = sum([v for p, v in ob['bids']])
-                        total_asks = sum([v for p, v in ob['asks']])
+                        total_bids = sum((v for p, v in ob['bids']))
+                        total_asks = sum((v for p, v in ob['asks']))
                         if (total_bids + total_asks) > 0:
                             bid_ask_imbalance = total_bids / (total_bids + total_asks)
                 except Exception as e:
@@ -519,6 +519,15 @@ def run_bot(args):
                 plan = plan_trade_with_brain(cfg, brain, base, adv_features, iH, iM, iL, pre_l)
                 
                 if plan:
+                    # SPOOFING DEFENSE: Block limit orders if facing a massive spoofed wall
+                    if plan.get("type", cfg.execution_style) == 'limit':
+                        if plan['side'] == 'long' and bid_ask_imbalance < 0.25:
+                            log.warning(f"[{symbol}] 🛡️ SPOOFING DEFENSE: Massive Ask Wall detected (Imbalance {bid_ask_imbalance:.2f}). Blocking LONG limit order.")
+                            continue
+                        elif plan['side'] == 'short' and bid_ask_imbalance > 0.75:
+                            log.warning(f"[{symbol}] 🛡️ SPOOFING DEFENSE: Massive Bid Wall detected (Imbalance {bid_ask_imbalance:.2f}). Blocking SHORT limit order.")
+                            continue
+
                     unique_id = f"{plan['key']}_{base['timestamp']}_{symbol}"
                     if not mem.seen(unique_id):
                         # PATCH: DYNAMIC EXECUTION TYPE LOGGING

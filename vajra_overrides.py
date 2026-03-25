@@ -21,7 +21,7 @@ def _strategy_overrides(cfg):
     cfg.taker_fee_bps = 6.0
 
     # --- DEFENSE MECHANISMS (WIN-RATE ENHANCEMENTS) ---
-    cfg.be_trigger_r = 0.0
+    cfg.be_trigger_r = 1.0
     cfg.trailing_stop_trigger_r = 0.0
     cfg.trailing_dist_r = 0.0
     cfg.dynamic_tp_enabled = False

@@ -46,43 +46,64 @@ def fetch_rss_titles(url="https://www.coindesk.com/arc/outboundfeeds/rss/", limi
 def get_llm_sentiment(titles):
     try:
         import openai
-
-        # Ensure OPENAI_API_KEY is available in the environment
-        if not os.environ.get("OPENAI_API_KEY"):
-            log.warning("OPENAI_API_KEY not found. Returning neutral sentiment (0.0).")
-            return 0.0
-
-        client = openai.OpenAI()
-
-        prompt = (
-            "You are an elite quantitative macro analyst. "
-            "Read these recent crypto headlines. "
-            "Output a SINGLE FLOAT between -1.0 (extreme bearish) and 1.0 (extreme bullish). "
-            "Output NOTHING ELSE."
-        )
-
-        headlines_text = "\n".join([f"- {title}" for title in titles])
-
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": headlines_text}
-            ],
-            temperature=0.0,
-            max_tokens=10
-        )
-
-        result_text = response.choices[0].message.content.strip()
-
-        # Parse the float response
-        sentiment_score = float(result_text)
-
-        # Ensure it's bounded correctly
-        return max(-1.0, min(1.0, sentiment_score))
+        if os.environ.get("OPENAI_API_KEY"):
+            client = openai.OpenAI()
+            prompt = (
+                "You are an elite quantitative macro analyst. "
+                "Read these recent crypto headlines. "
+                "Output a SINGLE FLOAT between -1.0 (extreme bearish) and 1.0 (extreme bullish). "
+                "Output NOTHING ELSE."
+            )
+            headlines_text = "\n".join([f"- {title}" for title in titles])
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": headlines_text}
+                ],
+                temperature=0.0,
+                max_tokens=10
+            )
+            result_text = response.choices[0].message.content.strip()
+            sentiment_score = float(result_text)
+            return max(-1.0, min(1.0, sentiment_score))
 
     except Exception as e:
-        log.error(f"Failed to get LLM sentiment: {e}")
+        log.warning(f"OpenAI API unavailable or failed ({e}). Falling back to Free Oracle...")
+
+    # ==========================================================
+    # FREE MACRO ORACLE FALLBACK (Alternative.me + Basic NLP)
+    # ==========================================================
+    log.info("Executing 100% FREE Macro Oracle Fallback (Fear & Greed + RSS NLP).")
+    try:
+        # 1. Alternative.me Crypto Fear & Greed Index
+        fg_url = "https://api.alternative.me/fng/?limit=1"
+        req = urllib.request.Request(fg_url, headers={'User-Agent': 'Mozilla/5.0'})
+        fg_score = 0.0
+        with urllib.request.urlopen(req, timeout=10) as response:
+            fg_data = json.loads(response.read().decode('utf-8'))
+            if 'data' in fg_data and len(fg_data['data']) > 0:
+                raw_fg = float(fg_data['data'][0]['value']) # 0 to 100
+                fg_score = (raw_fg - 50.0) / 50.0 # Map to -1.0 to 1.0
+
+        # 2. Basic Keyword NLP on RSS Titles
+        bull_words = {'surge', 'rally', 'bull', 'high', 'gain', 'jump', 'soar', 'approve', 'adoption', 'up', 'buy', 'long'}
+        bear_words = {'crash', 'plunge', 'bear', 'low', 'loss', 'drop', 'dive', 'reject', 'ban', 'down', 'sell', 'short', 'hack', 'scam', 'sec'}
+
+        nlp_score = 0.0
+        if titles:
+            bull_count = sum(1 for t in titles for w in bull_words if w in t.lower())
+            bear_count = sum(1 for t in titles for w in bear_words if w in t.lower())
+            total = bull_count + bear_count
+            if total > 0:
+                nlp_score = (bull_count - bear_count) / total
+
+        # 3. Blended Sentiment (Weighted 70% F&G, 30% NLP)
+        final_sentiment = (0.7 * fg_score) + (0.3 * nlp_score)
+        return max(-1.0, min(1.0, final_sentiment))
+
+    except Exception as fallback_e:
+        log.error(f"Free Oracle Fallback completely failed: {fallback_e}")
         return 0.0
 
 def main():

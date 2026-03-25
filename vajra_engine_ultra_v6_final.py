@@ -542,23 +542,40 @@ def _fvg_flags(h, l):
 
 @njit(cache=True)
 def _find_ob_zones_strict(o, c, h, l, bos_up, bos_dn):
-    n = len(c); obt = np.zeros(n); obb = np.zeros(n); lbu = 0.0; lbe = 0.0
-    for i in range(2, n - 1):
+    n = len(c); obt = np.zeros(n); obb = np.zeros(n)
+    active_bull = 0.0; active_bear = 0.0
+    for i in range(2, n):
+        # Carry forward unmitigated zones
+        obt[i] = active_bull
+        obb[i] = active_bear
+
+        # Check Mitigation: If an OB was formed but subsequent wicks tap into it, it is no longer fresh.
+        if active_bull > 0 and l[i] <= active_bull:
+            active_bull = 0.0
+            obt[i] = 0.0
+        if active_bear > 0 and h[i] >= active_bear:
+            active_bear = 0.0
+            obb[i] = 0.0
+
+        # Scan for new accumulation/distribution zones
         if bos_up[i] == 1 and bos_up[i-1] == 0:
             for j in range(i-1, max(0, i-10), -1):
                 if c[j] < o[j]: 
                     if j+1 < n:
                         body_ob = o[j] - c[j]; next_body = c[j+1] - o[j+1]
-                        if c[j+1] > o[j+1] and next_body > 1.5 * body_ob: lbu = float(h[j])
+                        if c[j+1] > o[j+1] and next_body > 1.5 * body_ob:
+                            active_bull = float(h[j])
+                            obt[i] = active_bull
                     break
         if bos_dn[i] == 1 and bos_dn[i-1] == 0:
             for j in range(i-1, max(0, i-10), -1):
                 if c[j] > o[j]: 
                     if j+1 < n:
                         body_ob = c[j] - o[j]; next_body = o[j+1] - c[j+1]
-                        if c[j+1] < o[j+1] and next_body > 1.5 * body_ob: lbe = float(l[j])
+                        if c[j+1] < o[j+1] and next_body > 1.5 * body_ob:
+                            active_bear = float(l[j])
+                            obb[i] = active_bear
                     break
-        obt[i]=lbu; obb[i]=lbe
     return obt, obb
 
 class Precomp:
@@ -1073,10 +1090,11 @@ class TradeManager:
                 t['be_locked'] = True
                 
             # STRUCTURAL TRAILING
-            #if side == 'long' and swing_low > 0 and swing_low > t['sl'] and swing_low < c:
-            #    #t['sl'] = swing_low
-            #elif side == 'short' and swing_high > 0 and swing_high < t['sl'] and swing_high > c:
-            #    t['sl'] = swing_high
+            if t['pnl_r'] >= 1.5:
+                if side == 'long' and swing_low > 0 and swing_low > t['sl'] and swing_low < c:
+                    t['sl'] = swing_low
+                elif side == 'short' and swing_high > 0 and swing_high < t['sl'] and swing_high > c:
+                    t['sl'] = swing_high
 
             if self.cfg.use_dca and t['dca_level'] < self.cfg.dca_max_safety_orders:
                 hit_safe = (side == 'long' and l <= t['next_safety_price']) or (side == 'short' and h >= t['next_safety_price'])
@@ -1194,88 +1212,138 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     if adx_val > 30: reversion_penalty = 0.5 
     
     # ==========================================================
-    # THE UNIFIED CONFLUENCE MATRIX (Traps, Pullbacks, Breakouts, Reversals)
+    # MULTI-STRATEGY ARSENAL INTEGRATION (The 6 Strategies)
     # ==========================================================
     setup_type = None
     logic_desc = ""
     entry_target = px
     side = None
 
+    # Evaluate Longs
     if can_long:
         side = 'long'
-        if sweep_bull > 0 and (base.get("pin_bull", 0) > 0 or base.get("engulf_bull", 0) > 0):
-            setup_type = "LIQUIDITY_TRAP_LONG"
-            entry_target = base.get("last_swing_low", px - current_atr * 0.5)
-            logic_desc = "Retail stops hunted below Swing Low; bullish rejection confirmed. Bidding the trapped liquidity."
-        elif base.get("trend_align_up_3tf", 0) >= 2.0:
-            setup_type = "TREND_PULLBACK_LONG"
-            ob = base.get("ob_bull_price", 0)
-            entry_target = ob if ob > 0 else base.get("fib_786_long", px - current_atr * 0.5)
-            logic_desc = "Macro trend is bullish across 3 TFs. Bidding structural discount."
-        elif base.get("squeeze_fired", 0) > 0 and base.get("bos_up", 0) > 0:
-            setup_type = "BREAKOUT_RETEST_LONG"
-            entry_target = base.get("last_swing_high", px - current_atr * 0.5)
-            logic_desc = "Volatility Breakout. Bidding the retest of broken structural resistance."
-        elif rsi < 30 and base.get("cvd_div_bull", 0) > 0:
-            setup_type = "MACRO_REVERSAL_LONG"
-            entry_target = px - (current_atr * 0.5)
-            logic_desc = "RSI Oversold with Bullish CVD Divergence. Fading the extreme."
+        # Strat Alpha (Trend Pullbacks)
+        if base.get("trend_align_up_3tf", 0) >= 2.0 and base.get("ob_bull_price", 0) > 0 and abs(base.get("fib_786_long", px) - base.get("ob_bull_price", 0)) < current_atr:
+            setup_type = "ALPHA_LONG"
+            entry_target = base.get("ob_bull_price", px)
+            logic_desc = "3-Timeframe EMA alignment. Bidding deep pullback into Fib 0.786 / Unmitigated OB."
+        # Strat Gamma (Volatility Expansion Breakouts)
+        elif base.get("squeeze_fired", 0) > 0 and cvd_roc > 0 and base.get("vol_spike", 0) > 0 and base.get("bos_up", 0) > 0:
+            setup_type = "GAMMA_LONG"
+            entry_target = px
+            logic_desc = "Volatility Expansion Breakout. Squeeze fired with CVD acceleration and Volume Spike."
+        # Strat Delta (Liquidity Traps / Reversals)
+        elif sweep_bull > 0 and (base.get("engulf_bull", 0) > 0 or base.get("pin_bull", 0) > 0) and rsi < 40 and base.get("cvd_div_bull", 0) > 0:
+            setup_type = "DELTA_LONG"
+            entry_target = base.get("last_swing_low", px - current_atr)
+            logic_desc = "Liquidity Trap. Fading retail breakout after HTF swing sweep with divergence."
+        # Strat Epsilon (Fractal Liquidity Mitigation)
+        elif base.get("fvg_bull", 0) > 0 and base.get("ob_bull_price", 0) > 0 and abs(base.get("fvg_bull", 0) - base.get("ob_bull_price", 0)) < current_atr * 0.5:
+            setup_type = "EPSILON_LONG"
+            entry_target = base.get("ob_bull_price", px)
+            logic_desc = "Fractal Liquidity Mitigation. Sniping Fair Value Gap aligned with Order Block."
+        # Strat Omega (Auction Market Theory)
+        elif adx_val < 25 and rsi < 40 and (w_pattern > 0 or sweep_bull > 0):
+            setup_type = "OMEGA_LONG"
+            entry_target = val
+            logic_desc = "Auction Market Theory. Ranging environment. Bidding the Value Area Low (VAL)."
+        # Strat Zeta (ICT Killzones)
+        elif hour in [7, 8, 9, 10, 13, 14, 15, 16] and base.get("asian_range_swept_dn", 0) > 0 and base.get("pin_bull", 0) > 0:
+            setup_type = "ZETA_LONG"
+            entry_target = px
+            logic_desc = "ICT Killzone. Trading the sweep of the asian_low during high-volume transition."
 
+    # Evaluate Shorts
     elif can_short:
         side = 'short'
-        if sweep_bear > 0 and (base.get("pin_bear", 0) > 0 or base.get("engulf_bear", 0) > 0):
-            setup_type = "LIQUIDITY_TRAP_SHORT"
-            entry_target = base.get("last_swing_high", px + current_atr * 0.5)
-            logic_desc = "Retail stops hunted above Swing High; bearish rejection confirmed. Offering the trapped liquidity."
-        elif base.get("trend_align_down_3tf", 0) >= 2.0:
-            setup_type = "TREND_PULLBACK_SHORT"
-            ob = base.get("ob_bear_price", 0)
-            entry_target = ob if ob > 0 else base.get("fib_786_short", px + current_atr * 0.5)
-            logic_desc = "Macro trend is bearish across 3 TFs. Offering structural premium."
-        elif base.get("squeeze_fired", 0) > 0 and base.get("bos_down", 0) > 0:
-            setup_type = "BREAKOUT_RETEST_SHORT"
-            entry_target = base.get("last_swing_low", px + current_atr * 0.5)
-            logic_desc = "Volatility Breakdown. Offering the retest of broken structural support."
-        elif rsi > 70 and base.get("cvd_div_bear", 0) > 0:
-            setup_type = "MACRO_REVERSAL_SHORT"
-            entry_target = px + (current_atr * 0.5)
-            logic_desc = "RSI Overbought with Bearish CVD Divergence. Fading the extreme."
+        # Strat Alpha (Trend Pullbacks)
+        if base.get("trend_align_down_3tf", 0) >= 2.0 and base.get("ob_bear_price", 0) > 0 and abs(base.get("fib_786_short", px) - base.get("ob_bear_price", 0)) < current_atr:
+            setup_type = "ALPHA_SHORT"
+            entry_target = base.get("ob_bear_price", px)
+            logic_desc = "3-Timeframe EMA alignment. Offering deep pullback into Fib 0.786 / Unmitigated OB."
+        # Strat Gamma (Volatility Expansion Breakouts)
+        elif base.get("squeeze_fired", 0) > 0 and cvd_roc < 0 and base.get("vol_spike", 0) > 0 and base.get("bos_down", 0) > 0:
+            setup_type = "GAMMA_SHORT"
+            entry_target = px
+            logic_desc = "Volatility Expansion Breakdown. Squeeze fired with CVD acceleration and Volume Spike."
+        # Strat Delta (Liquidity Traps / Reversals)
+        elif sweep_bear > 0 and (base.get("engulf_bear", 0) > 0 or base.get("pin_bear", 0) > 0) and rsi > 60 and base.get("cvd_div_bear", 0) > 0:
+            setup_type = "DELTA_SHORT"
+            entry_target = base.get("last_swing_high", px + current_atr)
+            logic_desc = "Liquidity Trap. Fading retail breakout after HTF swing sweep with divergence."
+        # Strat Epsilon (Fractal Liquidity Mitigation)
+        elif base.get("fvg_bear", 0) > 0 and base.get("ob_bear_price", 0) > 0 and abs(base.get("fvg_bear", 0) - base.get("ob_bear_price", 0)) < current_atr * 0.5:
+            setup_type = "EPSILON_SHORT"
+            entry_target = base.get("ob_bear_price", px)
+            logic_desc = "Fractal Liquidity Mitigation. Sniping Fair Value Gap aligned with Order Block."
+        # Strat Omega (Auction Market Theory)
+        elif adx_val < 25 and rsi > 60 and (m_pattern > 0 or sweep_bear > 0):
+            setup_type = "OMEGA_SHORT"
+            entry_target = vah
+            logic_desc = "Auction Market Theory. Ranging environment. Offering the Value Area High (VAH)."
+        # Strat Zeta (ICT Killzones)
+        elif hour in [7, 8, 9, 10, 13, 14, 15, 16] and base.get("asian_range_swept_up", 0) > 0 and base.get("pin_bear", 0) > 0:
+            setup_type = "ZETA_SHORT"
+            entry_target = px
+            logic_desc = "ICT Killzone. Trading the sweep of the asian_high during high-volume transition."
 
     if not setup_type:
         return None
 
     # ==========================================================
-    # DYNAMIC GEOMETRY (SL: 1.0-1.5 ATR | TP: 2.2-3.0 RR)
+    # STRICT RISK/REWARD GEOMETRY & STRUCTURAL TARGETING
     # ==========================================================
-    # 1. DYNAMIC STOP LOSS (Strictly constrained between 1.0 and 1.5 ATR to defeat fee drag)
+    # 1. Structural Stop Loss (Clamped 1.0 to 1.5 ATR)
     if side == 'long':
-        struct_sl = base.get("last_swing_low", entry_target - current_atr) - (current_atr * 0.1)
-        sl = max(entry_target - (current_atr * 1.5), min(struct_sl, entry_target - (current_atr * 1.0)))
+        struct_sl = base.get("last_swing_low", entry_target - current_atr) - (current_atr * 0.2)
+        sl = struct_sl
     else:
-        struct_sl = base.get("last_swing_high", entry_target + current_atr) + (current_atr * 0.1)
-        sl = min(entry_target + (current_atr * 1.5), max(struct_sl, entry_target + (current_atr * 1.0)))
+        struct_sl = base.get("last_swing_high", entry_target + current_atr) + (current_atr * 0.2)
+        sl = struct_sl
 
     dynamic_risk = abs(entry_target - sl)
 
-    # 2. DYNAMIC TAKE PROFIT (Constrained between 2.2 and 3.0 RR)
+    # The SL Veto: If structural stop is too wide (>1.5 ATR) or too tight (<1.0 ATR), reject setup.
+    if dynamic_risk > (current_atr * 1.5) or dynamic_risk < (current_atr * 1.0):
+        return None
+
+    # 2. Structural Take Profit & The RR Veto (2.2 to 3.0 RR)
     if side == 'long':
-        valid_targets = [t for t in [base.get("ob_bear_price", 0), base.get("last_swing_high", 0), base.get("vah", 0)] if t > entry_target + (dynamic_risk * 2.2)]
-        tp_struct = min(valid_targets) if valid_targets else entry_target + (dynamic_risk * 3.0)
-        tp = min(tp_struct, entry_target + (dynamic_risk * 3.0))
+        valid_targets = [t for t in [base.get("ob_bear_price", 0), base.get("last_swing_high", 0), base.get("vah", 0)] if t > entry_target]
+        struct_tp = min(valid_targets) if valid_targets else entry_target + (dynamic_risk * 2.2)
+        raw_rr = abs(struct_tp - entry_target) / dynamic_risk
+
+        if raw_rr < 2.2:
+            return None # Reject: Structural target yields < 2.2 RR against the clamped risk
+
+        if raw_rr > 3.0:
+            tp = entry_target + (dynamic_risk * 3.0) # Clamp to secure high-probability win
+            rr = 3.0
+        else:
+            tp = struct_tp
+            rr = raw_rr
     else:
-        valid_targets = [t for t in [base.get("ob_bull_price", 0), base.get("last_swing_low", 0), base.get("val", 0)] if 0 < t < entry_target - (dynamic_risk * 2.2)]
-        tp_struct = max(valid_targets) if valid_targets else entry_target - (dynamic_risk * 3.0)
-        tp = max(tp_struct, entry_target - (dynamic_risk * 3.0))
+        valid_targets = [t for t in [base.get("ob_bull_price", 0), base.get("last_swing_low", 0), base.get("val", 0)] if t > 0 and t < entry_target]
+        struct_tp = max(valid_targets) if valid_targets else entry_target - (dynamic_risk * 2.2)
+        raw_rr = abs(entry_target - struct_tp) / dynamic_risk
 
-    rr = abs(tp - entry_target) / max(1e-12, dynamic_risk)
+        if raw_rr < 2.2:
+            return None # Reject: Structural target yields < 2.2 RR against the clamped risk
+
+        if raw_rr > 3.0:
+            tp = entry_target - (dynamic_risk * 3.0) # Clamp to secure high-probability win
+            rr = 3.0
+        else:
+            tp = struct_tp
+            rr = raw_rr
 
     # ==========================================================
-    # THE ANALYST RATIONALE & MANUAL INVALIDATION
+    # THE COMPREHENSIVE ANALYST RATIONALE
     # ==========================================================
-    analysis_str = f"SETUP: {setup_type}. LOGIC: {logic_desc} ENTRY: Limit @ {entry_target:.2f}. TARGET: Structural Node @ {tp:.2f} ({rr:.2f} RR). INVALIDATION: The structural premise is broken if a 1H candle closes beyond {sl:.2f}. Close manually if this occurs. Risk clamped to {dynamic_risk/current_atr:.2f} ATR."
+    analysis_str = f"SETUP: {setup_type}. LOGIC: {logic_desc}. ENTRY: Limit @ {entry_target:.2f}. TARGET: Structural Liquidity @ {tp:.2f} ({rr:.2f} RR). INVALIDATION: Manually close position immediately if a 1H candle closes beyond {sl:.2f}. Risk clamped dynamically to {dynamic_risk/current_atr:.2f} ATR."
 
     # ==========================================================
-    # DYNAMIC EV GATE & AI OVERFIT PURGE
+    # DYNAMIC EV GATE
     # ==========================================================
     prob = 1.0
     risk_factor = 1.0
@@ -1286,7 +1354,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         final_required_prob = max(required_ev_prob, min_user_prob)
         if prob < final_required_prob:
             return None
-        
+
         edge = prob - final_required_prob
         base_risk = 1.0 + (edge * 10.0)
         risk_factor = min(base_risk, getattr(cfg, 'max_risk_factor', 2.0))

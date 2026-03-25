@@ -163,6 +163,7 @@ def main(argv=None):
     ap.add_argument("--exclude-cols", type=str, default="")
     ap.add_argument("--weight-decay", type=float, default=0.999)
     ap.add_argument("--wfa-folds", type=int, default=5)
+    ap.add_argument("--tune", action="store_true", help="Enable RandomizedSearchCV for hyperparameter tuning.")
     
     args = ap.parse_args(argv)
 
@@ -204,11 +205,6 @@ def main(argv=None):
         if w_tr.sum() > 0:
             w_tr = w_tr * (len(w_tr) / w_tr.sum())
 
-        # DAMPENED MINORITY CLASS STARVATION (Prevent AI from predicting 0 exclusively)
-        num_pos = int(np.sum(y_tr.astype(int)))
-        num_neg = int(len(y_tr)) - num_pos
-        spw = np.sqrt(num_neg / max(num_pos, 1))
-        
         clf = xgb.XGBClassifier(
             n_estimators=args.n_estimators,
             learning_rate=args.learning_rate,
@@ -217,10 +213,24 @@ def main(argv=None):
             reg_lambda=args.reg_lambda,
             colsample_bytree=0.7,
             subsample=0.8,
-            scale_pos_weight=spw,
             random_state=42,
             eval_metric='logloss'
         )
+
+        # Hyperparameter Tuning Support
+        if getattr(args, 'tune', False):
+            from sklearn.model_selection import RandomizedSearchCV
+            param_dist = {
+                'learning_rate': [0.01, 0.05, 0.1],
+                'max_depth': [2, 3],
+                'reg_lambda': [1.0, 5.0, 10.0],
+                'subsample': [0.6, 0.8, 1.0],
+                'colsample_bytree': [0.6, 0.8, 1.0]
+            }
+            random_search = RandomizedSearchCV(clf, param_distributions=param_dist, n_iter=10, scoring='roc_auc', cv=3, random_state=42)
+            random_search.fit(X_tr, y_tr, sample_weight=w_tr)
+            clf = random_search.best_estimator_
+            log.info(f"    Tuned Params: {random_search.best_params_}")
             
         clf.fit(X_tr, y_tr, sample_weight=w_tr)
         
@@ -260,11 +270,6 @@ def main(argv=None):
     scaler = RobustScaler()
     X_all_s = scaler.fit_transform(imputer.fit_transform(X_all))
     
-    # DAMPENED MINORITY CLASS STARVATION (FULL DATASET)
-    num_pos_all = int(np.sum(y_all.astype(int)))
-    num_neg_all = int(len(y_all)) - num_pos_all
-    spw_all = np.sqrt(num_neg_all / max(num_pos_all, 1))
-
     final_base = xgb.XGBClassifier(
         n_estimators=args.n_estimators,
         learning_rate=args.learning_rate,
@@ -273,7 +278,6 @@ def main(argv=None):
         reg_lambda=args.reg_lambda,
         colsample_bytree=0.7,
         subsample=0.8,
-        scale_pos_weight=spw_all,
         random_state=42,
         eval_metric='logloss'
     )
