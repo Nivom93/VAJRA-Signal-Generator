@@ -784,12 +784,15 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     f["dist_asian_low_pct"] = (px - f["asian_low"]) / px_safe * 100
 
     # SMC & Fibonacci Deep Wick Geometry
-    fractal_range = f["last_swing_high"] - f["last_swing_low"]
+    macro_high = max(f["last_swing_high"], f["last_swing_low"])
+    macro_low = min(f["last_swing_high"], f["last_swing_low"])
+    fractal_range = macro_high - macro_low
+
     if fractal_range > 0:
-        f["fib_786_long"] = f["last_swing_low"] + (fractal_range * 0.214)
-        f["fib_886_long"] = f["last_swing_low"] + (fractal_range * 0.114)
-        f["fib_786_short"] = f["last_swing_high"] - (fractal_range * 0.214)
-        f["fib_886_short"] = f["last_swing_high"] - (fractal_range * 0.114)
+        f["fib_786_long"] = macro_low + (fractal_range * 0.214)
+        f["fib_886_long"] = macro_low + (fractal_range * 0.114)
+        f["fib_786_short"] = macro_high - (fractal_range * 0.214)
+        f["fib_886_short"] = macro_high - (fractal_range * 0.114)
     else:
         f["fib_786_long"] = f["fib_886_long"] = f["fib_786_short"] = f["fib_886_short"] = px
 
@@ -1278,16 +1281,24 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     fvg_bull = base.get("fvg_bull", 0); fvg_bear = base.get("fvg_bear", 0)
     ob_bull = base.get("ob_bull_price", 0); ob_bear = base.get("ob_bear_price", 0)
     fib_786_l = base.get("fib_786_long", 0); fib_786_s = base.get("fib_786_short", 0)
-    fib_618_l = base.get("last_swing_low", px) + ((base.get("last_swing_high", px) - base.get("last_swing_low", px)) * 0.382)
-    fib_618_s = base.get("last_swing_high", px) - ((base.get("last_swing_high", px) - base.get("last_swing_low", px)) * 0.382)
+    macro_high = max(base.get("last_swing_high", px), base.get("last_swing_low", px))
+    macro_low = min(base.get("last_swing_high", px), base.get("last_swing_low", px))
+    fib_618_l = macro_low + ((macro_high - macro_low) * 0.382)
+    fib_618_s = macro_high - ((macro_high - macro_low) * 0.382)
     qm_bull = base.get("qm_bull", 0); qm_bear = base.get("qm_bear", 0)
     spring = base.get("wyckoff_spring", 0); upthrust = base.get("wyckoff_upthrust", 0)
+
+    # Fuzzy Proximity Helper (Phantom Fill Fix)
+    def is_tapped(level, buffer_atr_mult=0.5):
+        if level <= 0: return False
+        buffer = current_atr * buffer_atr_mult
+        return (abs(px - level) < buffer) or ((pre.l[iL] - buffer) <= level <= (pre.h[iL] + buffer))
 
     # Evaluate Longs
     if can_long:
         side = 'long'
         # Strat Alpha (Trend Pullbacks)
-        if base.get("trend_align_up_3tf", 0) >= 2.0 and ((fib_786_l <= px <= fib_618_l) or (ob_bull > 0 and abs(px - ob_bull) < current_atr * 0.5)):
+        if base.get("trend_align_up_3tf", 0) >= 2.0 and ((fib_786_l <= px <= fib_618_l) or (ob_bull > 0 and is_tapped(ob_bull))):
             setup_type = "ALPHA_LONG"
             entry_target = ob_bull if ob_bull > 0 else px
             logic_desc = "Trend Pullback: 3-TF alignment. Bidding 0.618-0.786 Fib overlap or active Order Block."
@@ -1302,12 +1313,12 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
             entry_target = base.get("last_swing_low", px)
             logic_desc = "Liquidity Trap: Retail stops hunted with rejection candle and bullish CVD momentum."
         # Strat Delta (Fractal Mitigation)
-        elif fvg_bull > 0 and ob_bull > 0 and abs(fvg_bull - ob_bull) < current_atr * 0.5:
+        elif fvg_bull > 0 and ob_bull > 0 and is_tapped(ob_bull):
             setup_type = "DELTA_LONG"
             entry_target = ob_bull
             logic_desc = "Fractal Mitigation: Fair Value Gap perfectly aligns with institutional Order Block."
         # Strat Epsilon (Quasimodo)
-        elif qm_bull > 0 and abs(px - qm_bull) < current_atr * 0.5:
+        elif qm_bull > 0 and is_tapped(qm_bull):
             setup_type = "EPSILON_LONG"
             entry_target = qm_bull
             logic_desc = "Quasimodo Structure: Bidding the pullback retest of the QM left shoulder."
@@ -1317,7 +1328,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
             entry_target = px
             logic_desc = "Wyckoff Spring: HTF swing swept with immediate volume/CVD reclaim."
         # Strat Omega (Auction Market Theory)
-        elif adx_val < 25 and (base.get("pin_bull", 0) > 0 or base.get("engulf_bull", 0) > 0) and abs(px - val) < current_atr * 0.5:
+        elif adx_val < 25 and (base.get("pin_bull", 0) > 0 or base.get("engulf_bull", 0) > 0) and is_tapped(val):
             setup_type = "OMEGA_LONG"
             entry_target = val
             logic_desc = "Auction Market Theory: Ranging environment rejection. Bidding Value Area Low (VAL)."
@@ -1326,7 +1337,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     elif can_short:
         side = 'short'
         # Strat Alpha (Trend Pullbacks)
-        if base.get("trend_align_down_3tf", 0) >= 2.0 and ((fib_618_s <= px <= fib_786_s) or (ob_bear > 0 and abs(px - ob_bear) < current_atr * 0.5)):
+        if base.get("trend_align_down_3tf", 0) >= 2.0 and ((fib_618_s <= px <= fib_786_s) or (ob_bear > 0 and is_tapped(ob_bear))):
             setup_type = "ALPHA_SHORT"
             entry_target = ob_bear if ob_bear > 0 else px
             logic_desc = "Trend Pullback: 3-TF alignment. Offering 0.618-0.786 Fib overlap or active Order Block."
@@ -1341,12 +1352,12 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
             entry_target = base.get("last_swing_high", px)
             logic_desc = "Liquidity Trap: Retail stops hunted with rejection candle and bearish CVD momentum."
         # Strat Delta (Fractal Mitigation)
-        elif fvg_bear > 0 and ob_bear > 0 and abs(fvg_bear - ob_bear) < current_atr * 0.5:
+        elif fvg_bear > 0 and ob_bear > 0 and is_tapped(ob_bear):
             setup_type = "DELTA_SHORT"
             entry_target = ob_bear
             logic_desc = "Fractal Mitigation: Fair Value Gap perfectly aligns with institutional Order Block."
         # Strat Epsilon (Quasimodo)
-        elif qm_bear > 0 and abs(px - qm_bear) < current_atr * 0.5:
+        elif qm_bear > 0 and is_tapped(qm_bear):
             setup_type = "EPSILON_SHORT"
             entry_target = qm_bear
             logic_desc = "Quasimodo Structure: Offering the pullback retest of the QM left shoulder."
@@ -1356,7 +1367,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
             entry_target = px
             logic_desc = "Wyckoff Upthrust: HTF swing swept with immediate volume/CVD reclaim."
         # Strat Omega (Auction Market Theory)
-        elif adx_val < 25 and (base.get("pin_bear", 0) > 0 or base.get("engulf_bear", 0) > 0) and abs(px - vah) < current_atr * 0.5:
+        elif adx_val < 25 and (base.get("pin_bear", 0) > 0 or base.get("engulf_bear", 0) > 0) and is_tapped(vah):
             setup_type = "OMEGA_SHORT"
             entry_target = vah
             logic_desc = "Auction Market Theory: Ranging environment rejection. Offering Value Area High (VAH)."
@@ -1378,38 +1389,49 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     if dynamic_risk > (current_atr * 2.5) or dynamic_risk < (current_atr * 0.5):
         return None
 
-    # 2. Dynamic TP Escalation (The RR Rescue)
+    # 2. Dynamic TP Escalation (The RR Rescue Loop)
     tp = entry_target
     if side == 'long':
-        valid_targets = [t for t in [base.get("ob_bear_price", 0), base.get("last_swing_high", 0), base.get("vah", 0)] if t > entry_target]
-        local_tp = min(valid_targets) if valid_targets else entry_target + (dynamic_risk * 2.2)
+        raw_targets = [
+            base.get("ob_bear_price", 0),
+            base.get("last_swing_high", 0),
+            base.get("vah", 0),
+            htf_sh,
+            base.get("asian_high", 0)
+        ]
+        valid_targets = sorted([t for t in raw_targets if t > entry_target])
 
-        if abs(local_tp - entry_target) / dynamic_risk >= 2.2:
-            tp = local_tp
-        else:
-            # Escalate to macro liquidity
-            macro_targets = [t for t in [htf_sh, base.get("asian_high", 0)] if t > entry_target]
-            macro_tp = max(macro_targets) if macro_targets else entry_target + (dynamic_risk * 2.2)
-            if abs(macro_tp - entry_target) / dynamic_risk >= 2.2:
-                tp = macro_tp
-            else:
-                # Artificial projection
-                tp = entry_target + (dynamic_risk * 2.2)
+        tp_found = False
+        for t in valid_targets:
+            if abs(t - entry_target) / max(1e-12, dynamic_risk) >= 2.2:
+                tp = t
+                tp_found = True
+                break
+
+        if not tp_found:
+            # Artificial projection
+            tp = entry_target + (dynamic_risk * 2.2)
+
     else:
-        valid_targets = [t for t in [base.get("ob_bull_price", 0), base.get("last_swing_low", 0), base.get("val", 0)] if t > 0 and t < entry_target]
-        local_tp = max(valid_targets) if valid_targets else entry_target - (dynamic_risk * 2.2)
+        raw_targets = [
+            base.get("ob_bull_price", 0),
+            base.get("last_swing_low", 0),
+            base.get("val", 0),
+            htf_sl,
+            base.get("asian_low", 0)
+        ]
+        valid_targets = sorted([t for t in raw_targets if t > 0 and t < entry_target], reverse=True)
 
-        if abs(entry_target - local_tp) / dynamic_risk >= 2.2:
-            tp = local_tp
-        else:
-            # Escalate to macro liquidity
-            macro_targets = [t for t in [htf_sl, base.get("asian_low", 0)] if t > 0 and t < entry_target]
-            macro_tp = min(macro_targets) if macro_targets else entry_target - (dynamic_risk * 2.2)
-            if abs(entry_target - macro_tp) / dynamic_risk >= 2.2:
-                tp = macro_tp
-            else:
-                # Artificial projection
-                tp = entry_target - (dynamic_risk * 2.2)
+        tp_found = False
+        for t in valid_targets:
+            if abs(entry_target - t) / max(1e-12, dynamic_risk) >= 2.2:
+                tp = t
+                tp_found = True
+                break
+
+        if not tp_found:
+            # Artificial projection
+            tp = entry_target - (dynamic_risk * 2.2)
 
     rr = abs(tp - entry_target) / max(1e-12, dynamic_risk)
 
