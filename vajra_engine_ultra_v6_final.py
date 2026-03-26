@@ -1334,7 +1334,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
             logic_desc = "Auction Market Theory: Ranging environment rejection. Bidding Value Area Low (VAL)."
 
     # Evaluate Shorts
-    elif can_short:
+    if not setup_type and can_short:
         side = 'short'
         # Strat Alpha (Trend Pullbacks)
         if base.get("trend_align_down_3tf", 0) >= 2.0 and ((fib_618_s <= px <= fib_786_s) or (ob_bear > 0 and is_tapped(ob_bear))):

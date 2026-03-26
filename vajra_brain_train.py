@@ -123,6 +123,9 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
     df = _enforce_causality_drop(df, lookahead=5)
     log.info(f"Causality Check: Dropped {initial_len - len(df)} rows.")
     
+    if len(df) == 0:
+        raise ValueError("0 samples remain after filtering. Aborting training.")
+
     df["entry_ts_dt"] = pd.to_datetime(df["entry_ts"], unit="ms", utc=True)
     
     candidates = [c for c in df.columns if is_feature_column(df, c, extra_exclude)]
