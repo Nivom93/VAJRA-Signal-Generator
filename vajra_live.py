@@ -357,6 +357,8 @@ def run_bot(args):
     dxy_val = 0.0
     spx_val = 0.0
     
+    last_processed_ts = {}
+
     while True:
         try:
             now_sec = time.time()
@@ -452,6 +454,12 @@ def run_bot(args):
                 
                 if ltf.empty or len(htf) < 2 or len(mtf) < 2 or len(ltf) < 2: continue
                 
+                # FIX 1: THE GHOST CANDLE TIME-DILATION BUG
+                curr_ts = int(ltf.timestamp.iloc[-2])
+                if curr_ts <= last_processed_ts.get(symbol, 0):
+                    continue
+                last_processed_ts[symbol] = curr_ts
+
                 # LEVEL 30 SPOOFING DEFENSE (L2 ORDERBOOK FETCH)
                 bid_ask_imbalance = 0.5
                 try:
@@ -504,13 +512,26 @@ def run_bot(args):
                 curr_bar = {"o":ltf.open.iloc[-2], "h":ltf.high.iloc[-2], "l":ltf.low.iloc[-2], "c":ltf.close.iloc[-2]}
                 
                 # Step 1: Manage Existing
-                closed = tm.step_bar(curr_bar["o"], curr_bar["h"], curr_bar["l"], curr_bar["c"])
+                # FIX 7: STRUCTURAL TRAILING STOP PARALYSIS (Pass swing_high/swing_low)
+                sh = pre_l.last_sh[iL] if iL < len(pre_l.last_sh) else 0.0
+                sl = pre_l.last_sl[iL] if iL < len(pre_l.last_sl) else 0.0
+                closed = tm.step_bar(curr_bar["o"], curr_bar["h"], curr_bar["l"], curr_bar["c"], swing_high=sh, swing_low=sl)
+
                 if closed:
                     for t in closed:
                         log.info(f"[{symbol}] ⛔ Trade Closed: {t['side']} PnL: {t['pnl_r']:.2f}R")
                         if not cfg.paper_mode:
                             try:
                                 sym = t.get('symbol', symbol)
+                                # FIX 3: UNCANCELLED HARD STOPS
+                                sl_order_id = t.get('sl_order_id')
+                                if sl_order_id:
+                                    log.info(f"[{sym}] Cancelling Hard Stop Order ID: {sl_order_id}")
+                                    try:
+                                        ex.client.cancel_order(sl_order_id, sym)
+                                    except Exception as ce:
+                                        log.warning(f"[{sym}] Failed to cancel Hard Stop (already filled/cancelled?): {ce}")
+
                                 executor.execute_close(sym, t['side'], t['total_size'])
                             except Exception as e:
                                 log.error(f"[{symbol}] Execution Close Failed: {e}")
@@ -550,11 +571,16 @@ def run_bot(args):
                             
                             if fill_price:
                                 plan['entry'] = fill_price 
-                                tm.submit_plan(plan, curr_bar)
                                 
-                                # IMMEDIATE STOP LOSS PLACEMENT (Real Mode Only)
+                                # FIX 2 & 3: EXECUTION DESYNC & HARD STOP ATTACHMENT
+                                sl_order_id = None
                                 if not cfg.paper_mode:
-                                    executor.place_stop_loss(symbol, plan['side'], qty, plan['sl'])
+                                    sl_res = executor.place_stop_loss(symbol, plan['side'], qty, plan['sl'])
+                                    if sl_res and 'id' in sl_res:
+                                        sl_order_id = sl_res['id']
+
+                                # Force Open instantly using the updated TradeManager args
+                                tm.submit_plan(plan, curr_bar, force_open=True, fill_price=fill_price, sl_order_id=sl_order_id)
                         else:
                             log.warning(f"[{symbol}] Risk Distance is 0. Skipping.")
                     else:

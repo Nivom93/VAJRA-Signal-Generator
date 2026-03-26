@@ -744,7 +744,7 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
 
     f["dist_bb_upper_pct"] = (px - f["bb_upper"]) / px_safe * 100
     f["dist_bb_lower_pct"] = (px - f["bb_lower"]) / px_safe * 100
-    f["rsi"] = float(pl.rsi14[idx_L])
+    f["rsi_14"] = float(pl.rsi14[idx_L])
     
     f["w_pattern"] = float(pl.w_pattern[idx_L])
     f["m_pattern"] = float(pl.m_pattern[idx_L])
@@ -808,6 +808,9 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     ts = ltf.timestamp.iloc[idx_L]
     f["hour_of_day"] = float((int(ts) // 3600000) % 24)
     
+    dt = pd.to_datetime(ts, unit='ms', utc=True)
+    f["day_of_week"] = float(dt.dayofweek)
+
     if extras:
         f["funding_rate"] = float(extras.get("funding_rate", 0.0))
         f["macro_sentiment"] = float(extras.get("macro_sentiment", 0.0))
@@ -943,16 +946,18 @@ class BrainLearningManager:
         b = self.brains.get(side)
         if not b: return 0.0
         try:
-            vec = self._build_vec(side, base, adv, iL, iM, px, pre_l, b['feature_names'])
+            vec = self._build_vec(side, base, adv, iL, px, pre_l, b['feature_names'])
             # CRITICAL FIX: Clip all array values before casting to prevent float32 memory overflow
             vec = np.clip(np.nan_to_num(vec, nan=0.0), -1e10, 1e10).astype(np.float32)
             if 'imputer' in b: vec = b['imputer'].transform(vec)
             vec_s = b['scaler'].transform(vec)
             p = b['classifier'].predict_proba(vec_s)[0][1]
             return 1.0-p if b.get('invert_prob') else p
-        except: return 0.0
+        except Exception as e:
+            log.error(f"Brain Prediction Failed: {e}\n{traceback.format_exc()}")
+            return 0.0
 
-    def _build_vec(self, side, b, a, iL, iM, px, pl, fnames):
+    def _build_vec(self, side, b, a, iL, px, pl, fnames):
         d = {**b} 
         for k, v in a.items():
             if hasattr(v, '__getitem__') and len(v) > iL:
@@ -961,10 +966,12 @@ class BrainLearningManager:
                 if d[k] > 1e6: d[k] = 1e6
                 elif d[k] < -1e6: d[k] = -1e6
             else: d[k] = 0.0
+
+        # ALIGNMENT FIX: Use iL for mtf arrays since they were forward-filled to LTF length
         d.update({
             "pos_vs_swing_h": (px-pl.last_sh[iL])/px if px else 0.0, 
             "pos_vs_swing_l": (px-pl.last_sl[iL])/px if px else 0.0,
-            "dist_to_mtf_ema200_pct": (px-a['mtf_ema200_arr'][iM])/px*100 if px and 'mtf_ema200_arr' in a else 0.0,
+            "dist_to_mtf_ema200_pct": (px-a['mtf_ema200_arr'][iL])/px*100 if px and 'mtf_ema200_arr' in a else 0.0,
             "side": 1.0 if side=="long" else 0.0
         })
         return np.array([d.get(n, 0.0) for n in fnames]).reshape(1,-1)
@@ -983,11 +990,10 @@ class TradeManager:
         if self.cfg.max_concurrent > 0 and total_active >= self.cfg.max_concurrent: return False
         return True
 
-    def submit_plan(self, plan, bar):
+    def submit_plan(self, plan, bar, force_open=False, fill_price=None, sl_order_id=None):
         if not plan or not self.can_open(plan['side']): return None
         
         adx = plan.get('features', {}).get('adx', 25.0)
-        
         ttl = 4
         
         order = {
@@ -999,6 +1005,26 @@ class TradeManager:
             "status": "PENDING" 
         }
         
+        if force_open and fill_price is not None:
+            # Bypass PENDING and go straight to OPEN (Execution Desync Fix)
+            planned_risk = abs(order['entry'] - order['sl'])
+            if planned_risk < 1e-9: planned_risk = order['entry'] * 0.01
+            initial_risk = planned_risk
+
+            trade = order.copy()
+            trade['avg_price'] = fill_price
+            trade['total_size'] = order.get('total_size', 1.0 * order.get('risk_factor', 1.0))
+            trade['initial_risk_unit'] = initial_risk
+            trade['status'] = 'OPEN'
+            trade['fill_ts'] = time.time()
+            trade['bars_open'] = 0
+            trade['next_safety_price'] = 0.0
+            trade['sl_order_id'] = sl_order_id
+
+            self.open_trades.append(trade)
+            self.mem.record_fill(trade)
+            return trade
+
         self.pending_orders.append(order)
         self.mem.record_signal(order)
         return order
@@ -1294,26 +1320,31 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         buffer = current_atr * buffer_atr_mult
         return (abs(px - level) < buffer) or ((pre.l[iL] - buffer) <= level <= (pre.h[iL] + buffer))
 
+    # Regime Filtering (Hurst Exponent)
+    hurst_val = base.get("hurst", 0.5)
+    is_trending_regime = hurst_val > 0.55
+    is_ranging_regime = hurst_val < 0.45
+
     # Evaluate Longs
     if can_long:
         side = 'long'
         is_bull_rejection = (base.get("pin_bull", 0) > 0 or base.get("engulf_bull", 0) > 0)
 
-        # Strat Alpha (Trend Pullbacks)
-        if base.get("trend_align_up_3tf", 0) >= 2.0 and ((fib_786_l <= px <= fib_618_l) or (ob_bull > 0 and is_tapped(ob_bull))) and is_bull_rejection:
+        # Strat Alpha (Trend Pullbacks) - Prioritize in Trending Regime
+        if is_trending_regime and base.get("trend_align_up_3tf", 0) >= 2.0 and ((fib_786_l <= px <= fib_618_l) or (ob_bull > 0 and is_tapped(ob_bull))) and is_bull_rejection:
             setup_type = "ALPHA_LONG"
             entry_target = ob_bull if ob_bull > 0 else px
             logic_desc = "Trend Pullback: 3-TF alignment. Structural bounce confirmed on 0.618-0.786 Fib or active OB."
-        # Strat Beta (Momentum Breakouts)
-        elif base.get("squeeze_fired", 0) > 0 and base.get("vol_spike", 0) > 0 and base.get("bos_up", 0) > 0:
+        # Strat Beta (Momentum Breakouts) - Prioritize in Trending Regime
+        elif is_trending_regime and base.get("squeeze_fired", 0) > 0 and rvol > 1.5 and base.get("vol_spike", 0) > 0 and base.get("bos_up", 0) > 0:
             setup_type = "BETA_LONG"
             entry_target = px
             logic_desc = "Momentum Breakout: Squeeze fired with volume spike and Structural BOS. Entering momentum explosion."
-        # Strat Gamma (Liquidity Traps)
-        elif sweep_bull > 0 and is_bull_rejection and cvd_roc > 0:
+        # Strat Gamma (Liquidity Traps) - Prioritize in Ranging/Reversion
+        elif sweep_bull > 0 and is_bull_rejection and base.get("cvd_div_bull", 0) > 0:
             setup_type = "GAMMA_LONG"
             entry_target = base.get("last_swing_low", px)
-            logic_desc = "Liquidity Trap: Retail stops hunted with bullish rejection and CVD momentum."
+            logic_desc = "Liquidity Trap: Retail stops hunted with bullish rejection and CVD absorption divergence."
         # Strat Delta (Fractal Mitigation)
         elif fvg_bull > 0 and ob_bull > 0 and is_tapped(ob_bull):
             setup_type = "DELTA_LONG"
@@ -1324,13 +1355,13 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
             setup_type = "EPSILON_LONG"
             entry_target = qm_bull
             logic_desc = "Quasimodo Structure: Structural bounce confirmed on the QM left shoulder retest."
-        # Strat Zeta (Wyckoff Spring)
-        elif spring > 0:
+        # Strat Zeta (Wyckoff Spring / Judas Swing)
+        elif spring > 0 or (base.get("asian_range_swept_dn", 0) > 0 and is_bull_rejection):
             setup_type = "ZETA_LONG"
             entry_target = px
-            logic_desc = "Wyckoff Spring: HTF swing swept with immediate volume/CVD reclaim."
-        # Strat Omega (Auction Market Theory)
-        elif adx_val < 25 and is_bull_rejection and is_tapped(val):
+            logic_desc = "Wyckoff/Judas Spring: HTF/Asian swing swept with immediate volume/CVD reclaim."
+        # Strat Omega (Auction Market Theory) - Prioritize in Ranging Regime
+        elif (is_ranging_regime or adx_val < 25) and is_bull_rejection and is_tapped(val) and base.get("poc", 0) > entry_target:
             setup_type = "OMEGA_LONG"
             entry_target = val
             logic_desc = "Auction Market Theory: Ranging environment. Bullish rejection confirmed at Value Area Low (VAL)."
@@ -1341,20 +1372,20 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         is_bear_rejection = (base.get("pin_bear", 0) > 0 or base.get("engulf_bear", 0) > 0)
 
         # Strat Alpha (Trend Pullbacks)
-        if base.get("trend_align_down_3tf", 0) >= 2.0 and ((fib_618_s <= px <= fib_786_s) or (ob_bear > 0 and is_tapped(ob_bear))) and is_bear_rejection:
+        if is_trending_regime and base.get("trend_align_down_3tf", 0) >= 2.0 and ((fib_618_s <= px <= fib_786_s) or (ob_bear > 0 and is_tapped(ob_bear))) and is_bear_rejection:
             setup_type = "ALPHA_SHORT"
             entry_target = ob_bear if ob_bear > 0 else px
             logic_desc = "Trend Pullback: 3-TF alignment. Structural rejection confirmed on 0.618-0.786 Fib or active OB."
         # Strat Beta (Momentum Breakouts)
-        elif base.get("squeeze_fired", 0) > 0 and base.get("vol_spike", 0) > 0 and base.get("bos_down", 0) > 0:
+        elif is_trending_regime and base.get("squeeze_fired", 0) > 0 and rvol > 1.5 and base.get("vol_spike", 0) > 0 and base.get("bos_down", 0) > 0:
             setup_type = "BETA_SHORT"
             entry_target = px
             logic_desc = "Momentum Breakout: Squeeze fired with volume spike and Structural BOS. Entering momentum explosion."
         # Strat Gamma (Liquidity Traps)
-        elif sweep_bear > 0 and is_bear_rejection and cvd_roc < 0:
+        elif sweep_bear > 0 and is_bear_rejection and base.get("cvd_div_bear", 0) > 0:
             setup_type = "GAMMA_SHORT"
             entry_target = base.get("last_swing_high", px)
-            logic_desc = "Liquidity Trap: Retail stops hunted with bearish rejection and CVD momentum."
+            logic_desc = "Liquidity Trap: Retail stops hunted with bearish rejection and CVD absorption divergence."
         # Strat Delta (Fractal Mitigation)
         elif fvg_bear > 0 and ob_bear > 0 and is_tapped(ob_bear):
             setup_type = "DELTA_SHORT"
@@ -1365,13 +1396,13 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
             setup_type = "EPSILON_SHORT"
             entry_target = qm_bear
             logic_desc = "Quasimodo Structure: Structural rejection confirmed on the QM left shoulder retest."
-        # Strat Zeta (Wyckoff Upthrust)
-        elif upthrust > 0:
+        # Strat Zeta (Wyckoff Upthrust / Judas Swing)
+        elif upthrust > 0 or (base.get("asian_range_swept_up", 0) > 0 and is_bear_rejection):
             setup_type = "ZETA_SHORT"
             entry_target = px
-            logic_desc = "Wyckoff Upthrust: HTF swing swept with immediate volume/CVD reclaim."
+            logic_desc = "Wyckoff/Judas Upthrust: HTF/Asian swing swept with immediate volume/CVD reclaim."
         # Strat Omega (Auction Market Theory)
-        elif adx_val < 25 and is_bear_rejection and is_tapped(vah):
+        elif (is_ranging_regime or adx_val < 25) and is_bear_rejection and is_tapped(vah) and base.get("poc", px) < entry_target:
             setup_type = "OMEGA_SHORT"
             entry_target = vah
             logic_desc = "Auction Market Theory: Ranging environment. Bearish rejection confirmed at Value Area High (VAH)."
