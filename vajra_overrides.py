@@ -25,7 +25,7 @@ def _strategy_overrides(cfg):
     cfg.trailing_stop_trigger_r = 0.0
     cfg.trailing_dist_r = 0.0
     cfg.dynamic_tp_enabled = False
-    cfg.time_in_force_decay = 9999     # Disable time decay, letting the structural levels play out completely
+    cfg.time_in_force_decay = 24       # Cut trades if alpha decays after 24 bars without surging into profit
 
     # --- GLOBAL RISK DEFAULTS ---
     cfg.risk_per_trade = 0.01          
@@ -61,10 +61,10 @@ def _strategy_overrides(cfg):
     cfg.dca_max_safety_orders = 0
 
     # --- STRUCTURAL SNIPER GEOMETRY ---
-    # Target >50% WR with >2.2 RR natively via structural alignment (Order Blocks/Swings)
-    cfg.min_rr = 2.2                # Rigid minimum RR enforcement
+    # Target >50% WR with >1.8 RR natively via structural alignment (Order Blocks/Swings)
+    cfg.min_rr = 1.8                # Rigid minimum RR enforcement
     cfg.atr_mult_sl = 1.0           # Mathematical fallback for very tight snipes
-    cfg.atr_mult_tp = 2.2           # Mathematical fallback to achieve >= 2.2 RR baseline
+    cfg.atr_mult_tp = 1.8           # Mathematical fallback to achieve >= 1.8 RR baseline
 
     if "BTC" in symbol or "ETH" in symbol:
         cfg.min_conf_long = 1.0

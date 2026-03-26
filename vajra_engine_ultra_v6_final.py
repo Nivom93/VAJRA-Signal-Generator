@@ -1297,80 +1297,84 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     # Evaluate Longs
     if can_long:
         side = 'long'
+        is_bull_rejection = (base.get("pin_bull", 0) > 0 or base.get("engulf_bull", 0) > 0)
+
         # Strat Alpha (Trend Pullbacks)
-        if base.get("trend_align_up_3tf", 0) >= 2.0 and ((fib_786_l <= px <= fib_618_l) or (ob_bull > 0 and is_tapped(ob_bull))):
+        if base.get("trend_align_up_3tf", 0) >= 2.0 and ((fib_786_l <= px <= fib_618_l) or (ob_bull > 0 and is_tapped(ob_bull))) and is_bull_rejection:
             setup_type = "ALPHA_LONG"
             entry_target = ob_bull if ob_bull > 0 else px
-            logic_desc = "Trend Pullback: 3-TF alignment. Bidding 0.618-0.786 Fib overlap or active Order Block."
+            logic_desc = "Trend Pullback: 3-TF alignment. Structural bounce confirmed on 0.618-0.786 Fib or active OB."
         # Strat Beta (Momentum Breakouts)
         elif base.get("squeeze_fired", 0) > 0 and base.get("vol_spike", 0) > 0 and base.get("bos_up", 0) > 0:
             setup_type = "BETA_LONG"
             entry_target = px
             logic_desc = "Momentum Breakout: Squeeze fired with volume spike and Structural BOS. Entering momentum explosion."
         # Strat Gamma (Liquidity Traps)
-        elif sweep_bull > 0 and (base.get("engulf_bull", 0) > 0 or base.get("pin_bull", 0) > 0) and cvd_roc > 0:
+        elif sweep_bull > 0 and is_bull_rejection and cvd_roc > 0:
             setup_type = "GAMMA_LONG"
             entry_target = base.get("last_swing_low", px)
-            logic_desc = "Liquidity Trap: Retail stops hunted with rejection candle and bullish CVD momentum."
+            logic_desc = "Liquidity Trap: Retail stops hunted with bullish rejection and CVD momentum."
         # Strat Delta (Fractal Mitigation)
         elif fvg_bull > 0 and ob_bull > 0 and is_tapped(ob_bull):
             setup_type = "DELTA_LONG"
             entry_target = ob_bull
             logic_desc = "Fractal Mitigation: Fair Value Gap perfectly aligns with institutional Order Block."
         # Strat Epsilon (Quasimodo)
-        elif qm_bull > 0 and is_tapped(qm_bull):
+        elif qm_bull > 0 and is_tapped(qm_bull) and is_bull_rejection:
             setup_type = "EPSILON_LONG"
             entry_target = qm_bull
-            logic_desc = "Quasimodo Structure: Bidding the pullback retest of the QM left shoulder."
+            logic_desc = "Quasimodo Structure: Structural bounce confirmed on the QM left shoulder retest."
         # Strat Zeta (Wyckoff Spring)
         elif spring > 0:
             setup_type = "ZETA_LONG"
             entry_target = px
             logic_desc = "Wyckoff Spring: HTF swing swept with immediate volume/CVD reclaim."
         # Strat Omega (Auction Market Theory)
-        elif adx_val < 25 and (base.get("pin_bull", 0) > 0 or base.get("engulf_bull", 0) > 0) and is_tapped(val):
+        elif adx_val < 25 and is_bull_rejection and is_tapped(val):
             setup_type = "OMEGA_LONG"
             entry_target = val
-            logic_desc = "Auction Market Theory: Ranging environment rejection. Bidding Value Area Low (VAL)."
+            logic_desc = "Auction Market Theory: Ranging environment. Bullish rejection confirmed at Value Area Low (VAL)."
 
     # Evaluate Shorts
     if not setup_type and can_short:
         side = 'short'
+        is_bear_rejection = (base.get("pin_bear", 0) > 0 or base.get("engulf_bear", 0) > 0)
+
         # Strat Alpha (Trend Pullbacks)
-        if base.get("trend_align_down_3tf", 0) >= 2.0 and ((fib_618_s <= px <= fib_786_s) or (ob_bear > 0 and is_tapped(ob_bear))):
+        if base.get("trend_align_down_3tf", 0) >= 2.0 and ((fib_618_s <= px <= fib_786_s) or (ob_bear > 0 and is_tapped(ob_bear))) and is_bear_rejection:
             setup_type = "ALPHA_SHORT"
             entry_target = ob_bear if ob_bear > 0 else px
-            logic_desc = "Trend Pullback: 3-TF alignment. Offering 0.618-0.786 Fib overlap or active Order Block."
+            logic_desc = "Trend Pullback: 3-TF alignment. Structural rejection confirmed on 0.618-0.786 Fib or active OB."
         # Strat Beta (Momentum Breakouts)
         elif base.get("squeeze_fired", 0) > 0 and base.get("vol_spike", 0) > 0 and base.get("bos_down", 0) > 0:
             setup_type = "BETA_SHORT"
             entry_target = px
             logic_desc = "Momentum Breakout: Squeeze fired with volume spike and Structural BOS. Entering momentum explosion."
         # Strat Gamma (Liquidity Traps)
-        elif sweep_bear > 0 and (base.get("engulf_bear", 0) > 0 or base.get("pin_bear", 0) > 0) and cvd_roc < 0:
+        elif sweep_bear > 0 and is_bear_rejection and cvd_roc < 0:
             setup_type = "GAMMA_SHORT"
             entry_target = base.get("last_swing_high", px)
-            logic_desc = "Liquidity Trap: Retail stops hunted with rejection candle and bearish CVD momentum."
+            logic_desc = "Liquidity Trap: Retail stops hunted with bearish rejection and CVD momentum."
         # Strat Delta (Fractal Mitigation)
         elif fvg_bear > 0 and ob_bear > 0 and is_tapped(ob_bear):
             setup_type = "DELTA_SHORT"
             entry_target = ob_bear
             logic_desc = "Fractal Mitigation: Fair Value Gap perfectly aligns with institutional Order Block."
         # Strat Epsilon (Quasimodo)
-        elif qm_bear > 0 and is_tapped(qm_bear):
+        elif qm_bear > 0 and is_tapped(qm_bear) and is_bear_rejection:
             setup_type = "EPSILON_SHORT"
             entry_target = qm_bear
-            logic_desc = "Quasimodo Structure: Offering the pullback retest of the QM left shoulder."
+            logic_desc = "Quasimodo Structure: Structural rejection confirmed on the QM left shoulder retest."
         # Strat Zeta (Wyckoff Upthrust)
         elif upthrust > 0:
             setup_type = "ZETA_SHORT"
             entry_target = px
             logic_desc = "Wyckoff Upthrust: HTF swing swept with immediate volume/CVD reclaim."
         # Strat Omega (Auction Market Theory)
-        elif adx_val < 25 and (base.get("pin_bear", 0) > 0 or base.get("engulf_bear", 0) > 0) and is_tapped(vah):
+        elif adx_val < 25 and is_bear_rejection and is_tapped(vah):
             setup_type = "OMEGA_SHORT"
             entry_target = vah
-            logic_desc = "Auction Market Theory: Ranging environment rejection. Offering Value Area High (VAH)."
+            logic_desc = "Auction Market Theory: Ranging environment. Bearish rejection confirmed at Value Area High (VAH)."
 
     if not setup_type:
         return None
@@ -1391,6 +1395,8 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
 
     # 2. Dynamic TP Escalation (The RR Rescue Loop)
     tp = entry_target
+    min_escalation_rr = getattr(cfg, 'min_rr', 1.8)
+
     if side == 'long':
         raw_targets = [
             base.get("ob_bear_price", 0),
@@ -1403,14 +1409,14 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
 
         tp_found = False
         for t in valid_targets:
-            if abs(t - entry_target) / max(1e-12, dynamic_risk) >= 2.2:
+            if abs(t - entry_target) / max(1e-12, dynamic_risk) >= min_escalation_rr:
                 tp = t
                 tp_found = True
                 break
 
         if not tp_found:
             # Artificial projection
-            tp = entry_target + (dynamic_risk * 2.2)
+            tp = entry_target + (dynamic_risk * min_escalation_rr)
 
     else:
         raw_targets = [
@@ -1424,14 +1430,14 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
 
         tp_found = False
         for t in valid_targets:
-            if abs(entry_target - t) / max(1e-12, dynamic_risk) >= 2.2:
+            if abs(entry_target - t) / max(1e-12, dynamic_risk) >= min_escalation_rr:
                 tp = t
                 tp_found = True
                 break
 
         if not tp_found:
             # Artificial projection
-            tp = entry_target - (dynamic_risk * 2.2)
+            tp = entry_target - (dynamic_risk * min_escalation_rr)
 
     rr = abs(tp - entry_target) / max(1e-12, dynamic_risk)
 
