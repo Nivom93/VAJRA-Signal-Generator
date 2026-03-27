@@ -309,13 +309,13 @@ def _kalman_smooth(data, n_iter=1):
     if not np.isfinite(data[0]): return data, np.zeros(sz)
     xhat = np.zeros(sz); P = np.zeros(sz); xhatminus = np.zeros(sz); Pminus = np.zeros(sz); K = np.zeros(sz); vel = np.zeros(sz)
     Q = 1e-5
-    # DYNAMIC NORMALIZATION FIX:
-    if data[0] > 1e-9: R = (data[0] * 0.001) ** 2
-    else: R = 0.01 ** 2
-        
     xhat[0] = data[0]; P[0] = 1.0
     for k in range(1, sz):
         if not np.isfinite(data[k]): xhat[k] = xhat[k-1]; vel[k] = 0.0; continue
+        # DYNAMIC NORMALIZATION FIX:
+        if data[k] > 1e-9: R = (data[k] * 0.001) ** 2
+        else: R = 0.01 ** 2
+
         xhatminus[k] = xhat[k-1]; Pminus[k] = P[k-1] + Q
         K[k] = _safe_divide(Pminus[k], (Pminus[k] + R))
         xhat[k] = xhatminus[k] + K[k] * (data[k] - xhatminus[k])
