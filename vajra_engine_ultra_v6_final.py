@@ -271,19 +271,16 @@ def _detect_patterns(open_p, high, low, close, swing_hi, swing_lo, last_sh, last
     sweep_bull = np.zeros(n); sweep_bear = np.zeros(n)
     
     for i in range(5, n):
+        prev_sl = last_sl[i-5]
+        prev_sh = last_sh[i-5]
+
         # 1. Double Bottom (W Pattern)
-        if swing_lo[i-1] == 0 and low[i] > low[i-1]: 
-            prev_sl = last_sl[i-5] 
-            if prev_sl > 0:
-                dist = abs(low[i] - prev_sl) / prev_sl
-                if dist < 0.005: w_pattern[i] = 1.0
+        if swing_lo[i-1] == 0 and low[i] > low[i-1] and prev_sl > 0 and abs(low[i] - prev_sl) / prev_sl < 0.005:
+            w_pattern[i] = 1.0
 
         # 2. Double Top (M Pattern)
-        if swing_hi[i-1] == 0 and high[i] < high[i-1]:
-            prev_sh = last_sh[i-5]
-            if prev_sh > 0:
-                dist = abs(high[i] - prev_sh) / prev_sh
-                if dist < 0.005: m_pattern[i] = 1.0
+        if swing_hi[i-1] == 0 and high[i] < high[i-1] and prev_sh > 0 and abs(high[i] - prev_sh) / prev_sh < 0.005:
+            m_pattern[i] = 1.0
 
         # 3. Fair Value Gaps (FVG)
         if low[i] > high[i-2]: fvg_bull[i] = low[i]
