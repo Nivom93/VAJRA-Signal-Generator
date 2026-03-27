@@ -299,6 +299,8 @@ def main():
     log.info(f"Processing {len(ltf_iter)} bars...")
     
     len_ltf = len(ltf); len_mtf = len(mtf); len_htf = len(htf)
+    htf_ts_vals = htf['timestamp'].values
+    mtf_ts_vals = mtf['timestamp'].values
     
     def _process_bar(row, original_idx):
         ts = int(row.timestamp)
