@@ -348,7 +348,7 @@ def main():
             "dxy_trend": float(dxy_aligned[iL]) if iL < len(dxy_aligned) else 0.0,
             "spx_trend": float(spx_aligned[iL]) if iL < len(spx_aligned) else 0.0,
             "delta_oi": float(oi_aligned[iL]) if iL < len(oi_aligned) else 0.0,
-            "bid_ask_imbalance": float(bid_ask_aligned[iL]) if iL < len(bid_ask_aligned) else 0.5,
+            "bid_ask_imbalance": 0.5,
             "macro_sentiment": 0.0
         }
 

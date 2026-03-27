@@ -108,17 +108,15 @@ def run_backtest_with_brain(args, preloaded=None):
     oi_aligned = fetch_delta_oi(ExchangeWrapper(cfg), cfg.symbol, cfg.ltf, ltf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(ltf))
 
     for row in ltf_iter.itertuples():
-    def _process_bar(row, original_idx):
         ts = int(row.timestamp)
         iH = np.searchsorted(htf['timestamp'].values, ts, side='right') - 1
         iM = np.searchsorted(mtf['timestamp'].values, ts, side='right') - 1
         iL = int(row.Index)
 
-        if iH < 0 or iM < 0: return
+        if iH < 0 or iM < 0: continue
 
         bar = {"o": row.open, "h": row.high, "l": row.low, "c": row.close}
         closed = tm.step_bar(cfg.symbol, float(row.open), float(row.high), float(row.low), float(row.close), ts=ts)
-        closed = tm.step_bar(bar["o"], bar["h"], bar["l"], bar["c"])
         all_closed.extend(closed)
 
         btc_val = btc_aligned[iL] if iL < len(btc_aligned) else 1.0
@@ -140,9 +138,6 @@ def run_backtest_with_brain(args, preloaded=None):
 
         plan = plan_trade_with_brain(cfg, brain, base, adv_features, iH, iM, iL, pre_l)
         if plan: tm.submit_plan(plan, bar)
-
-    for row in ltf_iter.itertuples():
-        _process_bar(row, row.Index)
 
     dur = time.perf_counter() - start_t
     wins = sum(1 for t in all_closed if t["pnl_r"] > 0)

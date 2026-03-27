@@ -618,25 +618,54 @@ def _fvg_flags(h, l):
 
 @njit(cache=True)
 def _find_ob_zones_strict(o, c, h, l, bos_up, bos_dn):
-    n = len(c); obt = np.zeros(n); obb = np.zeros(n)
-    active_bull = 0.0; bull_low = 0.0
-    active_bear = 0.0; bear_high = 0.0
+    n = len(c)
+    ob_bull_top = np.zeros(n)
+    ob_bull_bot = np.zeros(n)
+    ob_bear_top = np.zeros(n)
+    ob_bear_bot = np.zeros(n)
+    bars_since_ob_bull = np.zeros(n)
+    bars_since_ob_bear = np.zeros(n)
+
+    active_bull_top = 0.0
+    active_bull_bot = 0.0
+    active_bear_top = 0.0
+    active_bear_bot = 0.0
+
+    active_bull_idx = -1
+    active_bear_idx = -1
+
     for i in range(2, n):
         # Carry forward unmitigated zones
-        obt[i] = active_bull
-        obb[i] = active_bear
+        ob_bull_top[i] = active_bull_top
+        ob_bull_bot[i] = active_bull_bot
+        ob_bear_top[i] = active_bear_top
+        ob_bear_bot[i] = active_bear_bot
+
+        if active_bull_idx != -1:
+            bars_since_ob_bull[i] = float(i - active_bull_idx)
+        if active_bear_idx != -1:
+            bars_since_ob_bear[i] = float(i - active_bear_idx)
 
         # Advanced Mitigation: >50% penetration or close beyond
-        if active_bull > 0:
-            midpoint = active_bull - ((active_bull - bull_low) * 0.5)
-            if l[i] < midpoint or c[i] < bull_low:
-                active_bull = 0.0
-                obt[i] = 0.0
-        if active_bear > 0:
-            midpoint = active_bear + ((bear_high - active_bear) * 0.5)
-            if h[i] > midpoint or c[i] > bear_high:
-                active_bear = 0.0
-                obb[i] = 0.0
+        if active_bull_top > 0:
+            midpoint = active_bull_top - ((active_bull_top - active_bull_bot) * 0.5)
+            if l[i] < midpoint or c[i] < active_bull_bot:
+                active_bull_top = 0.0
+                active_bull_bot = 0.0
+                active_bull_idx = -1
+                ob_bull_top[i] = 0.0
+                ob_bull_bot[i] = 0.0
+                bars_since_ob_bull[i] = 0.0
+
+        if active_bear_bot > 0:
+            midpoint = active_bear_bot + ((active_bear_top - active_bear_bot) * 0.5)
+            if h[i] > midpoint or c[i] > active_bear_top:
+                active_bear_bot = 0.0
+                active_bear_top = 0.0
+                active_bear_idx = -1
+                ob_bear_bot[i] = 0.0
+                ob_bear_top[i] = 0.0
+                bars_since_ob_bear[i] = 0.0
 
         # Scan for new accumulation/distribution zones
         if bos_up[i] == 1 and bos_up[i-1] == 0:
@@ -645,9 +674,12 @@ def _find_ob_zones_strict(o, c, h, l, bos_up, bos_dn):
                     if j+1 < n:
                         body_ob = o[j] - c[j]; next_body = c[j+1] - o[j+1]
                         if c[j+1] > o[j+1] and next_body > 1.5 * body_ob:
-                            active_bull = float(h[j])
-                            bull_low = float(l[j])
-                            obt[i] = active_bull
+                            active_bull_top = float(h[j])
+                            active_bull_bot = float(l[j])
+                            active_bull_idx = j
+                            ob_bull_top[i] = active_bull_top
+                            ob_bull_bot[i] = active_bull_bot
+                            bars_since_ob_bull[i] = float(i - j)
                     break
         if bos_dn[i] == 1 and bos_dn[i-1] == 0:
             for j in range(i-1, max(0, i-50), -1):
@@ -655,11 +687,14 @@ def _find_ob_zones_strict(o, c, h, l, bos_up, bos_dn):
                     if j+1 < n:
                         body_ob = c[j] - o[j]; next_body = o[j+1] - c[j+1]
                         if c[j+1] < o[j+1] and next_body > 1.5 * body_ob:
-                            active_bear = float(l[j])
-                            bear_high = float(h[j])
-                            obb[i] = active_bear
+                            active_bear_bot = float(l[j])
+                            active_bear_top = float(h[j])
+                            active_bear_idx = j
+                            ob_bear_bot[i] = active_bear_bot
+                            ob_bear_top[i] = active_bear_top
+                            bars_since_ob_bear[i] = float(i - j)
                     break
-    return obt, obb
+    return ob_bull_top, ob_bull_bot, ob_bear_bot, ob_bear_top, bars_since_ob_bull, bars_since_ob_bear
 
 @njit(cache=True)
 def _detect_qm(h, l, c, swing_hi, swing_lo):
@@ -1321,8 +1356,6 @@ class TradeManager:
                 triggered = True
                 fill_px = entry_target
             else: # breakout
-                fill_px = o
-            else:
                 if side == 'long':
                     if h >= entry_target:
                         triggered = True
@@ -1404,11 +1437,7 @@ class TradeManager:
 
             t['max_unrealized_pnl_r'] = max(t.get('max_unrealized_pnl_r', -999.0), t['pnl_r'], intra_max_pnl_r)
             
-            # MFE (Maximum Favorable Excursion) TRACKING
-            mfe_price = h if side == 'long' else l
-            mfe_pnl = (mfe_price - entry) * t['total_size'] if side == 'long' else (entry - mfe_price) * t['total_size']
-            mfe_r = (mfe_pnl - cost) / risk if risk > 0 else 0
-            t['max_pnl_r'] = max(t.get('max_pnl_r', -99.0), mfe_r)
+            t['max_pnl_r'] = max(t.get('max_pnl_r', -99.0), intra_max_pnl_r)
 
             hit_sl = False
             hit_tp = False
@@ -1422,15 +1451,6 @@ class TradeManager:
             else:
                 if h >= sl: hit_sl = True; exit_reason = 'sl'
                 elif l <= tp and can_tp: hit_tp = True; exit_reason = 'tp'
-                if l <= sl:
-                    hit_sl = True; exit_reason = 'sl'
-                elif (not is_entry_bar and h >= tp) or (is_entry_bar and c >= tp):
-                    hit_tp = True; exit_reason = 'tp'
-            else:
-                if h >= sl:
-                    hit_sl = True; exit_reason = 'sl'
-                elif (not is_entry_bar and l <= tp) or (is_entry_bar and c <= tp):
-                    hit_tp = True; exit_reason = 'tp'
 
             # TIME-IN-FORCE DECAY (Institutional Capital Velocity)
             if not hit_sl and not hit_tp:

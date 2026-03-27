@@ -9,7 +9,7 @@ and uses Gemini to generate a single float sentiment score between -1.0 and 1.0.
 """
 
 import urllib.request
-import defusedxml.ElementTree as ET
+import xml.etree.ElementTree as ET
 import json
 import time
 import os
@@ -53,9 +53,9 @@ def get_llm_sentiment(titles):
         return 0.0
 
     try:
-        import openai
-        if os.environ.get("OPENAI_API_KEY"):
-            client = openai.OpenAI()
+        from google import genai
+        if os.environ.get("GEMINI_API_KEY"):
+            client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
             prompt = (
                 "You are an elite quantitative macro analyst. "
                 "Read these recent crypto headlines. "
@@ -63,21 +63,16 @@ def get_llm_sentiment(titles):
                 "Output NOTHING ELSE."
             )
             headlines_text = "\n".join([f"- {title}" for title in titles])
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": headlines_text}
-                ],
-                temperature=0.0,
-                max_tokens=10
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt + "\n\n" + headlines_text
             )
-            result_text = response.choices[0].message.content.strip()
+            result_text = response.text.strip()
             sentiment_score = float(result_text)
             return max(-1.0, min(1.0, sentiment_score))
 
     except Exception as e:
-        log.warning(f"OpenAI API unavailable or failed ({e}). Falling back to Free Oracle...")
+        log.warning(f"Gemini API unavailable or failed ({e}). Falling back to Free Oracle...")
 
     # ==========================================================
     # FREE MACRO ORACLE FALLBACK (Alternative.me + Basic NLP)
