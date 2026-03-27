@@ -9,7 +9,7 @@ and uses Gemini to generate a single float sentiment score between -1.0 and 1.0.
 """
 
 import urllib.request
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 import json
 import time
 import os
