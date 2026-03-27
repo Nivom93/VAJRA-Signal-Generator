@@ -269,6 +269,8 @@ def main(argv=None):
 
     log.info("Training Final Production Model on FULL DATASET (Weighted)...")
     
+    from sklearn.impute import SimpleImputer
+    from sklearn.preprocessing import RobustScaler
     imputer = SimpleImputer(strategy='median')
     scaler = RobustScaler()
     X_all_s = scaler.fit_transform(imputer.fit_transform(X_all))
@@ -293,13 +295,11 @@ def main(argv=None):
         
     final_model = final_base
     
-    log.info("Training Final Production Model on FULL DATASET (Weighted) with Top Features...")
-
     # Removed CalibratedClassifierCV.
     # Calibration natively suppresses scale_pos_weight forcing the outputs
     # back to raw sample distribution percentages. We want raw uncalibrated
     # outputs to center around 0.5 for asymmetric edge hunting.
-    final_model.fit(X_top, y_all, sample_weight=sample_weights)
+    final_model.fit(X_all_s, y_all, sample_weight=sample_weights)
 
     # EDGE EXTRACTION: Anti-Signal Flipping
     # In highly mean-reverting crypto regimes where the AUC collapses below 0.40,
@@ -318,7 +318,7 @@ def main(argv=None):
 
     pipeline = {
         "classifier": final_model, 
-        "feature_names": top_feature_names,
+        "feature_names": feature_names,
         "training_args": vars(args), 
         "invert_prob": invert,
         "model": "xgboost",

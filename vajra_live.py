@@ -140,7 +140,6 @@ class RealExecutionManager:
             return None
 
     def execute_entry(self, symbol, side, qty, price, is_paper=True, rvol=1.0, plan_type='limit', sl=None, tp=None):
-    def execute_entry(self, symbol, side, qty, price, is_paper=True, rvol=1.0, plan_type='limit'):
         """
         Executes an entry order.
         LEVEL 14: Quadratic Impact Simulation for Paper Mode.
@@ -406,121 +405,6 @@ def _fetch_macro_context(ex, global_cache, cfg):
         log.warning(f"Oracle Sentiment Sync Failed: {e}")
 
     return btc_bullish, btcd_trend, dxy_val, spx_val, oracle_sentiment_val
-
-def _process_symbol(symbol, ex, cfg, market_cache, btc_ltf, btc_bullish, btcd_trend, dxy_val, spx_val, oracle_sentiment_val, tm, mem, brain, executor, args):
-    cfg.symbol = symbol
-
-    new_htf = ex.fetch_ohlcv_df(symbol, cfg.htf, limit=5)
-    market_cache[symbol]["htf"] = pd.concat([market_cache[symbol]["htf"], new_htf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
-    htf = market_cache[symbol]["htf"]
-
-    new_mtf = ex.fetch_ohlcv_df(symbol, cfg.mtf, limit=5)
-    market_cache[symbol]["mtf"] = pd.concat([market_cache[symbol]["mtf"], new_mtf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
-    mtf = market_cache[symbol]["mtf"]
-
-    new_ltf = ex.fetch_ohlcv_df(symbol, cfg.ltf, limit=5)
-    market_cache[symbol]["ltf"] = pd.concat([market_cache[symbol]["ltf"], new_ltf]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True)
-    ltf = market_cache[symbol]["ltf"]
-
-    if ltf.empty or len(htf) < 2 or len(mtf) < 2 or len(ltf) < 2: return
-
-    bid_ask_imbalance = 0.5
-    try:
-        ob = ex.client.fetch_order_book(symbol, limit=20)
-        if ob and 'bids' in ob and 'asks' in ob:
-            total_bids = sum([v for p, v in ob['bids']])
-            total_asks = sum([v for p, v in ob['asks']])
-            if (total_bids + total_asks) > 0:
-                bid_ask_imbalance = total_bids / (total_bids + total_asks)
-    except Exception as e:
-        log.debug(f"[{symbol}] L2 Orderbook fetch failed: {e}")
-
-    pre_l = Precomp(ltf)
-    pre_map = {"htf": Precomp(htf), "mtf": Precomp(mtf), "ltf": pre_l}
-
-    btc_close_aligned = None
-    if not btc_ltf.empty and not ltf.empty:
-        btc_s_close = pd.Series(btc_ltf.close.values, index=btc_ltf["timestamp"])
-        btc_close_aligned = btc_s_close.reindex(ltf["timestamp"], method='ffill').bfill().values
-
-    adv_features = precompute_v6_features(
-        pre_map["htf"], pre_map["mtf"], pre_l, htf, mtf, ltf,
-        btc_close_arr=btc_close_aligned
-    )
-
-    oi_val = 0.0
-    if getattr(cfg, 'use_macro_data', False):
-        try:
-            oi_arr = fetch_delta_oi(ex, symbol, cfg.ltf, ltf["timestamp"])
-            oi_val = float(oi_arr[-2]) if len(oi_arr) > 1 else 0.0
-        except: pass
-
-    funding_rate = ex.fetch_funding_rate(symbol)
-    extras = {
-        "btc_bullish": btc_bullish,
-        "funding_rate": funding_rate,
-        "btcd_trend": btcd_trend,
-        "dxy_trend": dxy_val,
-        "spx_trend": spx_val,
-        "delta_oi": oi_val,
-        "bid_ask_imbalance": bid_ask_imbalance,
-        "macro_sentiment": oracle_sentiment_val
-    }
-
-    iH, iM, iL = len(htf)-2, len(mtf)-2, len(ltf)-2
-    base = confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, pre_map, extras=extras)
-    base["timestamp"] = ltf.timestamp.iloc[-2]
-
-    curr_bar = {"o":ltf.open.iloc[-2], "h":ltf.high.iloc[-2], "l":ltf.low.iloc[-2], "c":ltf.close.iloc[-2]}
-
-    closed = tm.step_bar(curr_bar["o"], curr_bar["h"], curr_bar["l"], curr_bar["c"])
-    if closed:
-        for t in closed:
-            log.info(f"[{symbol}] ⛔ Trade Closed: {t['side']} PnL: {t['pnl_r']:.2f}R")
-            if not cfg.paper_mode:
-                try:
-                    sym = t.get('symbol', symbol)
-                    executor.execute_close(sym, t['side'], t['total_size'])
-                except Exception as e:
-                    log.error(f"[{symbol}] Execution Close Failed: {e}")
-
-    plan = plan_trade_with_brain(cfg, brain, base, adv_features, iH, iM, iL, pre_l)
-
-    if plan:
-        unique_id = f"{plan['key']}_{base['timestamp']}_{symbol}"
-        if not mem.seen(unique_id):
-            log.info(f"[{symbol}] 🚀 SIGNAL: {plan['side'].upper()} | Entry: {plan['entry']:.4f} ({plan.get('type', cfg.execution_style).upper()}) | RiskFactor={plan.get('risk_factor',1.0)}")
-
-            send_discord_signal_alert(plan, args.discord_webhook, symbol)
-            log_to_csv(args.csv_log_path, plan)
-
-            risk_amt = cfg.account_notional * cfg.risk_per_trade * plan.get('risk_factor', 1.0)
-            dist = abs(plan['entry'] - plan['sl'])
-
-            if dist > 0:
-                qty = risk_amt / dist
-                rvol = plan['features'].get('rvol', 1.0)
-                plan_type = plan.get('type', cfg.execution_style)
-
-                fill_price = executor.execute_entry(symbol, plan['side'], qty, plan['entry'], is_paper=cfg.paper_mode, rvol=rvol, plan_type=plan_type)
-
-                if fill_price:
-                    plan['entry'] = fill_price
-                    tm.submit_plan(plan, curr_bar)
-
-                    if not cfg.paper_mode:
-                        executor.place_stop_loss(symbol, plan['side'], qty, plan['sl'])
-            else:
-                log.warning(f"[{symbol}] Risk Distance is 0. Skipping.")
-        else:
-            log.debug(f"[{symbol}] Skipping duplicate {unique_id}")
-    else:
-        ls = _score_side(base, "long")
-        ss = _score_side(base, "short")
-        if ls >= 0.1 or ss >= 0.1:
-             adx = base.get('adx', 0); bbw = base.get('bb_width', 99)
-             if adx < 20 and bbw < 5.0:
-                 log.debug(f"[{symbol}] ⚠️  CHOP FILTER ACTIVE (ADX={adx:.1f}, BBW={bbw:.1f}). Sleeping.")
 
 def run_bot(args):
     """Main Bot Loop"""
@@ -794,7 +678,6 @@ def run_bot(args):
                          adx = base.get('adx', 0); bbw = base.get('bb_width', 99)
                          if adx < 20 and bbw < 5.0:
                              log.debug(f"[{symbol}] ⚠️  CHOP FILTER ACTIVE (ADX={adx:.1f}, BBW={bbw:.1f}). Sleeping.")
-                _process_symbol(symbol, ex, cfg, market_cache, btc_ltf, btc_bullish, btcd_trend, dxy_val, spx_val, oracle_sentiment_val, tm, mem, brain, executor, args)
 
         except KeyboardInterrupt:
             log.info("Manual Stop triggered.")
