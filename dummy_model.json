@@ -1,0 +1,27 @@
+{
+  "feature_names": [
+    "feature1",
+    "feature2"
+  ],
+  "training_args": {
+    "events": [
+      "dummy_data.jsonl"
+    ],
+    "out": "dummy_model.onnx",
+    "min_win_r": 0.0,
+    "n_estimators": 2,
+    "learning_rate": 0.05,
+    "max_depth": 3,
+    "reg_alpha": 0.1,
+    "reg_lambda": 1.0,
+    "calibrate": false,
+    "filter_side": "all",
+    "exclude_cols": "",
+    "weight_decay": 0.999,
+    "wfa_folds": 2
+  },
+  "invert_prob": false,
+  "model": "xgboost_onnx",
+  "wfa_auc": 0.5,
+  "wfa_brier": 0.25
+}

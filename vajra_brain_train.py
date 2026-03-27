@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import List, Tuple, Optional, Set
 
-import joblib
+import json
 import numpy as np
 import pandas as pd
 import xgboost as xgb
@@ -26,7 +26,24 @@ from sklearn.metrics import roc_auc_score, brier_score_loss
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import RobustScaler
 from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
 from sklearn.calibration import CalibratedClassifierCV
+
+import onnx
+import onnxruntime as ort
+import skl2onnx
+from skl2onnx.common.data_types import FloatTensorType
+from skl2onnx import update_registered_converter
+from onnxmltools.convert.xgboost.operator_converters.XGBoost import convert_xgboost
+from skl2onnx.common.shape_calculator import calculate_linear_classifier_output_shapes
+
+update_registered_converter(
+    xgb.XGBClassifier,
+    'XGBoostXGBClassifier',
+    calculate_linear_classifier_output_shapes,
+    convert_xgboost,
+    options={'nocl': [True, False], 'zipmap': [True, False, 'columns']}
+)
 
 log = logging.getLogger("vajra.train.v8")
 if not log.handlers:
@@ -279,20 +296,41 @@ def main(argv=None):
     else:
         final_model.fit(X_all_s, y_all, sample_weight=sample_weights)
 
-    pipeline = {
-        "imputer": imputer, 
-        "scaler": scaler, 
-        "classifier": final_model, 
-        "feature_names": feature_names, 
-        "training_args": vars(args), 
-        "invert_prob": False, 
-        "model": "xgboost",
-        "wfa_auc": avg_auc,
-        "wfa_brier": avg_brier
+    full_pipeline = Pipeline([
+        ('imputer', imputer),
+        ('scaler', scaler),
+        ('classifier', final_model)
+    ])
+
+    num_features = len(feature_names)
+    initial_type = [('float_input', FloatTensorType([None, num_features]))]
+
+    onnx_model = skl2onnx.convert_sklearn(
+        full_pipeline,
+        initial_types=initial_type,
+        target_opset={'': 12, 'ai.onnx.ml': 3},
+        options={id(final_model): {'zipmap': False}}
+    )
+
+    onnx_path = args.out if args.out.endswith(".onnx") else f"{args.out}.onnx"
+    meta_path = onnx_path.replace(".onnx", ".json")
+
+    with open(onnx_path, "wb") as f:
+        f.write(onnx_model.SerializeToString())
+
+    metadata = {
+        "feature_names": feature_names,
+        "training_args": vars(args),
+        "invert_prob": False,
+        "model": "xgboost_onnx",
+        "wfa_auc": float(avg_auc),
+        "wfa_brier": float(avg_brier)
     }
     
-    joblib.dump(pipeline, args.out)
-    log.info(f"Saved Apex Predator XGBoost Brain to {args.out}")
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+
+    log.info(f"Saved Secure ONNX Apex Predator Brain to {onnx_path} and {meta_path}")
 
 if __name__ == "__main__":
     main()

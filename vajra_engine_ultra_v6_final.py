@@ -22,9 +22,14 @@ import pandas as pd
 
 # --- BULLETPROOF IMPORTS ---
 try:
-    import ccxt; import joblib; from sklearn.preprocessing import StandardScaler
+    import ccxt
 except:
     pass
+
+try:
+    import onnxruntime as ort
+except:
+    ort = None
 
 try:
     from numba import njit
@@ -839,28 +844,67 @@ def precompute_v6_features(ph, pm, pl, htf, mtf, ltf, btc_close_arr=None):
 
 class BrainLearningManager:
     def __init__(self, cfg, long_p=None, short_p=None):
-        self.cfg=cfg; self.brains={'long':None, 'short':None}
-        if not joblib: return
+        self.cfg = cfg
+        self.brains = {'long': None, 'short': None}
+        if ort is None: return
         self.load_brains(long_p, short_p)
 
     def load_brains(self, long_p, short_p):
-        for s, p in [('long',long_p), ('short',short_p)]:
+        for s, p in [('long', long_p), ('short', short_p)]:
             if p:
-                try: self.brains[s] = joblib.load(p)
-                except Exception as e: print(f"Load error {s}: {e}")
+                try:
+                    onnx_path = p if p.endswith(".onnx") else f"{p}.onnx"
+                    meta_path = onnx_path.replace(".onnx", ".json")
+
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+
+                    sess_options = ort.SessionOptions()
+                    sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                    sess = ort.InferenceSession(onnx_path, sess_options)
+
+                    input_name = sess.get_inputs()[0].name
+
+                    self.brains[s] = {
+                        "sess": sess,
+                        "input_name": input_name,
+                        "feature_names": meta["feature_names"],
+                        "invert_prob": meta.get("invert_prob", False)
+                    }
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    print(f"Load error {s}: {e}")
 
     def predict_prob(self, side, base, adv, iH, iM, iL, px, pre_l):
         b = self.brains.get(side)
-        if not b: return 0.0
+        if not b:
+            return 0.0
         try:
             vec = self._build_vec(side, base, adv, iL, iM, px, pre_l, b['feature_names'])
             # CRITICAL FIX: Clip all array values before casting to prevent float32 memory overflow
             vec = np.clip(np.nan_to_num(vec, nan=0.0), -1e10, 1e10).astype(np.float32)
-            if 'imputer' in b: vec = b['imputer'].transform(vec)
-            vec_s = b['scaler'].transform(vec)
-            p = b['classifier'].predict_proba(vec_s)[0][1]
-            return 1.0-p if b.get('invert_prob') else p
-        except: return 0.0
+
+            # Run secure ONNX inference (Imputer + Scaler + XGBoost are all inside the ONNX graph)
+            out = b['sess'].run(None, {b['input_name']: vec})
+
+            # out[1] typically holds the probabilities array: [batch_size, num_classes]
+            # Since we converted using zipmap=False, output format is a tensor.
+            # Usually out[1] is shape (1, 2)
+            probs = out[1]
+            if isinstance(probs, list) and len(probs) > 0 and isinstance(probs[0], dict):
+                p = float(probs[0].get(1, 0.0))
+            elif len(probs.shape) == 2 and probs.shape[1] > 1:
+                p = float(probs[0, 1])
+            else:
+                p = float(probs[0])
+
+            return 1.0 - p if b.get('invert_prob') else p
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"Predict error {side}: {e}")
+            return 0.0
 
     def _build_vec(self, side, b, a, iL, iM, px, pl, fnames):
         d = {**b} 
