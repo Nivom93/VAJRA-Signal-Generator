@@ -84,7 +84,7 @@ def run_backtest_with_brain(args, preloaded=None):
     pre_map = {"htf": pre_h, "mtf": pre_m, "ltf": pre_l}
     
     btc_val_arr = btc["close"].values
-    btc_s_close = pd.Series(btc_val_arr, index=btc["timestamp"]).shift(1).reindex(ltf["timestamp"], method='ffill').bfill().values
+    btc_s_close = pd.Series(btc_val_arr, index=btc["timestamp"]).shift(1).reindex(ltf["timestamp"], method='ffill').fillna(0.0).values
     
     adv_features = precompute_v6_features(
         pre_h, pre_m, pre_l, htf, mtf, ltf, 

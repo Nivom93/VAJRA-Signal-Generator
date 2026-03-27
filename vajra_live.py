@@ -272,9 +272,10 @@ def send_discord_signal_alert(plan, webhook_url, symbol):
                     {"name": "Stop Loss", "value": f"{plan['sl']:.4f}", "inline": True},
                     {"name": "Take Profit", "value": f"{plan['tp']:.4f}", "inline": True},
                     {"name": "R:R", "value": f"{plan['rr']:.2f}", "inline": True},
-                    {"name": "Risk Factor", "value": f"{plan.get('risk_factor', 1.0):.2f}x", "inline": True}
+                    {"name": "Risk Factor", "value": f"{plan.get('risk_factor', 1.0):.2f}x", "inline": True},
+                    {"name": "🧠 Analyst Insight", "value": plan.get("analysis", "No insight provided."), "inline": False}
                 ],
-                "footer": {"text": f"Vajra AI Engine v34 • {datetime.now().strftime('%H:%M:%S')}"}
+                "footer": {"text": f"Vajra AI Elite Terminal • {datetime.now().strftime('%H:%M:%S')}"}
             }
             requests.post(webhook_url, json={"embeds": [embed]}, timeout=5)
         except Exception as e: log.error(f"Discord send failed: {e}")
@@ -534,6 +535,13 @@ def run_bot(args):
     mode_str = "PAPER (Simulation)" if cfg.paper_mode else "REAL MONEY"
     log.info(f"EXECUTION MODE: {mode_str} | ENTRY STYLE: {cfg.execution_style}")
 
+    btc_bullish = 1.0
+    btcd_trend = 0.0 # Default Neutral
+    dxy_val = 0.0
+    spx_val = 0.0
+    
+    last_processed_ts = {}
+
     while True:
         try:
             now_sec = time.time()
@@ -546,6 +554,163 @@ def run_bot(args):
 
             # --- MULTI-SYMBOL SCANNING LOOP ---
             for symbol in cfg.symbols:
+                cfg.symbol = symbol 
+                
+                # Fetch incremental update and apply to cache (Protect Rate Limits)
+                new_htf = ex.fetch_ohlcv_df(symbol, cfg.htf, limit=5)
+                market_cache[symbol]["htf"] = pd.concat([market_cache[symbol]["htf"], new_htf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
+                htf = market_cache[symbol]["htf"]
+                
+                new_mtf = ex.fetch_ohlcv_df(symbol, cfg.mtf, limit=5)
+                market_cache[symbol]["mtf"] = pd.concat([market_cache[symbol]["mtf"], new_mtf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
+                mtf = market_cache[symbol]["mtf"]
+
+                new_ltf = ex.fetch_ohlcv_df(symbol, cfg.ltf, limit=5)
+                market_cache[symbol]["ltf"] = pd.concat([market_cache[symbol]["ltf"], new_ltf]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True)
+                ltf = market_cache[symbol]["ltf"]
+                
+                if ltf.empty or len(htf) < 2 or len(mtf) < 2 or len(ltf) < 2: continue
+                
+                # FIX 1: THE GHOST CANDLE TIME-DILATION BUG
+                curr_ts = int(ltf.timestamp.iloc[-2])
+                if curr_ts <= last_processed_ts.get(symbol, 0):
+                    continue
+                last_processed_ts[symbol] = curr_ts
+
+                # LEVEL 30 SPOOFING DEFENSE (L2 ORDERBOOK FETCH)
+                bid_ask_imbalance = 0.5
+                try:
+                    ob = ex.client.fetch_order_book(symbol, limit=20)
+                    if ob and 'bids' in ob and 'asks' in ob:
+                        total_bids = sum((v for p, v in ob['bids']))
+                        total_asks = sum((v for p, v in ob['asks']))
+                        if (total_bids + total_asks) > 0:
+                            bid_ask_imbalance = total_bids / (total_bids + total_asks)
+                except Exception as e:
+                    log.debug(f"[{symbol}] L2 Orderbook fetch failed: {e}")
+
+                pre_l = Precomp(ltf)
+                pre_map = {"htf": Precomp(htf), "mtf": Precomp(mtf), "ltf": pre_l}
+                
+                btc_close_aligned = None
+                if not btc_ltf.empty and not ltf.empty:
+                    btc_s_close = pd.Series(btc_ltf.close.values, index=btc_ltf["timestamp"])
+                    btc_close_aligned = btc_s_close.reindex(ltf["timestamp"], method='ffill').fillna(0.0).values
+
+                adv_features = precompute_v6_features(
+                    pre_map["htf"], pre_map["mtf"], pre_l, htf, mtf, ltf, 
+                    btc_close_arr=btc_close_aligned
+                )
+
+                oi_val = 0.0
+                if getattr(cfg, 'use_macro_data', False):
+                    try: 
+                        oi_arr = fetch_delta_oi(ex, symbol, cfg.ltf, ltf["timestamp"])
+                        oi_val = float(oi_arr[-2]) if len(oi_arr) > 1 else 0.0
+                    except: pass
+
+                funding_rate = ex.fetch_funding_rate(symbol)
+                extras = {
+                    "btc_bullish": btc_bullish,
+                    "funding_rate": funding_rate,
+                    "btcd_trend": btcd_trend,
+                    "dxy_trend": dxy_val,
+                    "spx_trend": spx_val,
+                    "delta_oi": oi_val,
+                    "bid_ask_imbalance": bid_ask_imbalance,
+                    "macro_sentiment": oracle_sentiment_val
+                }
+                
+                # PHASE 1: PREVENT FEATURE REPAINTING (Strict evaluation on fully closed candle)
+                iH, iM, iL = len(htf)-2, len(mtf)-2, len(ltf)-2
+                base = confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, pre_map, extras=extras)
+                base["timestamp"] = ltf.timestamp.iloc[-2]
+                
+                curr_bar = {"o":ltf.open.iloc[-2], "h":ltf.high.iloc[-2], "l":ltf.low.iloc[-2], "c":ltf.close.iloc[-2]}
+                
+                # Step 1: Manage Existing
+                # FIX 7: STRUCTURAL TRAILING STOP PARALYSIS (Pass swing_high/swing_low)
+                sh = pre_l.last_sh[iL] if iL < len(pre_l.last_sh) else 0.0
+                sl = pre_l.last_sl[iL] if iL < len(pre_l.last_sl) else 0.0
+                closed = tm.step_bar(curr_bar["o"], curr_bar["h"], curr_bar["l"], curr_bar["c"], swing_high=sh, swing_low=sl)
+
+                if closed:
+                    for t in closed:
+                        log.info(f"[{symbol}] ⛔ Trade Closed: {t['side']} PnL: {t['pnl_r']:.2f}R")
+                        if not cfg.paper_mode:
+                            try:
+                                sym = t.get('symbol', symbol)
+                                # FIX 3: UNCANCELLED HARD STOPS
+                                sl_order_id = t.get('sl_order_id')
+                                if sl_order_id:
+                                    log.info(f"[{sym}] Cancelling Hard Stop Order ID: {sl_order_id}")
+                                    try:
+                                        ex.client.cancel_order(sl_order_id, sym)
+                                    except Exception as ce:
+                                        log.warning(f"[{sym}] Failed to cancel Hard Stop (already filled/cancelled?): {ce}")
+
+                                executor.execute_close(sym, t['side'], t['total_size'])
+                            except Exception as e:
+                                log.error(f"[{symbol}] Execution Close Failed: {e}")
+
+                # Step 2: Look for New Entries
+                plan = plan_trade_with_brain(cfg, brain, base, adv_features, iH, iM, iL, pre_l)
+                
+                if plan:
+                    # SPOOFING DEFENSE: Block limit orders if facing a massive spoofed wall
+                    if plan.get("type", cfg.execution_style) == 'limit':
+                        if plan['side'] == 'long' and bid_ask_imbalance < 0.25:
+                            log.warning(f"[{symbol}] 🛡️ SPOOFING DEFENSE: Massive Ask Wall detected (Imbalance {bid_ask_imbalance:.2f}). Blocking LONG limit order.")
+                            continue
+                        elif plan['side'] == 'short' and bid_ask_imbalance > 0.75:
+                            log.warning(f"[{symbol}] 🛡️ SPOOFING DEFENSE: Massive Bid Wall detected (Imbalance {bid_ask_imbalance:.2f}). Blocking SHORT limit order.")
+                            continue
+
+                    unique_id = f"{plan['key']}_{base['timestamp']}_{symbol}"
+                    if not mem.seen(unique_id):
+                        # PATCH: DYNAMIC EXECUTION TYPE LOGGING
+                        log.info(f"[{symbol}] 🚀 SIGNAL: {plan['side'].upper()} | Entry: {plan['entry']:.4f} ({plan.get('type', cfg.execution_style).upper()}) | RiskFactor={plan.get('risk_factor',1.0)}")
+                        
+                        send_discord_signal_alert(plan, args.discord_webhook, symbol)
+                        log_to_csv(args.csv_log_path, plan)
+                        
+                        risk_amt = cfg.account_notional * cfg.risk_per_trade * plan.get('risk_factor', 1.0)
+                        dist = abs(plan['entry'] - plan['sl'])
+                        
+                        if dist > 0:
+                            qty = risk_amt / dist
+                            
+                            # Extract RVOL for Impact Calculation
+                            rvol = plan['features'].get('rvol', 1.0)
+                            plan_type = plan.get('type', cfg.execution_style)
+                            
+                            fill_price = executor.execute_entry(symbol, plan['side'], qty, plan['entry'], is_paper=cfg.paper_mode, rvol=rvol, plan_type=plan_type)
+                            
+                            if fill_price:
+                                plan['entry'] = fill_price 
+                                
+                                # FIX 2 & 3: EXECUTION DESYNC & HARD STOP ATTACHMENT
+                                sl_order_id = None
+                                if not cfg.paper_mode:
+                                    sl_res = executor.place_stop_loss(symbol, plan['side'], qty, plan['sl'])
+                                    if sl_res and 'id' in sl_res:
+                                        sl_order_id = sl_res['id']
+
+                                # Force Open instantly using the updated TradeManager args
+                                tm.submit_plan(plan, curr_bar, force_open=True, fill_price=fill_price, sl_order_id=sl_order_id)
+                        else:
+                            log.warning(f"[{symbol}] Risk Distance is 0. Skipping.")
+                    else:
+                        log.debug(f"[{symbol}] Skipping duplicate {unique_id}")
+                
+                else:
+                    # Near Miss Logging
+                    ls = _score_side(base, "long")
+                    ss = _score_side(base, "short")
+                    if ls >= 0.1 or ss >= 0.1:
+                         adx = base.get('adx', 0); bbw = base.get('bb_width', 99)
+                         if adx < 20 and bbw < 5.0:
+                             log.debug(f"[{symbol}] ⚠️  CHOP FILTER ACTIVE (ADX={adx:.1f}, BBW={bbw:.1f}). Sleeping.")
                 _process_symbol(symbol, ex, cfg, market_cache, btc_ltf, btc_bullish, btcd_trend, dxy_val, spx_val, oracle_sentiment_val, tm, mem, brain, executor, args)
 
         except KeyboardInterrupt:

@@ -72,7 +72,17 @@ def fetch_macro_trend(ticker_symbol: str, ltf_timestamps: pd.Series) -> np.ndarr
         trend_series = pd.Series(trend, index=df.index.view('int64') // 10**6)
         trend_series.index = trend_series.index + 86400000 
         
-        aligned = trend_series.shift(1).reindex(ltf_timestamps, method='ffill').fillna(0.0).values
+        # PREVENT DUPLICATE INDEX CRASHES (Source)
+        trend_series = trend_series[~trend_series.index.duplicated(keep='last')]
+
+        # PREVENT DUPLICATE INDEX CRASHES (Target)
+        # Reindex against unique timestamps first, then map back to the original full length
+        unique_ltf = ltf_timestamps.drop_duplicates()
+        aligned_unique = trend_series.shift(1).reindex(unique_ltf, method='ffill').fillna(0.0)
+
+        # Create a series with original ltf_timestamps and map the unique values to it
+        aligned = pd.Series(index=ltf_timestamps).fillna(aligned_unique).values
+
         return aligned
     except Exception as e:
         log.warning(f"yfinance failed for {ticker_symbol}: {e}")
@@ -97,7 +107,7 @@ def fetch_delta_oi(exw: ExchangeWrapper, symbol: str, timeframe: str, ltf_timest
                 return np.zeros(len(ltf_timestamps))
             
             df['openInterestValue'] = pd.to_numeric(df['openInterestValue'], errors='coerce')
-            vals = df['openInterestValue'].ffill().bfill().values
+            vals = df['openInterestValue'].ffill().fillna(0.0).values
             
             if len(vals) > 1:
                 delta = np.zeros_like(vals)
@@ -200,7 +210,7 @@ def main():
     pre_h, pre_m, pre_l = Precomp(htf), Precomp(mtf), Precomp(ltf)
     pre_map = {"htf": pre_h, "mtf": pre_m, "ltf": pre_l}
 
-    btc_s_close = pd.Series(btc_c, index=btc["timestamp"]).shift(1).reindex(ltf["timestamp"], method='ffill').bfill().values
+    btc_s_close = pd.Series(btc_c, index=btc["timestamp"]).shift(1).reindex(ltf["timestamp"], method='ffill').fillna(0.0).values
     if len(btc_s_close) != len(ltf):
         btc_s_close = np.resize(btc_s_close, len(ltf))
 
@@ -238,8 +248,9 @@ def main():
             meta = next((m for m in open_meta if m["key"] == cl.get("key")), None)
             if meta:
                 open_meta.remove(meta)
-                # PURE SIGNAL EDGE: 1.0 strictly if it hits structural TP or achieves pnl_r >= 1.0 without BE contamination
-                meta_label = 1.0 if cl.get("exit_reason") == "tp" or cl.get("pnl_r", 0) >= 1.0 else 0.0
+                # PURE "SET AND FORGET" MFE META-LABELING:
+                # 1.0 if it hits TP, or if the trade surged massively (+2.2R) before noise took it out
+                meta_label = 1.0 if cl.get("exit_reason") == "tp" or cl.get("max_pnl_r", 0.0) >= 2.2 else 0.0
                 
                 if -50 < cl["pnl_r"] < 50:
                     events.append({
