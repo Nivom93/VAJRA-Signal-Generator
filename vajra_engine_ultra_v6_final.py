@@ -545,20 +545,30 @@ def _find_ob_zones_strict(o, c, h, l, bos_up, bos_dn):
     n = len(c); obt = np.zeros(n); obb = np.zeros(n); lbu = 0.0; lbe = 0.0
     for i in range(2, n - 1):
         if bos_up[i] == 1 and bos_up[i-1] == 0:
-            for j in range(i-1, max(0, i-10), -1):
-                if c[j] < o[j]: 
-                    if j+1 < n:
-                        body_ob = o[j] - c[j]; next_body = c[j+1] - o[j+1]
-                        if c[j+1] > o[j+1] and next_body > 1.5 * body_ob: lbu = float(h[j])
-                    break
+            for j in range(i-1, max(0, i-50), -1):
+                if c[j] >= o[j]:
+                    continue
+                if j+1 < n:
+                    body_ob = o[j] - c[j]
+                    next_body = c[j+1] - o[j+1]
+                    if c[j+1] > o[j+1] and next_body > 1.5 * body_ob:
+                        lbu = float(h[j])
+                break
+
         if bos_dn[i] == 1 and bos_dn[i-1] == 0:
-            for j in range(i-1, max(0, i-10), -1):
-                if c[j] > o[j]: 
-                    if j+1 < n:
-                        body_ob = c[j] - o[j]; next_body = o[j+1] - c[j+1]
-                        if c[j+1] < o[j+1] and next_body > 1.5 * body_ob: lbe = float(l[j])
-                    break
-        obt[i]=lbu; obb[i]=lbe
+            for j in range(i-1, max(0, i-50), -1):
+                if c[j] <= o[j]:
+                    continue
+                if j+1 < n:
+                    body_ob = c[j] - o[j]
+                    next_body = o[j+1] - c[j+1]
+                    if c[j+1] < o[j+1] and next_body > 1.5 * body_ob:
+                        lbe = float(l[j])
+                break
+
+        obt[i] = lbu
+        obb[i] = lbe
+
     return obt, obb
 
 class Precomp:
