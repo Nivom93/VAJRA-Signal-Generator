@@ -1425,14 +1425,14 @@ class TradeManager:
 
             # Unrealized PnL Calculation
             curr_pnl = (c - entry) if side == 'long' else (entry - c)
-            t['pnl_r'] = (curr_pnl / raw_risk) - fee
+            t['pnl_r'] = (curr_pnl / raw_risk)
 
             # True Intra-Bar Maximum Favorable Excursion (MFE)
             if side == 'long':
                 intra_max_pnl = (h - entry)
             else:
                 intra_max_pnl = (entry - l)
-            intra_max_pnl_r = (intra_max_pnl / raw_risk) - fee
+            intra_max_pnl_r = (intra_max_pnl / raw_risk)
 
             t['max_unrealized_pnl_r'] = max(t.get('max_unrealized_pnl_r', -999.0), t['pnl_r'], intra_max_pnl_r)
             
@@ -1451,14 +1451,6 @@ class TradeManager:
                 if h >= sl: hit_sl = True; exit_reason = 'sl'
                 elif l <= tp and can_tp: hit_tp = True; exit_reason = 'tp'
 
-            # TIME-IN-FORCE DECAY (Institutional Capital Velocity)
-            if not hit_sl and not hit_tp:
-                decay_limit = getattr(self.cfg, 'time_in_force_decay', 0)
-                if decay_limit > 0 and t['bars_open'] > decay_limit and t['pnl_r'] <= 0.0:
-                    hit_sl = True
-                    t['sl'] = c  # Force execution at close
-                    exit_reason = 'time_decay'
-
             if hit_sl or hit_tp:
                 if hit_sl:
                     if side == 'long': exit_px = min(o, t['sl']) if o < t['sl'] else t['sl']
@@ -1468,7 +1460,7 @@ class TradeManager:
                     else: exit_px = min(o, tp) if o < tp else tp
 
                 raw_pnl = (exit_px - entry) if side == 'long' else (entry - exit_px)
-                t['pnl_r'] = (raw_pnl / raw_risk) - (fee * 2)
+                t['pnl_r'] = (raw_pnl / raw_risk)
                 t['exit_price'] = exit_px
                 t['exit_reason'] = exit_reason
                 t['exit_ts'] = current_ts
@@ -1477,59 +1469,6 @@ class TradeManager:
                 self.mem.record_exit(t)
                 continue
 
-            # AUTO-BREAKEVEN
-            be_trigger = getattr(self.cfg, 'be_trigger_r', 0.0)
-            if be_trigger > 0 and not t.get('be_locked', False) and t.get('max_unrealized_pnl_r', 0.0) >= be_trigger:
-                if side == 'long':
-                    t['sl'] = max(t['sl'], entry + (entry * fee * 2))
-                else:
-                    t['sl'] = min(t['sl'], entry - (entry * fee * 2))
-            if self.cfg.be_trigger_r > 0 and not t.get('be_locked', False) and t['pnl_r'] >= self.cfg.be_trigger_r:
-                if side == 'long': t['sl'] = entry + (entry * fee * 2)
-                else: t['sl'] = entry - (entry * fee * 2)
-                t['be_locked'] = True
-                
-            # STRUCTURAL TRAILING
-            if t['pnl_r'] >= 1.5:
-                if side == 'long' and swing_low > 0 and swing_low > t['sl'] and swing_low < c:
-                    t['sl'] = swing_low
-                elif side == 'short' and swing_high > 0 and swing_high < t['sl'] and swing_high > c:
-                    t['sl'] = swing_high
-
-            if self.cfg.use_dca and t['dca_level'] < self.cfg.dca_max_safety_orders:
-                hit_safe = (side == 'long' and l <= t['next_safety_price']) or (side == 'short' and h >= t['next_safety_price'])
-                if hit_safe:
-                    fill = t['next_safety_price']
-                    add = 1.0 * (self.cfg.dca_volume_scale ** (t['dca_level'] + 1))
-                    new_sz = t['total_size'] + add
-                    t['avg_price'] = (t['avg_price'] * t['total_size'] + fill * add) / new_sz
-                    t['total_size'] = new_sz
-                    t['dca_level'] += 1
-                    
-                    base_risk = abs(t['entry'] - t['sl']) / (self.cfg.dca_max_safety_orders + 1.5)
-                    if side == 'long': 
-                        t['tp'] = t['avg_price'] + base_risk * self.cfg.dca_tp_scale
-                        t['next_safety_price'] -= base_risk
-                    else: 
-                        t['tp'] = t['avg_price'] - base_risk * self.cfg.dca_tp_scale
-                        t['next_safety_price'] += base_risk
-
-            is_entry_bar = (t.get('bars_open', 1) == 1)
-            if trail_trig > 0 and not is_entry_bar:
-                ru = t.get('initial_risk_unit', 0.0)
-                if ru == 0: ru = abs(t['entry'] - t['sl'])
-                if ru > 0:
-                    if side == 'long':
-                        curr_r = (h - entry) / ru
-                        if curr_r >= trail_trig:
-                            new_sl = h - (trail_dist * ru)
-                            if new_sl > t['sl']: t['sl'] = new_sl
-                    else:
-                        curr_r = (entry - l) / ru
-                        if curr_r >= trail_trig:
-                            new_sl = l + (trail_dist * ru)
-                            if new_sl < t['sl']: t['sl'] = new_sl
-            
             still_open.append(t)
         
         self.open_trades = still_open
@@ -1774,6 +1713,13 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
             tp = entry_target - tp_atr_dist
 
     rr = abs(tp - entry_target) / max(1e-12, dynamic_risk)
+
+    if rr < 1.2:
+        tp = entry_target + (dynamic_risk * 1.2) if side == 'long' else entry_target - (dynamic_risk * 1.2)
+        rr = 1.2
+    elif rr > 3.0:
+        tp = entry_target + (dynamic_risk * 3.0) if side == 'long' else entry_target - (dynamic_risk * 3.0)
+        rr = 3.0
 
     # ==========================================================
     # THE COMPREHENSIVE ANALYST RATIONALE

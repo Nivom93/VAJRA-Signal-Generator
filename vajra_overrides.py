@@ -12,20 +12,22 @@ def _strategy_overrides(cfg):
     cfg.mtf = "4h"
     cfg.ltf = "1h"
     cfg.paper_mode = True
+    cfg.use_dca = False
+    cfg.dca_max_safety_orders = 0
     
     # --- EXECUTION DEFAULTS (PURE LIMIT MODE) ---
     cfg.execution_style = 'limit'     
     cfg.pullback_atr_mult = 0.05        
-    cfg.slippage_bps = 2.0
-    cfg.maker_fee_bps = 2.0
-    cfg.taker_fee_bps = 6.0
+    cfg.slippage_bps = 0.0
+    cfg.maker_fee_bps = 0.0
+    cfg.taker_fee_bps = 0.0
 
     # --- DEFENSE MECHANISMS (WIN-RATE ENHANCEMENTS) ---
-    cfg.be_trigger_r = 1.0
+    cfg.be_trigger_r = 0.0
     cfg.trailing_stop_trigger_r = 0.0
     cfg.trailing_dist_r = 0.0
     cfg.dynamic_tp_enabled = False
-    cfg.time_in_force_decay = 24       # Cut trades if alpha decays after 24 bars without surging into profit
+    cfg.time_in_force_decay = 0
 
     # --- GLOBAL RISK DEFAULTS ---
     cfg.risk_per_trade = 0.01          
@@ -61,10 +63,9 @@ def _strategy_overrides(cfg):
     cfg.dca_max_safety_orders = 0
 
     # --- STRUCTURAL SNIPER GEOMETRY ---
-    # Target >50% WR with >1.8 RR natively via structural alignment (Order Blocks/Swings)
-    cfg.min_rr = 1.8                # Rigid minimum RR enforcement
-    cfg.atr_mult_sl = 1.0           # Mathematical fallback for very tight snipes
-    cfg.atr_mult_tp = 1.8           # Mathematical fallback to achieve >= 1.8 RR baseline
+    cfg.min_rr = 1.2
+    cfg.atr_mult_sl = 1.0
+    cfg.atr_mult_tp = 1.2
 
     # --- STRICT AI GATES ---
     if "BTC" in symbol or "ETH" in symbol:

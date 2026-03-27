@@ -185,116 +185,8 @@ class RealExecutionManager:
             log.info(f"📝 SIMULATION: Order Filled @ {final_px:.2f}")
             return final_px
 
-        # --- REAL EXECUTION ---
-        log.info(f"⚡ REAL EXECUTION: {c_side.upper()} {qty:.4f} {symbol}...")
-        
-        # BREAKOUT CONFIRMATION (TRIGGER ORDER)
-        if plan_type == 'breakout':
-            curr_px = self.get_best_book_price(symbol, c_side)
-            if not curr_px: curr_px = price
-            
-            triggered = (c_side == 'buy' and curr_px >= price) or (c_side == 'sell' and curr_px <= price)
-            
-            if triggered:
-                log.info(f"⚡ Breakout confirmed (Price {curr_px} passed Trigger {price}). Executing MARKET.")
-                try:
-                    amount_r = self.client.amount_to_precision(symbol, qty)
-                    order = self.client.create_order(symbol, 'market', c_side, amount_r)
-                    avg = order.get('average')
-                    avg_px = float(avg if avg is not None else curr_px)
-                    log.info(f"✅ FILLED (Breakout-Market) @ {avg_px}")
-                    return avg_px
-                except Exception as e:
-                    log.error(f"CRITICAL: Breakout Market Order Failed: {e}")
-                    return None
-            else:
-                try:
-                    log.info(f"⚡ Placing STOP MARKET Order @ {price}")
-                    params = {'stopPrice': str(price), 'triggerPrice': str(price)} 
-                    order = self.client.create_order(symbol, 'market', c_side, qty, params=params)
-                    log.info(f"✅ STOP ORDER PLACED: ID {order['id']}")
-                    return price # Return trigger price as placeholder (Fill happens later on exchange)
-                except Exception as e:
-                    log.error(f"Stop Order Failed: {e}. Falling back to monitor...")
-                    return None
-
-        # TRUE LIMIT EXECUTION (PREDICTIVE SNIPING)
-        elif plan_type == 'limit':
-            try:
-                params = {'timeInForce': 'PostOnly'}
-                if sl: params['stopLoss'] = str(self.client.price_to_precision(symbol, sl))
-                if tp: params['takeProfit'] = str(self.client.price_to_precision(symbol, tp))
-
-                price_r = self.client.price_to_precision(symbol, price)
-                amount_r = self.client.amount_to_precision(symbol, qty)
-                order = self.client.create_order(symbol, 'limit', c_side, amount_r, price_r, params)
-                log.info(f"✅ RESTING LIMIT PLACED: ID {order['id']}")
-                return price
-            except Exception as e:
-                log.error(f"Execution Error (True Limit): {e}")
-                return None
-
-        # STANDARD MARKET ORDER
-        else:
-            log.info("⚡ Executing INSTANT MARKET ORDER.")
-            try:
-                amount_r = self.client.amount_to_precision(symbol, qty)
-                order = self.client.create_order(symbol, 'market', c_side, amount_r)
-
-                current_limit_px = self.get_best_book_price(symbol, c_side)
-                avg = order.get('average')
-                avg_px = float(avg if avg is not None else current_limit_px)
-                log.info(f"✅ FILLED (Market) @ {avg_px}")
-                return avg_px
-            except Exception as e:
-                log.error(f"CRITICAL: Market Order Failed: {e}")
-                return None
-
-    def place_stop_loss(self, symbol, side, qty, stop_price):
-        """
-        Places a hard Stop Market order on the exchange.
-        Side: Opposite of Entry (Long Entry -> Sell SL).
-        """
-        try:
-            sl_side = 'sell' if side == 'long' else 'buy'
-            log.info(f"🛡️ PLACING HARD STOP: {symbol} {sl_side.upper()} @ {stop_price:.2f}")
-            
-            amount_r = self.client.amount_to_precision(symbol, qty)
-            price_r = self.client.price_to_precision(symbol, stop_price)
-            
-            # Common params for Stop Market
-            params = {'stopPrice': price_r, 'triggerPrice': price_r, 'reduceOnly': True}
-            
-            order = self.client.create_order(symbol, 'market', sl_side, amount_r, params=params)
-            log.info(f"✅ HARD STOP PLACED: ID {order['id']}")
-            return order
-        except Exception as e:
-            log.error(f"CRITICAL: Failed to place Hard Stop! Error: {e}")
-            return None
-
-    def place_take_profit(self, symbol, side, qty, tp_price):
-        try:
-            sl_side = 'sell' if side == 'long' else 'buy'
-            amount_r = self.client.amount_to_precision(symbol, qty)
-            price_r = self.client.price_to_precision(symbol, tp_price)
-            order = self.client.create_order(symbol, 'limit', sl_side, amount_r, price_r, params={'reduceOnly': True})
-            log.info(f"✅ HARD TP PLACED: ID {order['id']} @ {tp_price:.2f}")
-            return order
-        except Exception as e:
-            log.error(f"Failed to place Hard TP: {e}")
-            return None
-
-    def execute_close(self, symbol, side, qty):
-        try:
-            order_side = 'sell' if side == 'long' else 'buy'
-            log.info(f"⚡ EXECUTING EXIT: {symbol} {side} {qty} (Market {order_side})")
-            amount_r = self.client.amount_to_precision(symbol, qty)
-            order = self.client.create_order(symbol, 'market', order_side, amount_r, params={'reduceOnly': True})
-            return order
-        except Exception as e:
-            log.error(f"CRITICAL: Failed to execute close for {symbol}. Error: {e}")
-            log.error(traceback.format_exc())
-            return None
+        # This bot is now a Pure Paper Trading / Signal Generation Terminal.
+        # It never posts active orders to the exchange.
 
 # --- MAIN BOT LOGIC ---
 
@@ -491,36 +383,6 @@ def run_bot(args):
             for symbol in cfg.symbols:
                 cfg.symbol = symbol 
                 
-                # --- STATE-AWARE ORDER CLEANUP ---
-                if not cfg.paper_mode:
-                    try:
-                        open_orders = ex.client.fetch_open_orders(symbol)
-                        pending_entries = [abs(p['entry']) for p in tm.pending_orders if p.get('symbol', cfg.symbol) == symbol]
-                        active_trades = [t for t in tm.open_trades if t.get('symbol', cfg.symbol) == symbol]
-
-                        for o in open_orders:
-                            is_protective = o.get('reduceOnly') or o.get('stopPrice') is not None or o.get('triggerPrice') is not None
-
-                            # If it's a protective stop/TP, but we have NO active trades for this symbol, it's a ghost trap. Delete it.
-                            if is_protective and len(active_trades) == 0:
-                                ex.client.cancel_order(o['id'], symbol)
-                                continue
-
-                            # If it's a protective stop/TP, and we DO have active trades, protect it.
-                            if is_protective:
-                                continue
-
-                            # Otherwise, it is a limit entry. Check if it is still valid in the Engine's pending queue.
-                            order_price = float(o.get('price') or o.get('stopPrice') or o.get('triggerPrice') or 0.0)
-                            is_active_pending = any(abs(order_price - pe) / (pe + 1e-9) < 0.001 for pe in pending_entries)
-
-                            # If it's not in our pending list, it's stale -> cancel it.
-                            if not is_active_pending and order_price > 0:
-                                ex.client.cancel_order(o['id'], symbol)
-                        log.debug(f"🧹 Cleaned up stale open orders & ghost traps for {symbol}")
-                    except Exception as e:
-                        log.warning(f"⚠️ Failed to cancel open orders for {symbol}: {e}")
-
                 # Fetch incremental update and apply to cache (Protect Rate Limits)
                 new_htf = ex.fetch_ohlcv_df(symbol, cfg.htf, limit=5)
                 market_cache[symbol]["htf"] = pd.concat([market_cache[symbol]["htf"], new_htf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
@@ -603,21 +465,6 @@ def run_bot(args):
                 if closed:
                     for t in closed:
                         log.info(f"[{symbol}] ⛔ Trade Closed: {t['side']} PnL: {t['pnl_r']:.2f}R")
-                        if not cfg.paper_mode:
-                            try:
-                                sym = t.get('symbol', symbol)
-                                # FIX 3: UNCANCELLED HARD STOPS
-                                sl_order_id = t.get('sl_order_id')
-                                if sl_order_id:
-                                    log.info(f"[{sym}] Cancelling Hard Stop Order ID: {sl_order_id}")
-                                    try:
-                                        ex.client.cancel_order(sl_order_id, sym)
-                                    except Exception as ce:
-                                        log.warning(f"[{sym}] Failed to cancel Hard Stop (already filled/cancelled?): {ce}")
-
-                                executor.execute_close(sym, t['side'], t['total_size'])
-                            except Exception as e:
-                                log.error(f"[{symbol}] Execution Close Failed: {e}")
 
                 # Step 2: Look for New Entries
                 plan = plan_trade_with_brain(cfg, brain, base, adv_features, iH, iM, iL, pre_l)
@@ -657,12 +504,8 @@ def run_bot(args):
                             if fill_price:
                                 plan['entry'] = fill_price 
                                 
-                                # FIX 2 & 3: EXECUTION DESYNC & HARD STOP ATTACHMENT
+                                # FIX 2: EXECUTION DESYNC
                                 sl_order_id = None
-                                if not cfg.paper_mode:
-                                    sl_res = executor.place_stop_loss(symbol, plan['side'], qty, plan['sl'])
-                                    if sl_res and 'id' in sl_res:
-                                        sl_order_id = sl_res['id']
 
                                 # Force Open instantly using the updated TradeManager args
                                 tm.submit_plan(plan, curr_bar, force_open=True, fill_price=fill_price, sl_order_id=sl_order_id)
