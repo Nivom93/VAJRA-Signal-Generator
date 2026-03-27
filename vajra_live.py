@@ -294,6 +294,189 @@ def log_to_csv(filepath, plan):
             ])
     except Exception as e: log.error(f"Failed to log CSV: {e}")
 
+def _fetch_macro_context(ex, global_cache, cfg):
+    btc_bullish = 1.0
+    btcd_trend = 0.0
+    dxy_val = 0.0
+    spx_val = 0.0
+    oracle_sentiment_val = 0.0
+
+    try:
+        new_btc_4h = ex.fetch_ohlcv_df("BTC/USDT", "4h", limit=5)
+        global_cache["btc_4h"] = pd.concat([global_cache["btc_4h"], new_btc_4h]).drop_duplicates(subset=["timestamp"], keep="last").tail(1000).reset_index(drop=True)
+        btc_ohlcv = global_cache["btc_4h"]
+
+        if not btc_ohlcv.empty:
+            btc_c = btc_ohlcv.close.values
+            current_price = btc_c[-1]
+            btc_ema100 = _ema_np(btc_c, 100)[-1]
+            btc_bullish = 1.0 if current_price > btc_ema100 else 0.0
+            dist_pct = (current_price - btc_ema100) / btc_ema100 * 100
+            log.info(f"BTC Context (4H): Bullish={btc_bullish} (Dist={dist_pct:.2f}%)")
+
+        new_btc_ltf = ex.fetch_ohlcv_df("BTC/USDT", cfg.ltf, limit=5)
+        global_cache["btc_ltf"] = pd.concat([global_cache["btc_ltf"], new_btc_ltf]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True)
+
+        try:
+            new_btcd = ex.fetch_ohlcv_df("BTCDOM/USDT", "4h", limit=5)
+            if not new_btcd.empty:
+                if global_cache["btcd_4h"].empty:
+                    global_cache["btcd_4h"] = new_btcd
+                else:
+                    global_cache["btcd_4h"] = pd.concat([global_cache["btcd_4h"], new_btcd]).drop_duplicates(subset=["timestamp"], keep="last").tail(50).reset_index(drop=True)
+            btcd_df = global_cache["btcd_4h"]
+        except:
+            btcd_df = pd.DataFrame()
+
+        if not btcd_df.empty:
+            closes = btcd_df.close.values
+            if len(closes) >= 5:
+                slope = (closes[-1] - closes[-5]) / closes[-5] * 100.0
+                if slope > 0.5: btcd_trend = 1.0
+                elif slope < -0.5: btcd_trend = -1.0
+                else: btcd_trend = 0.0
+                log.info(f"BTC.D Trend: {slope:.2f}% (Regime: {btcd_trend})")
+
+        if getattr(cfg, 'use_macro_data', False):
+            try:
+                import yfinance as yf
+                dxy_c = yf.Ticker("DX-Y.NYB").history(period="5d")['Close']
+                spx_c = yf.Ticker("^GSPC").history(period="5d")['Close']
+                dxy_val = float(dxy_c.iloc[-1]) if not dxy_c.empty else 0.0
+                spx_val = float(spx_c.iloc[-1]) if not spx_c.empty else 0.0
+            except: pass
+
+    except Exception as e:
+        log.warning(f"Macro Sync Failed: {e}")
+
+    try:
+        oracle_path = Path("data_cache/oracle_sentiment.json")
+        if oracle_path.exists():
+            with open(oracle_path, 'r', encoding='utf-8') as f:
+                oracle_data = json.load(f)
+            age_ms = (time.time() * 1000) - oracle_data.get("timestamp", 0)
+            if age_ms < 86400000: # 24 hours
+                oracle_sentiment_val = float(oracle_data.get("sentiment", 0.0))
+    except Exception as e:
+        log.warning(f"Oracle Sentiment Sync Failed: {e}")
+
+    return btc_bullish, btcd_trend, dxy_val, spx_val, oracle_sentiment_val
+
+def _process_symbol(symbol, ex, cfg, market_cache, btc_ltf, btc_bullish, btcd_trend, dxy_val, spx_val, oracle_sentiment_val, tm, mem, brain, executor, args):
+    cfg.symbol = symbol
+
+    new_htf = ex.fetch_ohlcv_df(symbol, cfg.htf, limit=5)
+    market_cache[symbol]["htf"] = pd.concat([market_cache[symbol]["htf"], new_htf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
+    htf = market_cache[symbol]["htf"]
+
+    new_mtf = ex.fetch_ohlcv_df(symbol, cfg.mtf, limit=5)
+    market_cache[symbol]["mtf"] = pd.concat([market_cache[symbol]["mtf"], new_mtf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
+    mtf = market_cache[symbol]["mtf"]
+
+    new_ltf = ex.fetch_ohlcv_df(symbol, cfg.ltf, limit=5)
+    market_cache[symbol]["ltf"] = pd.concat([market_cache[symbol]["ltf"], new_ltf]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True)
+    ltf = market_cache[symbol]["ltf"]
+
+    if ltf.empty or len(htf) < 2 or len(mtf) < 2 or len(ltf) < 2: return
+
+    bid_ask_imbalance = 0.5
+    try:
+        ob = ex.client.fetch_order_book(symbol, limit=20)
+        if ob and 'bids' in ob and 'asks' in ob:
+            total_bids = sum([v for p, v in ob['bids']])
+            total_asks = sum([v for p, v in ob['asks']])
+            if (total_bids + total_asks) > 0:
+                bid_ask_imbalance = total_bids / (total_bids + total_asks)
+    except Exception as e:
+        log.debug(f"[{symbol}] L2 Orderbook fetch failed: {e}")
+
+    pre_l = Precomp(ltf)
+    pre_map = {"htf": Precomp(htf), "mtf": Precomp(mtf), "ltf": pre_l}
+
+    btc_close_aligned = None
+    if not btc_ltf.empty and not ltf.empty:
+        btc_s_close = pd.Series(btc_ltf.close.values, index=btc_ltf["timestamp"])
+        btc_close_aligned = btc_s_close.reindex(ltf["timestamp"], method='ffill').bfill().values
+
+    adv_features = precompute_v6_features(
+        pre_map["htf"], pre_map["mtf"], pre_l, htf, mtf, ltf,
+        btc_close_arr=btc_close_aligned
+    )
+
+    oi_val = 0.0
+    if getattr(cfg, 'use_macro_data', False):
+        try:
+            oi_arr = fetch_delta_oi(ex, symbol, cfg.ltf, ltf["timestamp"])
+            oi_val = float(oi_arr[-2]) if len(oi_arr) > 1 else 0.0
+        except: pass
+
+    funding_rate = ex.fetch_funding_rate(symbol)
+    extras = {
+        "btc_bullish": btc_bullish,
+        "funding_rate": funding_rate,
+        "btcd_trend": btcd_trend,
+        "dxy_trend": dxy_val,
+        "spx_trend": spx_val,
+        "delta_oi": oi_val,
+        "bid_ask_imbalance": bid_ask_imbalance,
+        "macro_sentiment": oracle_sentiment_val
+    }
+
+    iH, iM, iL = len(htf)-2, len(mtf)-2, len(ltf)-2
+    base = confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, pre_map, extras=extras)
+    base["timestamp"] = ltf.timestamp.iloc[-2]
+
+    curr_bar = {"o":ltf.open.iloc[-2], "h":ltf.high.iloc[-2], "l":ltf.low.iloc[-2], "c":ltf.close.iloc[-2]}
+
+    closed = tm.step_bar(curr_bar["o"], curr_bar["h"], curr_bar["l"], curr_bar["c"])
+    if closed:
+        for t in closed:
+            log.info(f"[{symbol}] ⛔ Trade Closed: {t['side']} PnL: {t['pnl_r']:.2f}R")
+            if not cfg.paper_mode:
+                try:
+                    sym = t.get('symbol', symbol)
+                    executor.execute_close(sym, t['side'], t['total_size'])
+                except Exception as e:
+                    log.error(f"[{symbol}] Execution Close Failed: {e}")
+
+    plan = plan_trade_with_brain(cfg, brain, base, adv_features, iH, iM, iL, pre_l)
+
+    if plan:
+        unique_id = f"{plan['key']}_{base['timestamp']}_{symbol}"
+        if not mem.seen(unique_id):
+            log.info(f"[{symbol}] 🚀 SIGNAL: {plan['side'].upper()} | Entry: {plan['entry']:.4f} ({plan.get('type', cfg.execution_style).upper()}) | RiskFactor={plan.get('risk_factor',1.0)}")
+
+            send_discord_signal_alert(plan, args.discord_webhook, symbol)
+            log_to_csv(args.csv_log_path, plan)
+
+            risk_amt = cfg.account_notional * cfg.risk_per_trade * plan.get('risk_factor', 1.0)
+            dist = abs(plan['entry'] - plan['sl'])
+
+            if dist > 0:
+                qty = risk_amt / dist
+                rvol = plan['features'].get('rvol', 1.0)
+                plan_type = plan.get('type', cfg.execution_style)
+
+                fill_price = executor.execute_entry(symbol, plan['side'], qty, plan['entry'], is_paper=cfg.paper_mode, rvol=rvol, plan_type=plan_type)
+
+                if fill_price:
+                    plan['entry'] = fill_price
+                    tm.submit_plan(plan, curr_bar)
+
+                    if not cfg.paper_mode:
+                        executor.place_stop_loss(symbol, plan['side'], qty, plan['sl'])
+            else:
+                log.warning(f"[{symbol}] Risk Distance is 0. Skipping.")
+        else:
+            log.debug(f"[{symbol}] Skipping duplicate {unique_id}")
+    else:
+        ls = _score_side(base, "long")
+        ss = _score_side(base, "short")
+        if ls >= 0.1 or ss >= 0.1:
+             adx = base.get('adx', 0); bbw = base.get('bb_width', 99)
+             if adx < 20 and bbw < 5.0:
+                 log.debug(f"[{symbol}] ⚠️  CHOP FILTER ACTIVE (ADX={adx:.1f}, BBW={bbw:.1f}). Sleeping.")
+
 def run_bot(args):
     """Main Bot Loop"""
     
@@ -351,11 +534,6 @@ def run_bot(args):
     mode_str = "PAPER (Simulation)" if cfg.paper_mode else "REAL MONEY"
     log.info(f"EXECUTION MODE: {mode_str} | ENTRY STYLE: {cfg.execution_style}")
 
-    btc_bullish = 1.0
-    btcd_trend = 0.0 # Default Neutral
-    dxy_val = 0.0
-    spx_val = 0.0
-    
     while True:
         try:
             now_sec = time.time()
@@ -363,201 +541,12 @@ def run_bot(args):
             log.info(f"Waiting {sleep_sec:.1f}s for next candle...")
             time.sleep(sleep_sec + 1)
 
-            # A. REAL-TIME MACRO CONTEXT (Cache Append)
-            try:
-                # 1. BTC Context
-                new_btc_4h = ex.fetch_ohlcv_df("BTC/USDT", "4h", limit=5)
-                global_cache["btc_4h"] = pd.concat([global_cache["btc_4h"], new_btc_4h]).drop_duplicates(subset=["timestamp"], keep="last").tail(1000).reset_index(drop=True)
-                btc_ohlcv = global_cache["btc_4h"]
-                
-                if not btc_ohlcv.empty:
-                    btc_c = btc_ohlcv.close.values
-                    current_price = btc_c[-1]
-                    btc_ema100 = _ema_np(btc_c, 100)[-1]
-                    btc_bullish = 1.0 if current_price > btc_ema100 else 0.0
-                    dist_pct = (current_price - btc_ema100) / btc_ema100 * 100
-                    log.info(f"BTC Context (4H): Bullish={btc_bullish} (Dist={dist_pct:.2f}%)")
-
-                # 2. BTC LTF Context (For relative strength syncing)
-                new_btc_ltf = ex.fetch_ohlcv_df("BTC/USDT", cfg.ltf, limit=5)
-                global_cache["btc_ltf"] = pd.concat([global_cache["btc_ltf"], new_btc_ltf]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True)
-                btc_ltf = global_cache["btc_ltf"]
-
-                # 3. BTC DOMINANCE CONTEXT
-                try:
-                    new_btcd = ex.fetch_ohlcv_df("BTCDOM/USDT", "4h", limit=5)
-                    if not new_btcd.empty:
-                        if global_cache["btcd_4h"].empty:
-                            global_cache["btcd_4h"] = new_btcd
-                        else:
-                            global_cache["btcd_4h"] = pd.concat([global_cache["btcd_4h"], new_btcd]).drop_duplicates(subset=["timestamp"], keep="last").tail(50).reset_index(drop=True)
-                    btcd_df = global_cache["btcd_4h"]
-                except:
-                    btcd_df = pd.DataFrame()
-                
-                if not btcd_df.empty:
-                    closes = btcd_df.close.values
-                    if len(closes) >= 5:
-                        slope = (closes[-1] - closes[-5]) / closes[-5] * 100.0
-                        if slope > 0.5: btcd_trend = 1.0
-                        elif slope < -0.5: btcd_trend = -1.0
-                        else: btcd_trend = 0.0
-                        log.info(f"BTC.D Trend: {slope:.2f}% (Regime: {btcd_trend})")
-                else:
-                    btcd_trend = 0.0
-
-                # 4. CROSS-ASSET MACRO (Live Fetch)
-                if getattr(cfg, 'use_macro_data', False):
-                    try:
-                        import yfinance as yf
-                        dxy_c = yf.Ticker("DX-Y.NYB").history(period="5d")['Close']
-                        spx_c = yf.Ticker("^GSPC").history(period="5d")['Close']
-                        dxy_val = float(dxy_c.iloc[-1]) if not dxy_c.empty else 0.0
-                        spx_val = float(spx_c.iloc[-1]) if not spx_c.empty else 0.0
-                    except: pass
-
-            except Exception as e:
-                log.warning(f"Macro Sync Failed: {e}")
-
-            # 5. ORACLE SENTIMENT SYNC
-            oracle_sentiment_val = 0.0
-            try:
-                oracle_path = Path("data_cache/oracle_sentiment.json")
-                if oracle_path.exists():
-                    with open(oracle_path, 'r', encoding='utf-8') as f:
-                        oracle_data = json.load(f)
-                    age_ms = (time.time() * 1000) - oracle_data.get("timestamp", 0)
-                    if age_ms < 86400000: # 24 hours
-                        oracle_sentiment_val = float(oracle_data.get("sentiment", 0.0))
-            except Exception as e:
-                log.warning(f"Oracle Sentiment Sync Failed: {e}")
+            btc_bullish, btcd_trend, dxy_val, spx_val, oracle_sentiment_val = _fetch_macro_context(ex, global_cache, cfg)
+            btc_ltf = global_cache.get("btc_ltf", pd.DataFrame())
 
             # --- MULTI-SYMBOL SCANNING LOOP ---
             for symbol in cfg.symbols:
-                cfg.symbol = symbol 
-                
-                # Fetch incremental update and apply to cache (Protect Rate Limits)
-                new_htf = ex.fetch_ohlcv_df(symbol, cfg.htf, limit=5)
-                market_cache[symbol]["htf"] = pd.concat([market_cache[symbol]["htf"], new_htf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
-                htf = market_cache[symbol]["htf"]
-                
-                new_mtf = ex.fetch_ohlcv_df(symbol, cfg.mtf, limit=5)
-                market_cache[symbol]["mtf"] = pd.concat([market_cache[symbol]["mtf"], new_mtf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
-                mtf = market_cache[symbol]["mtf"]
-
-                new_ltf = ex.fetch_ohlcv_df(symbol, cfg.ltf, limit=5)
-                market_cache[symbol]["ltf"] = pd.concat([market_cache[symbol]["ltf"], new_ltf]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True)
-                ltf = market_cache[symbol]["ltf"]
-                
-                if ltf.empty or len(htf) < 2 or len(mtf) < 2 or len(ltf) < 2: continue
-                
-                # LEVEL 30 SPOOFING DEFENSE (L2 ORDERBOOK FETCH)
-                bid_ask_imbalance = 0.5
-                try:
-                    ob = ex.client.fetch_order_book(symbol, limit=20)
-                    if ob and 'bids' in ob and 'asks' in ob:
-                        total_bids = sum([v for p, v in ob['bids']])
-                        total_asks = sum([v for p, v in ob['asks']])
-                        if (total_bids + total_asks) > 0:
-                            bid_ask_imbalance = total_bids / (total_bids + total_asks)
-                except Exception as e:
-                    log.debug(f"[{symbol}] L2 Orderbook fetch failed: {e}")
-
-                pre_l = Precomp(ltf)
-                pre_map = {"htf": Precomp(htf), "mtf": Precomp(mtf), "ltf": pre_l}
-                
-                btc_close_aligned = None
-                if not btc_ltf.empty and not ltf.empty:
-                    btc_s_close = pd.Series(btc_ltf.close.values, index=btc_ltf["timestamp"])
-                    btc_close_aligned = btc_s_close.reindex(ltf["timestamp"], method='ffill').bfill().values
-
-                adv_features = precompute_v6_features(
-                    pre_map["htf"], pre_map["mtf"], pre_l, htf, mtf, ltf, 
-                    btc_close_arr=btc_close_aligned
-                )
-
-                oi_val = 0.0
-                if getattr(cfg, 'use_macro_data', False):
-                    try: 
-                        oi_arr = fetch_delta_oi(ex, symbol, cfg.ltf, ltf["timestamp"])
-                        oi_val = float(oi_arr[-2]) if len(oi_arr) > 1 else 0.0
-                    except: pass
-
-                funding_rate = ex.fetch_funding_rate(symbol)
-                extras = {
-                    "btc_bullish": btc_bullish,
-                    "funding_rate": funding_rate,
-                    "btcd_trend": btcd_trend,
-                    "dxy_trend": dxy_val,
-                    "spx_trend": spx_val,
-                    "delta_oi": oi_val,
-                    "bid_ask_imbalance": bid_ask_imbalance,
-                    "macro_sentiment": oracle_sentiment_val
-                }
-                
-                # PHASE 1: PREVENT FEATURE REPAINTING (Strict evaluation on fully closed candle)
-                iH, iM, iL = len(htf)-2, len(mtf)-2, len(ltf)-2
-                base = confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, pre_map, extras=extras)
-                base["timestamp"] = ltf.timestamp.iloc[-2]
-                
-                curr_bar = {"o":ltf.open.iloc[-2], "h":ltf.high.iloc[-2], "l":ltf.low.iloc[-2], "c":ltf.close.iloc[-2]}
-                
-                # Step 1: Manage Existing
-                closed = tm.step_bar(curr_bar["o"], curr_bar["h"], curr_bar["l"], curr_bar["c"])
-                if closed:
-                    for t in closed:
-                        log.info(f"[{symbol}] ⛔ Trade Closed: {t['side']} PnL: {t['pnl_r']:.2f}R")
-                        if not cfg.paper_mode:
-                            try:
-                                sym = t.get('symbol', symbol)
-                                executor.execute_close(sym, t['side'], t['total_size'])
-                            except Exception as e:
-                                log.error(f"[{symbol}] Execution Close Failed: {e}")
-
-                # Step 2: Look for New Entries
-                plan = plan_trade_with_brain(cfg, brain, base, adv_features, iH, iM, iL, pre_l)
-                
-                if plan:
-                    unique_id = f"{plan['key']}_{base['timestamp']}_{symbol}"
-                    if not mem.seen(unique_id):
-                        # PATCH: DYNAMIC EXECUTION TYPE LOGGING
-                        log.info(f"[{symbol}] 🚀 SIGNAL: {plan['side'].upper()} | Entry: {plan['entry']:.4f} ({plan.get('type', cfg.execution_style).upper()}) | RiskFactor={plan.get('risk_factor',1.0)}")
-                        
-                        send_discord_signal_alert(plan, args.discord_webhook, symbol)
-                        log_to_csv(args.csv_log_path, plan)
-                        
-                        risk_amt = cfg.account_notional * cfg.risk_per_trade * plan.get('risk_factor', 1.0)
-                        dist = abs(plan['entry'] - plan['sl'])
-                        
-                        if dist > 0:
-                            qty = risk_amt / dist
-                            
-                            # Extract RVOL for Impact Calculation
-                            rvol = plan['features'].get('rvol', 1.0)
-                            plan_type = plan.get('type', cfg.execution_style)
-                            
-                            fill_price = executor.execute_entry(symbol, plan['side'], qty, plan['entry'], is_paper=cfg.paper_mode, rvol=rvol, plan_type=plan_type)
-                            
-                            if fill_price:
-                                plan['entry'] = fill_price 
-                                tm.submit_plan(plan, curr_bar)
-                                
-                                # IMMEDIATE STOP LOSS PLACEMENT (Real Mode Only)
-                                if not cfg.paper_mode:
-                                    executor.place_stop_loss(symbol, plan['side'], qty, plan['sl'])
-                        else:
-                            log.warning(f"[{symbol}] Risk Distance is 0. Skipping.")
-                    else:
-                        log.debug(f"[{symbol}] Skipping duplicate {unique_id}")
-                
-                else:
-                    # Near Miss Logging
-                    ls = _score_side(base, "long")
-                    ss = _score_side(base, "short")
-                    if ls >= 0.1 or ss >= 0.1:
-                         adx = base.get('adx', 0); bbw = base.get('bb_width', 99)
-                         if adx < 20 and bbw < 5.0:
-                             log.debug(f"[{symbol}] ⚠️  CHOP FILTER ACTIVE (ADX={adx:.1f}, BBW={bbw:.1f}). Sleeping.")
+                _process_symbol(symbol, ex, cfg, market_cache, btc_ltf, btc_bullish, btcd_trend, dxy_val, spx_val, oracle_sentiment_val, tm, mem, brain, executor, args)
 
         except KeyboardInterrupt:
             log.info("Manual Stop triggered.")

@@ -115,6 +115,29 @@ def fetch_delta_oi(exw: ExchangeWrapper, symbol: str, timeframe: str, ltf_timest
         log.warning(f"CCXT fetch_oi failed for {symbol}: {e}")
     return np.zeros(len(ltf_timestamps))
 
+def _build_full_features(base, adv_features, iH, iM, iL, len_htf, len_mtf, len_ltf, ts, pre_l):
+    full_feats = {**base}
+    for k, v_arr in adv_features.items():
+         if not hasattr(v_arr, '__getitem__') or isinstance(v_arr, (str, float, int)):
+             full_feats[k] = v_arr; continue
+         arr_len = len(v_arr)
+         idx = -1
+         if arr_len == len_ltf: idx = iL
+         # UNCLOSED CANDLE LEAK PATCHED: Force historical 1-shift
+         elif arr_len == len_mtf: idx = max(0, iM - 1)
+         elif arr_len == len_htf: idx = max(0, iH - 1)
+         else: continue
+         if 0 <= idx < arr_len:
+             val = v_arr[idx]
+             full_feats[k] = float(val) if np.isfinite(val) else 0.0
+
+    full_feats["rsi_14"] = float(pre_l.rsi14[iL]) if iL < len(pre_l.rsi14) else 50.0
+
+    entry_dt = pd.to_datetime(ts, unit="ms", utc=True)
+    full_feats["hour_of_day"] = entry_dt.hour
+    full_feats["day_of_week"] = entry_dt.dayofweek
+    return full_feats
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--exchange", dest="exchange_id", default="bybit")
@@ -199,16 +222,16 @@ def main():
     
     len_ltf = len(ltf); len_mtf = len(mtf); len_htf = len(htf)
     
-    for original_idx, row in ltf_iter.iterrows():
-        ts = int(row["timestamp"])
+    def _process_bar(row, original_idx):
+        ts = int(row.timestamp)
         
         iH = np.searchsorted(htf['timestamp'].values, ts, side='right') - 1
         iM = np.searchsorted(mtf['timestamp'].values, ts, side='right') - 1
         iL = int(original_idx)
         
-        if iH < 0 or iM < 0: continue
+        if iH < 0 or iM < 0: return
 
-        bar = {"o": row["open"], "h": row["high"], "l": row["low"], "c": row["close"]}
+        bar = {"o": row.open, "h": row.high, "l": row.low, "c": row.close}
         exits = tm.step_bar(bar["o"], bar["h"], bar["l"], bar["c"])
         
         for cl in exits:
@@ -253,28 +276,10 @@ def main():
         
         if plan:
             plan['key'] = f"{plan['side']}-{ts}"
-            full_feats = {**base}
             
-            for k, v_arr in adv_features.items():
-                 if not hasattr(v_arr, '__getitem__') or isinstance(v_arr, (str, float, int)):
-                     full_feats[k] = v_arr; continue
-                 arr_len = len(v_arr)
-                 idx = -1
-                 if arr_len == len_ltf: idx = iL
-                 # UNCLOSED CANDLE LEAK PATCHED: Force historical 1-shift 
-                 elif arr_len == len_mtf: idx = max(0, iM - 1)
-                 elif arr_len == len_htf: idx = max(0, iH - 1)
-                 else: continue
-                 if 0 <= idx < arr_len:
-                     val = v_arr[idx]
-                     full_feats[k] = float(val) if np.isfinite(val) else 0.0
-
-            px = bar["c"]
-            full_feats["rsi_14"] = float(pre_l.rsi14[iL]) if iL < len(pre_l.rsi14) else 50.0
-            
-            entry_dt = pd.to_datetime(ts, unit="ms", utc=True)
-            full_feats["hour_of_day"] = entry_dt.hour
-            full_feats["day_of_week"] = entry_dt.dayofweek
+            full_feats = _build_full_features(
+                base, adv_features, iH, iM, iL, len_htf, len_mtf, len_ltf, ts, pre_l
+            )
             full_feats["side"] = 1.0 if plan["side"] == "long" else 0.0
 
             if tm.submit_plan(plan, bar):
@@ -284,6 +289,9 @@ def main():
                     "rr": plan["rr"], 
                     "key": plan.get("key")
                 })
+
+    for row in ltf_iter.itertuples():
+        _process_bar(row, row.Index)
 
     with _open_out(args.out) as f:
         for ev in events:
