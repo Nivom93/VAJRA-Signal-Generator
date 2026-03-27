@@ -22,7 +22,7 @@ import pandas as pd
 
 # --- BULLETPROOF IMPORTS ---
 try:
-    import ccxt; import joblib; from sklearn.preprocessing import StandardScaler
+    import ccxt; import joblib
 except:
     pass
 
@@ -170,16 +170,21 @@ def _volume_profile_np(close, volume, window=100, bins=20):
     return poc, vah, val
 
 @njit(cache=True)
-def _cvd_divergence_np(close, cvd, last_sl, last_sh):
+def _cvd_divergence_np(close, cvd, last_sl, last_sh, last_sl_cvd, last_sh_cvd):
     n = len(close)
     div_bull = np.zeros(n, dtype=np.float64)
     div_bear = np.zeros(n, dtype=np.float64)
     for i in range(10, n):
+        # Bullish Divergence: Price makes a Lower Low (relative to last swing low)
+        # BUT CVD makes a Higher Low (Current CVD > CVD at the time of that swing low)
         if close[i] < last_sl[i]:
-            if cvd[i] > cvd[i-5]: 
+            if cvd[i] > last_sl_cvd[i]:
                 div_bull[i] = 1.0
+
+        # Bearish Divergence: Price makes a Higher High (relative to last swing high)
+        # BUT CVD makes a Lower High (Current CVD < CVD at the time of that swing high)
         if close[i] > last_sh[i]:
-            if cvd[i] < cvd[i-5]:
+            if cvd[i] < last_sh_cvd[i]:
                 div_bear[i] = 1.0
     return div_bull, div_bear
 
@@ -388,6 +393,50 @@ def _bars_since_change(arr):
         out[i] = count
     return out
 
+@njit(cache=True)
+def _rolling_percentile_np(arr, window=100):
+    n = len(arr)
+    out = np.full(n, 0.5, dtype=np.float64)
+    if n == 0: return out
+    for i in range(n):
+        start_idx = max(0, i - window + 1)
+        chunk = arr[start_idx:i+1]
+        val = arr[i]
+        count_less = 0
+        for v in chunk:
+            if v <= val:
+                count_less += 1
+        out[i] = count_less / len(chunk)
+    return out
+
+@njit(cache=True)
+def _rolling_vwap_np(typical_price, volume, window=20):
+    n = len(typical_price)
+    vwap = np.zeros(n, dtype=np.float64)
+    if n == 0: return vwap
+    for i in range(n):
+        start_idx = max(0, i - window + 1)
+        chunk_tp = typical_price[start_idx:i+1]
+        chunk_v = volume[start_idx:i+1]
+        cum_vol = np.sum(chunk_v)
+        cum_pv = np.sum(chunk_tp * chunk_v)
+        if cum_vol > 1e-12:
+            vwap[i] = cum_pv / cum_vol
+        else:
+            vwap[i] = typical_price[i]
+    return vwap
+
+@njit(cache=True)
+def _donchian_channels_np(high, low, window=20):
+    n = len(high)
+    dc_high = np.zeros(n, dtype=np.float64)
+    dc_low = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        start_idx = max(0, i - window + 1)
+        dc_high[i] = np.max(high[start_idx:i+1])
+        dc_low[i] = np.min(low[start_idx:i+1])
+    return dc_high, dc_low
+
 # ==============================================================================
 # 5. CONFIG & CLASSES
 # ==============================================================================
@@ -433,7 +482,7 @@ class AadhiraayanEngineConfig:
     min_prob: float = 0.65; min_conf_long: float = 3.0; min_conf_short: float = 3.0
     min_prob_long: float = 0.65; min_prob_short: float = 0.65
     max_concurrent: int = 3; max_concurrent_buy: int = 0; max_concurrent_sell: int = 0
-    maker_fee_bps: float = 1.0; taker_fee_bps: float = 5.0; slippage_bps: float = 2.0
+    maker_fee_bps: float = 0.0; taker_fee_bps: float = 0.0; slippage_bps: float = 0.0
     account_notional: float = 1000.0; db_path: str = "vajra.sqlite"
     verbose: bool = True; dynamic_confluence: bool = True; dvol_enable: bool = False
     skip_log_throttle: int = 50; paper_mode: bool = True
@@ -465,23 +514,38 @@ class MemoryManager:
 
 class ExchangeWrapper:
     def __init__(self, cfg, markets_data=None):
-        if ccxt is None: raise RuntimeError("ccxt missing")
+        if ccxt is None:
+            raise RuntimeError("ccxt missing")
+
         self.client = getattr(ccxt, cfg.exchange_id)({
-            "enableRateLimit": True, "options": {"defaultType": cfg.market_type}, "timeout": 30000
+            "enableRateLimit": True,
+            "options": {"defaultType": cfg.market_type},
+            "timeout": 30000
         })
-        if markets_data: self.client.markets = markets_data
-        else: 
+
+        if markets_data:
+            self.client.markets = markets_data
+        else:
             for attempt in range(3):
-                try: self.client.load_markets(); break
+                try:
+                    self.client.load_markets()
+                    break
                 except Exception as e:
-                    if attempt == 2: raise e
-                    print(f"Connection warning: {e}. Retrying..."); time.sleep(2)
+                    if attempt == 2:
+                        raise e
+                    print(f"Connection warning: {e}. Retrying...")
+                    time.sleep(2)
+
     def fetch_ohlcv_df(self, sym, tf, limit=1000, since=None):
-        r = self.client.fetch_ohlcv(sym, timeframe=tf, limit=min(1000,limit), since=since)
-        return pd.DataFrame(r, columns=["timestamp","open","high","low","close","volume"])
+        r = self.client.fetch_ohlcv(sym, timeframe=tf, limit=min(1000, limit), since=since)
+        return pd.DataFrame(r, columns=["timestamp", "open", "high", "low", "close", "volume"])
+
     def fetch_funding_rate(self, symbol):
-        try: funding = self.client.fetch_funding_rate(symbol); return float(funding.get('fundingRate', 0.0))
-        except: return 0.0
+        try:
+            funding = self.client.fetch_funding_rate(symbol)
+            return float(funding.get('fundingRate', 0.0))
+        except:
+            return 0.0
 
 # ==============================================================================
 # 6. MARKET STRUCTURE & FEATURE ENGINEERING
@@ -499,14 +563,26 @@ def _swing_points_strict(high, low, left=3, right=3):
     return sh_conf, sl_conf
 
 @njit(cache=True)
-def _last_swing_prices_strict(high, low, sh_conf, sl_conf, right=3):
-    n = high.size; lsh = np.zeros(n); lsl = np.zeros(n)
+def _last_swing_prices_strict(high, low, cvd, sh_conf, sl_conf, right=3):
+    n = high.size
+    lsh = np.zeros(n); lsl = np.zeros(n)
+    lsh_cvd = np.zeros(n); lsl_cvd = np.zeros(n)
+
     curr_sh = high[0]; curr_sl = low[0]
+    curr_sh_cvd = cvd[0]; curr_sl_cvd = cvd[0]
+
     for i in range(n):
-        if sh_conf[i] == 1: curr_sh = high[i - right]
-        if sl_conf[i] == 1: curr_sl = low[i - right]
+        if sh_conf[i] == 1:
+            curr_sh = high[i - right]
+            curr_sh_cvd = cvd[i - right]
+        if sl_conf[i] == 1:
+            curr_sl = low[i - right]
+            curr_sl_cvd = cvd[i - right]
+
         lsh[i] = curr_sh; lsl[i] = curr_sl
-    return lsh, lsl
+        lsh_cvd[i] = curr_sh_cvd; lsl_cvd[i] = curr_sl_cvd
+
+    return lsh, lsl, lsh_cvd, lsl_cvd
 
 @njit(cache=True)
 def _bos_flags(close, high, low, lsh, lsl):
@@ -542,24 +618,91 @@ def _fvg_flags(h, l):
 
 @njit(cache=True)
 def _find_ob_zones_strict(o, c, h, l, bos_up, bos_dn):
-    n = len(c); obt = np.zeros(n); obb = np.zeros(n); lbu = 0.0; lbe = 0.0
-    for i in range(2, n - 1):
+    n = len(c); obt = np.zeros(n); obb = np.zeros(n)
+    active_bull = 0.0; bull_low = 0.0
+    active_bear = 0.0; bear_high = 0.0
+    for i in range(2, n):
+        # Carry forward unmitigated zones
+        obt[i] = active_bull
+        obb[i] = active_bear
+
+        # Advanced Mitigation: >50% penetration or close beyond
+        if active_bull > 0:
+            midpoint = active_bull - ((active_bull - bull_low) * 0.5)
+            if l[i] < midpoint or c[i] < bull_low:
+                active_bull = 0.0
+                obt[i] = 0.0
+        if active_bear > 0:
+            midpoint = active_bear + ((bear_high - active_bear) * 0.5)
+            if h[i] > midpoint or c[i] > bear_high:
+                active_bear = 0.0
+                obb[i] = 0.0
+
+        # Scan for new accumulation/distribution zones
         if bos_up[i] == 1 and bos_up[i-1] == 0:
-            for j in range(i-1, max(0, i-10), -1):
+            for j in range(i-1, max(0, i-50), -1):
                 if c[j] < o[j]: 
                     if j+1 < n:
                         body_ob = o[j] - c[j]; next_body = c[j+1] - o[j+1]
-                        if c[j+1] > o[j+1] and next_body > 1.5 * body_ob: lbu = float(h[j])
+                        if c[j+1] > o[j+1] and next_body > 1.5 * body_ob:
+                            active_bull = float(h[j])
+                            bull_low = float(l[j])
+                            obt[i] = active_bull
                     break
         if bos_dn[i] == 1 and bos_dn[i-1] == 0:
-            for j in range(i-1, max(0, i-10), -1):
+            for j in range(i-1, max(0, i-50), -1):
                 if c[j] > o[j]: 
                     if j+1 < n:
                         body_ob = c[j] - o[j]; next_body = o[j+1] - c[j+1]
-                        if c[j+1] < o[j+1] and next_body > 1.5 * body_ob: lbe = float(l[j])
+                        if c[j+1] < o[j+1] and next_body > 1.5 * body_ob:
+                            active_bear = float(l[j])
+                            bear_high = float(h[j])
+                            obb[i] = active_bear
                     break
-        obt[i]=lbu; obb[i]=lbe
     return obt, obb
+
+@njit(cache=True)
+def _detect_qm(h, l, c, swing_hi, swing_lo):
+    n = len(c)
+    qm_bull = np.zeros(n)
+    qm_bear = np.zeros(n)
+    # A Bullish QM: Low, High, Lower Low (sweeps Low), Higher High (breaks High).
+    last_l = 0.0; last_h = 0.0; prev_l = 0.0; prev_h = 0.0
+    for i in range(10, n):
+        if swing_lo[i-1]:
+            prev_l = last_l
+            last_l = l[i-1]
+        if swing_hi[i-1]:
+            prev_h = last_h
+            last_h = h[i-1]
+
+        # Bullish QM active if last_l < prev_l (Lower Low) and c[i] > prev_h (Higher High)
+        if prev_l > 0 and last_l < prev_l and c[i] > prev_h and prev_h > 0:
+            qm_bull[i] = prev_l # The left shoulder to bid
+
+        # Bearish QM active if last_h > prev_h (Higher High) and c[i] < prev_l (Lower Low)
+        if prev_h > 0 and last_h > prev_h and c[i] < prev_l and prev_l > 0:
+            qm_bear[i] = prev_h # The left shoulder to offer
+    return qm_bull, qm_bear
+
+@njit(cache=True)
+def _detect_wyckoff(h, l, c, vol_spike, cvd_div_bull, cvd_div_bear, last_sl, last_sh):
+    n = len(c)
+    spring = np.zeros(n)
+    upthrust = np.zeros(n)
+    for i in range(5, n):
+        # Spring: Sweeps last_sl, but closes back above it, with vol_spike and cvd_div
+        curr_sl = last_sl[i-1]
+        if curr_sl > 0 and l[i] < curr_sl and c[i] > curr_sl:
+            if vol_spike[i] > 0 and cvd_div_bull[i] > 0:
+                spring[i] = 1.0
+
+        # Upthrust: Sweeps last_sh, but closes back below it, with vol_spike and cvd_div
+        curr_sh = last_sh[i-1]
+        if curr_sh > 0 and h[i] > curr_sh and c[i] < curr_sh:
+            if vol_spike[i] > 0 and cvd_div_bear[i] > 0:
+                upthrust[i] = 1.0
+    return spring, upthrust
 
 class Precomp:
     def __init__(self, df):
@@ -570,11 +713,11 @@ class Precomp:
         
         sh_conf, sl_conf = _swing_points_strict(self.h, self.l, 3, 3)
         self.swing_hi = sh_conf; self.swing_lo = sl_conf
-        self.last_sh, self.last_sl = _last_swing_prices_strict(self.h, self.l, sh_conf, sl_conf, 3)
+        self.last_sh, self.last_sl, self.last_sh_cvd, self.last_sl_cvd = _last_swing_prices_strict(self.h, self.l, self.cvd, sh_conf, sl_conf, 3)
         self.bos_up, self.bos_down, self.sweep_up, self.sweep_dn = _bos_flags(self.c, self.h, self.l, self.last_sh, self.last_sl)
         self.engulf_bull, self.engulf_bear, self.pin_bull, self.pin_bear, self.inside_bar = _inside_engulf_pin(self.o, self.h, self.l, self.c)
         self.fvg_up, self.fvg_dn = _fvg_flags(self.h, self.l)
-        self.ob_bull, self.ob_bear = _find_ob_zones_strict(self.o, self.c, self.h, self.l, self.bos_up, self.bos_down)
+        self.ob_bull_top, self.ob_bull_bot, self.ob_bear_bot, self.ob_bear_top, self.bars_since_ob_bull, self.bars_since_ob_bear = _find_ob_zones_strict(self.o, self.c, self.h, self.l, self.bos_up, self.bos_down)
         
         self.ema50 = _ema_np(self.c, 50); self.ema200 = _ema_np(self.c, 200)
         self.atr14 = _atr_np(self.h, self.l, self.c, 14); self.rsi14 = _rsi14_np(self.c)
@@ -605,12 +748,21 @@ class Precomp:
         self.avwap_bull = _avwap_np(typical_price, self.v, self.swing_lo)
         self.avwap_bear = _avwap_np(typical_price, self.v, self.swing_hi)
         self.poc, self.vah, self.val = _volume_profile_np(self.c, self.v, 100, 20)
-        self.cvd_div_bull, self.cvd_div_bear = _cvd_divergence_np(self.c, self.cvd, self.last_sl, self.last_sh)
+        self.cvd_div_bull, self.cvd_div_bear = _cvd_divergence_np(self.c, self.cvd, self.last_sl, self.last_sh, self.last_sl_cvd, self.last_sh_cvd)
         self.cvd_roc = _roc(self.cvd, 5)
+        self.cvd_acceleration = _roc(self.cvd_roc, 5)
+
+        # ADVANCED STRUCTURE PATTERNS
+        self.qm_bull, self.qm_bear = _detect_qm(self.h, self.l, self.c, self.swing_hi, self.swing_lo)
+        self.spring, self.upthrust = _detect_wyckoff(self.h, self.l, self.c, self.vol_spike, self.cvd_div_bull, self.cvd_div_bear, self.last_sl, self.last_sh)
 
         hours = pd.to_datetime(df.timestamp, unit='ms', utc=True).dt.hour.values
         days = pd.to_datetime(df.timestamp, unit='ms', utc=True).dt.dayofyear.values
         self.asian_high, self.asian_low = _asian_range_np(self.h, self.l, hours, days)
+
+        self.atr_percentile_100 = _rolling_percentile_np(self.atr14, 100)
+        self.rolling_vwap_20 = _rolling_vwap_np((self.h + self.l + self.c) / 3.0, self.v, 20)
+        self.dc_high_20, self.dc_low_20 = _donchian_channels_np(self.h, self.l, 20)
 
 def _trend_flags(e50, e200): return (1.0, 0.0) if e50>e200 else ((0.0, 1.0) if e50<e200 else (0.0, 0.0))
 def _ensure_precomp(df, pre): return pre if isinstance(pre, Precomp) else Precomp(df)
@@ -629,6 +781,7 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     f={}
     f["htf_up"], f["htf_down"] = _trend_flags(ph.ema50[idx_H], ph.ema200[idx_H])
     f["mtf_up"], f["mtf_down"] = _trend_flags(pm.ema50[idx_M], pm.ema200[idx_M])
+    f["htf_ema50"] = float(ph.ema50[idx_H])
     
     px = pl.c[idx_L]; f["price"]=float(px); 
     
@@ -638,14 +791,16 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     
     f["last_swing_high"] = float(pl.last_sh[idx_L])
     f["last_swing_low"] = float(pl.last_sl[idx_L])
-    f["ob_bull_price"] = float(pl.ob_bull[idx_L])
-    f["ob_bear_price"] = float(pl.ob_bear[idx_L])
+    f["ob_bull_top"] = float(pl.ob_bull_top[idx_L])
+    f["ob_bull_bot"] = float(pl.ob_bull_bot[idx_L])
+    f["ob_bear_bot"] = float(pl.ob_bear_bot[idx_L])
+    f["ob_bear_top"] = float(pl.ob_bear_top[idx_L])
     
     px_safe = px if px > 1e-12 else 1.0
     f["dist_last_sh_pct"] = (px - f["last_swing_high"]) / px_safe * 100
     f["dist_last_sl_pct"] = (px - f["last_swing_low"]) / px_safe * 100
-    f["dist_ob_bull_pct"] = (px - f["ob_bull_price"]) / px_safe * 100
-    f["dist_ob_bear_pct"] = (px - f["ob_bear_price"]) / px_safe * 100
+    f["dist_ob_bull_pct"] = (px - f["ob_bull_top"]) / px_safe * 100
+    f["dist_ob_bear_pct"] = (f["ob_bear_bot"] - px) / px_safe * 100
 
     atr_abs = ph.atr14[idx_H]
     if atr_abs < 1e-9: atr_abs = px * 0.01
@@ -659,8 +814,13 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     
     f["choch_up"]=float(1.0 if pl.bos_up[idx_L] and idx_L>=5 and pl.bos_down[idx_L-5] else 0.0)
     f["choch_down"]=float(1.0 if pl.bos_down[idx_L] and idx_L>=5 and pl.bos_up[idx_L-5] else 0.0)
-    f["ob_bull_dist"] = (px - pl.ob_bull[idx_L])/px*100 if pl.ob_bull[idx_L]>0 else 0.0
-    f["ob_bear_dist"] = (pl.ob_bear[idx_L] - px)/px*100 if pl.ob_bear[idx_L]>0 else 0.0
+    f["bars_since_ob_bull"] = float(pl.bars_since_ob_bull[idx_L])
+    f["bars_since_ob_bear"] = float(pl.bars_since_ob_bear[idx_L])
+
+    # Safely pull velocity_atr_3 if precomputed, else 0
+    if hasattr(pl, 'velocity_atr_3'):
+        f["velocity_atr_3"] = float(pl.velocity_atr_3[idx_L])
+
     f["vol_spike"] = float(pl.vol_spike[idx_L])
     f["kalman_vel"] = float(pl.kalman_vel[idx_L]); f["hurst"] = float(pl.hurst[idx_L])
     
@@ -670,10 +830,12 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     f["rvol"] = float(pl.rvol[idx_L]) 
     f["bb_upper"] = float(pl.bb_upper[idx_L])
     f["bb_lower"] = float(pl.bb_lower[idx_L])
+    f["kc_upper"] = float(pl.kc_upper[idx_L])
+    f["kc_lower"] = float(pl.kc_lower[idx_L])
 
     f["dist_bb_upper_pct"] = (px - f["bb_upper"]) / px_safe * 100
     f["dist_bb_lower_pct"] = (px - f["bb_lower"]) / px_safe * 100
-    f["rsi"] = float(pl.rsi14[idx_L])
+    f["rsi_14"] = float(pl.rsi14[idx_L])
     
     f["w_pattern"] = float(pl.w_pattern[idx_L])
     f["m_pattern"] = float(pl.m_pattern[idx_L])
@@ -697,23 +859,36 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
 
     f["is_squeezed"] = float(pl.is_squeezed[idx_L])
     f["squeeze_fired"] = float(pl.squeeze_fired[idx_L])
+    f["mtf_is_squeezed"] = float(pm.is_squeezed[idx_M])
+    f["mtf_squeeze_fired"] = float(pm.squeeze_fired[idx_M])
     f["cvd_div_bull"] = float(pl.cvd_div_bull[idx_L])
     f["cvd_div_bear"] = float(pl.cvd_div_bear[idx_L])
     f["cvd_roc"] = float(pl.cvd_roc[idx_L])
+    f["cvd_acceleration"] = float(pl.cvd_acceleration[idx_L])
+
+    f["qm_bull"] = float(pl.qm_bull[idx_L])
+    f["qm_bear"] = float(pl.qm_bear[idx_L])
+    f["wyckoff_spring"] = float(pl.spring[idx_L])
+    f["wyckoff_upthrust"] = float(pl.upthrust[idx_L])
 
     f["asian_high"] = float(pl.asian_high[idx_L])
     f["asian_low"] = float(pl.asian_low[idx_L])
+    f["dc_high_20"] = float(pl.dc_high_20[idx_L])
+    f["dc_low_20"] = float(pl.dc_low_20[idx_L])
     
     f["dist_asian_high_pct"] = (px - f["asian_high"]) / px_safe * 100
     f["dist_asian_low_pct"] = (px - f["asian_low"]) / px_safe * 100
 
     # SMC & Fibonacci Deep Wick Geometry
-    fractal_range = f["last_swing_high"] - f["last_swing_low"]
+    macro_high = max(f["last_swing_high"], f["last_swing_low"])
+    macro_low = min(f["last_swing_high"], f["last_swing_low"])
+    fractal_range = macro_high - macro_low
+
     if fractal_range > 0:
-        f["fib_786_long"] = f["last_swing_low"] + (fractal_range * 0.214)
-        f["fib_886_long"] = f["last_swing_low"] + (fractal_range * 0.114)
-        f["fib_786_short"] = f["last_swing_high"] - (fractal_range * 0.214)
-        f["fib_886_short"] = f["last_swing_high"] - (fractal_range * 0.114)
+        f["fib_786_long"] = macro_low + (fractal_range * 0.214)
+        f["fib_886_long"] = macro_low + (fractal_range * 0.114)
+        f["fib_786_short"] = macro_high - (fractal_range * 0.214)
+        f["fib_886_short"] = macro_high - (fractal_range * 0.114)
     else:
         f["fib_786_long"] = f["fib_886_long"] = f["fib_786_short"] = f["fib_886_short"] = px
 
@@ -729,6 +904,9 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     ts = ltf.timestamp.iloc[idx_L]
     f["hour_of_day"] = float((int(ts) // 3600000) % 24)
     
+    dt = pd.to_datetime(ts, unit='ms', utc=True)
+    f["day_of_week"] = float(dt.dayofweek)
+
     if extras:
         f["funding_rate"] = float(extras.get("funding_rate", 0.0))
         f["macro_sentiment"] = float(extras.get("macro_sentiment", 0.0))
@@ -749,6 +927,43 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     ema20_gt = 1.0 if (pl.ema20[idx_L] > _ema_np(pl.c, 100)[idx_L] if hasattr(pl, 'ema20') else 0) else 0.0
     f["trend_align_up_3tf"] = f.get("htf_up",0) + f.get("mtf_up",0) + ema20_gt
     f["trend_align_down_3tf"] = f.get("htf_down",0) + f.get("mtf_down",0) + (1.0 - ema20_gt)
+
+    # ---------------------------------------------------------
+    # DIRECTIVE 1: THE REGIME DETECTION MATRIX
+    # ---------------------------------------------------------
+    adx_val = f["adx"]
+    atr_p = pl.atr_percentile_100[idx_L] * 100.0
+    htf_trend = "UP" if f["htf_up"] > 0 else ("DOWN" if f["htf_down"] > 0 else "NEUTRAL")
+
+    is_bb_outside = (px > f["bb_upper"]) or (px < f["bb_lower"])
+    has_cvd_div = (f["cvd_div_bull"] > 0) or (f["cvd_div_bear"] > 0)
+
+    market_regime = "CONSOLIDATION"
+
+    if is_bb_outside and has_cvd_div:
+        market_regime = "REVERSAL_WARNING"
+    elif htf_trend == "UP" and f["price"] < pl.rolling_vwap_20[idx_L]:
+        market_regime = "RETRACEMENT"
+    elif htf_trend == "DOWN" and f["price"] > pl.rolling_vwap_20[idx_L]:
+        market_regime = "RETRACEMENT"
+    elif adx_val >= 25 and atr_p >= 50:
+        market_regime = "EXPANSION"
+    elif adx_val < 20 and atr_p < 40:
+        market_regime = "CONSOLIDATION"
+    else:
+        market_regime = "CONSOLIDATION" # Default
+
+    f["market_regime"] = market_regime
+    # ==========================================================
+    # TREND TENSOR: MULTIDIMENSIONAL MARKET PERCEPTION
+    # ==========================================================
+    regime_raw = (
+        0.4 * f.get("trend_align_up_3tf", 0.0) +
+        0.3 * f.get("cvd_roc", 0.0) +
+        0.2 * f.get("market_efficiency_ratio", 0.0) +
+        0.1 * f.get("macro_sentiment", 0.0)
+    )
+    f["sentient_regime_score"] = float(np.tanh(regime_raw))
 
     return f
 
@@ -802,8 +1017,8 @@ def precompute_v6_features(ph, pm, pl, htf, mtf, ltf, btc_close_arr=None):
     f['atr7_L']=_atr_np(pl.h,pl.l,pl.c,7)
     f['atr_pct_ltf_7_arr']=f['atr7_L']/(np.abs(cl)+eps)*100
     
-    f['dist_to_bull_ob_arr'] = np.where(pl.ob_bull>0, (cl-pl.ob_bull)/cl*100, 0.0)
-    f['dist_to_bear_ob_arr'] = np.where(pl.ob_bear>0, (pl.ob_bear-cl)/cl*100, 0.0)
+    f['dist_to_bull_ob_arr'] = np.where(pl.ob_bull_top>0, (cl-pl.ob_bull_top)/cl*100, 0.0)
+    f['dist_to_bear_ob_arr'] = np.where(pl.ob_bear_bot>0, (pl.ob_bear_bot-cl)/cl*100, 0.0)
     f['is_sweep_high_arr'] = pl.sweep_up.astype(float)
     f['is_sweep_low_arr'] = pl.sweep_dn.astype(float)
     
@@ -835,6 +1050,95 @@ def precompute_v6_features(ph, pm, pl, htf, mtf, ltf, btc_close_arr=None):
         f['eth_btc_trend_score'] = np.zeros(len(cl))
         f['rel_strength_divergence'] = np.zeros(cl)
 
+    # ---------------------------------------------------------
+    # DIRECTIVE 1: MULTI-TIMEFRAME VOLATILITY SQUEEZE
+    # ---------------------------------------------------------
+    bbw_arr = pl.bb_width
+    kc_upper_arr, kc_lower_arr = _keltner_channels_np(cl, pl.h, pl.l, 20, 1.5)
+    ema20_arr = _ema_np(cl, 20)
+    kcw_arr = np.where(ema20_arr > 0, (kc_upper_arr - kc_lower_arr) / ema20_arr * 100.0, 0.0)
+
+    f['is_ttm_squeeze'] = np.where(bbw_arr < kcw_arr, 1.0, 0.0)
+
+    # Linear regression Z-score (squeeze_momentum)
+    # y = mx + c -> regression over 20 periods
+    n = len(cl)
+    squeeze_mom = np.zeros(n)
+    for i in range(20, n):
+        chunk = cl[i-20+1:i+1]
+        x = np.arange(20)
+        slope, intercept = np.polyfit(x, chunk, 1)
+        pred = slope * 19 + intercept
+        std_err = np.std(chunk - (slope * x + intercept))
+        if std_err > 1e-9:
+            squeeze_mom[i] = (cl[i] - pred) / std_err
+        else:
+            squeeze_mom[i] = 0.0
+    f['squeeze_momentum'] = squeeze_mom
+
+    # Volatility Expansion Filter: ATR Percentile (100-period)
+    f['atr_percentile_100'] = pl.atr_percentile_100 * 100.0
+
+    # ---------------------------------------------------------
+    # DIRECTIVE 2: ICT & MICROSTRUCTURE PROXIES
+    # ---------------------------------------------------------
+    # rolling 20-bar Swing High/Low
+    rolling_sh = pd.Series(pl.h).rolling(20, min_periods=1).max().to_numpy()
+    rolling_sl = pd.Series(pl.l).rolling(20, min_periods=1).min().to_numpy()
+    atr_safe = np.where(pl.atr14 > 1e-9, pl.atr14, cl * 0.01)
+
+    f['dist_to_rolling_sh_atr'] = (rolling_sh - cl) / atr_safe
+    f['dist_to_rolling_sl_atr'] = (cl - rolling_sl) / atr_safe
+
+    # Wick Rejection Ratio
+    total_range = pl.h - pl.l
+    total_range_safe = np.where(total_range > 1e-9, total_range, 1e-9)
+    body_top = np.maximum(pl.o, cl)
+    body_bottom = np.minimum(pl.o, cl)
+    f['upper_wick_pct'] = (pl.h - body_top) / total_range_safe
+    f['lower_wick_pct'] = (body_bottom - pl.l) / total_range_safe
+
+    # Killzone Session Flags
+    hours = pd.to_datetime(ltf.timestamp, unit='ms', utc=True).dt.hour.values
+    f['is_london_killzone'] = np.where((hours >= 7) & (hours <= 10), 1.0, 0.0)
+    f['is_ny_killzone'] = np.where((hours >= 13) & (hours <= 16), 1.0, 0.0)
+    f['is_asian_range'] = np.where((hours >= 0) & (hours <= 6), 1.0, 0.0)
+
+    # Wyckoff Volume Absorption (Directive 3)
+    candle_spread = pl.h - pl.l
+    body_size = np.abs(cl - pl.o)
+    f['vol_absorption'] = np.where((pl.rvol > 1.5) & ((body_size / (candle_spread + 1e-9)) < 0.3), 1.0, 0.0)
+
+    # Time at Mode (Liquidity Consumption proxy)
+    # Measures how many bars in the last 20 were within 0.5 ATR of the VWAP
+    diff_from_vwap = np.abs(cl - pl.rolling_vwap_20)
+    is_near_vwap = np.where(diff_from_vwap <= atr_safe * 0.5, 1.0, 0.0)
+    f['time_at_mode'] = pd.Series(is_near_vwap).rolling(20, min_periods=1).sum().to_numpy()
+
+    # ---------------------------------------------------------
+    # DIRECTIVE 3: VWAP & MEAN REVERSION EXTREMES
+    # ---------------------------------------------------------
+    f['vwap_z_score'] = (cl - pl.rolling_vwap_20) / atr_safe
+
+    # Liquidation Cascade Velocity Filter (Anti-Falling Knife)
+    # Measures the speed of the price drop/rally over the last 3 bars
+    cl_shifted_3 = pd.Series(cl).shift(3).fillna(cl[0]).to_numpy()
+    velocity_atr_3_arr = np.abs(cl - cl_shifted_3) / atr_safe
+    f['velocity_atr_3'] = velocity_atr_3_arr
+    pl.velocity_atr_3 = velocity_atr_3_arr
+
+    # ---------------------------------------------------------
+    # DIRECTIVE 4: STRIP COLLINEAR NOISE
+    # ---------------------------------------------------------
+    keys_to_drop = [
+        'ema20_L', 'ema50_L', 'ema100_L',
+        'mtf_ema200_arr', 'atr14_L', 'atr7_L',
+        'trend_strength_mtf_arr'
+    ]
+    for k in keys_to_drop:
+        if k in f:
+            del f[k]
+
     return f
 
 class BrainLearningManager:
@@ -853,28 +1157,45 @@ class BrainLearningManager:
         b = self.brains.get(side)
         if not b: return 0.0
         try:
-            vec = self._build_vec(side, base, adv, iL, iM, px, pre_l, b['feature_names'])
+            d = {**base}
+            for k, v in adv.items():
+                if hasattr(v, '__getitem__') and len(v) > iL:
+                    val = v[iL]
+                    d[k] = float(val) if np.isfinite(val) else 0.0
+                    if d[k] > 1e6: d[k] = 1e6
+                    elif d[k] < -1e6: d[k] = -1e6
+                else: d[k] = 0.0
+            d.update({
+                "pos_vs_swing_h": (px-pre_l.last_sh[iL])/px if px else 0.0,
+                "pos_vs_swing_l": (px-pre_l.last_sl[iL])/px if px else 0.0,
+                "dist_to_mtf_ema200_pct": (px-adv['mtf_ema200_arr'][iM])/px*100 if px and 'mtf_ema200_arr' in adv else 0.0,
+                "side": 1.0 if side=="long" else 0.0
+            })
+            vec = np.array([d.get(n, 0.0) for n in b['feature_names']]).reshape(1,-1)
+            vec = self._build_vec(side, base, adv, iL, px, pre_l, b['feature_names'])
             # CRITICAL FIX: Clip all array values before casting to prevent float32 memory overflow
             vec = np.clip(np.nan_to_num(vec, nan=0.0), -1e10, 1e10).astype(np.float32)
-            if 'imputer' in b: vec = b['imputer'].transform(vec)
-            vec_s = b['scaler'].transform(vec)
-            p = b['classifier'].predict_proba(vec_s)[0][1]
+            p = b['classifier'].predict_proba(vec)[0][1]
             return 1.0-p if b.get('invert_prob') else p
-        except: return 0.0
+        except Exception as e:
+            log.error(f"Brain Prediction Failed: {e}\n{traceback.format_exc()}")
+            return 0.0
 
-    def _build_vec(self, side, b, a, iL, iM, px, pl, fnames):
+    def _build_vec(self, side, b, a, iL, px, pl, fnames):
         d = {**b} 
         for k, v in a.items():
             if hasattr(v, '__getitem__') and len(v) > iL:
                 val = v[iL]
                 d[k] = float(val) if np.isfinite(val) else 0.0
-                if d[k] > 1e6: d[k] = 1e6
-                elif d[k] < -1e6: d[k] = -1e6
+                if d[k] > 1e10: d[k] = 1e10
+                elif d[k] < -1e10: d[k] = -1e10
             else: d[k] = 0.0
+
+        # ALIGNMENT FIX: Use iL for mtf arrays since they were forward-filled to LTF length
         d.update({
             "pos_vs_swing_h": (px-pl.last_sh[iL])/px if px else 0.0, 
             "pos_vs_swing_l": (px-pl.last_sl[iL])/px if px else 0.0,
-            "dist_to_mtf_ema200_pct": (px-a['mtf_ema200_arr'][iM])/px*100 if px and 'mtf_ema200_arr' in a else 0.0,
+            "dist_to_mtf_ema200_pct": (px-a['mtf_ema200_arr'][iL])/px*100 if px and 'mtf_ema200_arr' in a else 0.0,
             "side": 1.0 if side=="long" else 0.0
         })
         return np.array([d.get(n, 0.0) for n in fnames]).reshape(1,-1)
@@ -886,45 +1207,89 @@ class TradeManager:
         self.mem = mem
         self.brain = brain
         self.open_trades = []
-        self.pending_orders = [] 
+        self.pending_orders = []
+        self.last_signal_time = {}
+        self.current_bar_index = {}
+        self.last_processed_ts = {}
 
     def can_open(self, side):
         total_active = len(self.open_trades) + len(self.pending_orders)
         if self.cfg.max_concurrent > 0 and total_active >= self.cfg.max_concurrent: return False
         return True
 
-    def submit_plan(self, plan, bar):
+    def submit_plan(self, plan, bar, force_open=False, fill_price=None, sl_order_id=None):
         if not plan or not self.can_open(plan['side']): return None
         
+        # Signal cooldown to prevent trade stacking isolated by symbol
+        symbol = plan.get('features', {}).get('symbol', 'UNKNOWN')
+        signal_key = f"{symbol}_{plan.get('strat', plan.get('strategy', 'unknown'))}_{plan['side']}"
+        last_signal = self.last_signal_time.get(signal_key, -999)
+
+        # Reject identical signals for the next 10 bars
+        curr_idx = self.current_bar_index.get(symbol, 0)
+        if curr_idx - last_signal < 10:
+            return None
+
+        self.last_signal_time[signal_key] = curr_idx
+
         adx = plan.get('features', {}).get('adx', 25.0)
-        ttl = 12 
-        
-        if adx > 40: ttl = 6      
-        elif adx < 20: ttl = 16   
+        ttl = 4
         
         order = {
             **plan,
+            "symbol": plan.get("features", {}).get("symbol", self.cfg.symbol),
             "dca_level": 0,
             "risk_factor": plan.get('risk_factor', 1.0),
-            "created_ts": bar.get("timestamp", time.time()*1000), 
+            "created_ts": bar.get("timestamp", 0),
             "ttl": ttl, 
             "status": "PENDING" 
         }
         
+        if force_open and fill_price is not None:
+            # Bypass PENDING and go straight to OPEN (Execution Desync Fix)
+            planned_risk = abs(order['entry'] - order['sl'])
+            if planned_risk < 1e-9: planned_risk = order['entry'] * 0.01
+            initial_risk = planned_risk
+
+            trade = order.copy()
+            trade['avg_price'] = fill_price
+            trade['total_size'] = order.get('total_size', 1.0 * order.get('risk_factor', 1.0))
+            trade['initial_risk_unit'] = initial_risk
+            trade['status'] = 'OPEN'
+            trade['fill_ts'] = time.time()
+            trade['bars_open'] = 0
+            trade['next_safety_price'] = 0.0
+            trade['sl_order_id'] = sl_order_id
+
+            self.open_trades.append(trade)
+            self.mem.record_fill(trade)
+            return trade
+
         self.pending_orders.append(order)
         self.mem.record_signal(order)
         return order
 
-    def step_bar(self, o, h, l, c, swing_high=0.0, swing_low=0.0):
+    def step_bar(self, symbol, o, h, l, c, ts=None, swing_high=0.0, swing_low=0.0):
+        if ts is not None and ts == self.last_processed_ts.get(symbol): return []
+        self.last_processed_ts[symbol] = ts
+        self.current_bar_index[symbol] = self.current_bar_index.get(symbol, 0) + 1
+
         closed = []
         still_open = []
         still_pending = []
         
+        # Determine the current bar's timestamp, fallback to 0 if not provided
+        current_ts = ts if ts is not None else 0
+
         fee = (self.cfg.taker_fee_bps + self.cfg.slippage_bps) / 10000.0
         trail_trig = self.cfg.trailing_stop_trigger_r
         trail_dist = self.cfg.trailing_dist_r
         
         for order in self.pending_orders:
+            if order.get('symbol', self.cfg.symbol) != symbol:
+                still_pending.append(order)
+                continue
+
             triggered = False
             fill_px = 0.0
             
@@ -939,13 +1304,24 @@ class TradeManager:
             
             if order_type == 'limit':
                 if side == 'long':
+                    if o <= order.get('sl', -1.0):
+                        order['ttl'] = -1
+                        continue
                     if l <= entry_target:
                         triggered = True
                         fill_px = min(o, entry_target)
                 elif side == 'short':
+                    if o >= order.get('sl', 99999999.0):
+                        order['ttl'] = -1
+                        continue
                     if h >= entry_target:
                         triggered = True
                         fill_px = max(o, entry_target)
+            elif order_type == 'market':
+                triggered = True
+                fill_px = entry_target
+            else: # breakout
+                fill_px = o
             else:
                 if side == 'long':
                     if h >= entry_target:
@@ -957,15 +1333,19 @@ class TradeManager:
                         fill_px = min(o, entry_target)
             
             if triggered:
-                initial_risk = abs(fill_px - order['sl'])
+                planned_risk = abs(order['entry'] - order['sl'])
+                if planned_risk < 1e-9:
+                    planned_risk = order['entry'] * 0.01
+
+                initial_risk = planned_risk
                 if self.cfg.use_dca: initial_risk /= (self.cfg.dca_max_safety_orders + 1.5)
                 
                 trade = order.copy()
                 trade['avg_price'] = fill_px
                 trade['total_size'] = order.get('total_size', 1.0 * order.get('risk_factor',1.0))
-                trade['initial_risk_unit'] = initial_risk if initial_risk > 0 else fill_px * 0.01
+                trade['initial_risk_unit'] = initial_risk
                 trade['status'] = 'OPEN'
-                trade['fill_ts'] = time.time()
+                trade['fill_ts'] = current_ts
                 trade['bars_open'] = 0
                 
                 if self.cfg.use_dca:
@@ -979,6 +1359,11 @@ class TradeManager:
                 else:
                     trade['next_safety_price'] = 0.0
 
+                # PREVENT INTRA-BAR LEAKAGE: A trade cannot hit TP on the same bar it triggers
+                # because we do not know if the high/low occurred before or after the trigger.
+                # However, it CAN hit SL (pessimistic outcome).
+                trade['can_tp_this_bar'] = False
+
                 self.open_trades.append(trade)
                 self.mem.record_fill(trade)
             else:
@@ -987,34 +1372,70 @@ class TradeManager:
         self.pending_orders = still_pending
 
         for t in self.open_trades:
+            if t.get('symbol', self.cfg.symbol) != symbol:
+                still_open.append(t)
+                continue
+
             t['bars_open'] = t.get('bars_open', 0) + 1
             side = t['side']
             entry = t['avg_price']
             sl = t['sl']
             tp = t['tp']
             
+            can_tp = t.get('can_tp_this_bar', True)
+            if not can_tp:
+                # Reset for the next bar
+                t['can_tp_this_bar'] = True
+
             # Real-time PnL calc for Management
-            risk = t.get('initial_risk_unit', abs(t['entry'] - t['sl'])) 
-            if risk == 0: risk = entry * 0.01
-            curr_pnl = (c - entry) * t['total_size'] if side == 'long' else (entry - c) * t['total_size']
-            cost = (entry * t['total_size'] + c * t['total_size']) * fee
-            t['pnl_r'] = (curr_pnl - cost) / risk
+            # FIX: Use locked initial_risk_unit to prevent division-by-zero explosion on Breakeven/Trailing
+            raw_risk = max(t.get('initial_risk_unit', abs(t['entry'] - t['sl'])), 1e-9)
+
+            # Unrealized PnL Calculation
+            curr_pnl = (c - entry) if side == 'long' else (entry - c)
+            t['pnl_r'] = (curr_pnl / raw_risk) - fee
+
+            # True Intra-Bar Maximum Favorable Excursion (MFE)
+            if side == 'long':
+                intra_max_pnl = (h - entry)
+            else:
+                intra_max_pnl = (entry - l)
+            intra_max_pnl_r = (intra_max_pnl / raw_risk) - fee
+
+            t['max_unrealized_pnl_r'] = max(t.get('max_unrealized_pnl_r', -999.0), t['pnl_r'], intra_max_pnl_r)
             
+            # MFE (Maximum Favorable Excursion) TRACKING
+            mfe_price = h if side == 'long' else l
+            mfe_pnl = (mfe_price - entry) * t['total_size'] if side == 'long' else (entry - mfe_price) * t['total_size']
+            mfe_r = (mfe_pnl - cost) / risk if risk > 0 else 0
+            t['max_pnl_r'] = max(t.get('max_pnl_r', -99.0), mfe_r)
+
             hit_sl = False
             hit_tp = False
             exit_reason = ''
             
+            is_entry_bar = (t.get('bars_open', 1) == 1)
+
             if side == 'long':
                 if l <= sl: hit_sl = True; exit_reason = 'sl'
-                elif h >= tp: hit_tp = True; exit_reason = 'tp'
+                elif h >= tp and can_tp: hit_tp = True; exit_reason = 'tp'
             else:
                 if h >= sl: hit_sl = True; exit_reason = 'sl'
-                elif l <= tp: hit_tp = True; exit_reason = 'tp'
+                elif l <= tp and can_tp: hit_tp = True; exit_reason = 'tp'
+                if l <= sl:
+                    hit_sl = True; exit_reason = 'sl'
+                elif (not is_entry_bar and h >= tp) or (is_entry_bar and c >= tp):
+                    hit_tp = True; exit_reason = 'tp'
+            else:
+                if h >= sl:
+                    hit_sl = True; exit_reason = 'sl'
+                elif (not is_entry_bar and l <= tp) or (is_entry_bar and c <= tp):
+                    hit_tp = True; exit_reason = 'tp'
 
             # TIME-IN-FORCE DECAY (Institutional Capital Velocity)
             if not hit_sl and not hit_tp:
-                decay_limit = getattr(self.cfg, 'time_in_force_decay', 8)
-                if t['bars_open'] > decay_limit and t['pnl_r'] <= 0:
+                decay_limit = getattr(self.cfg, 'time_in_force_decay', 0)
+                if decay_limit > 0 and t['bars_open'] > decay_limit and t['pnl_r'] <= 0.0:
                     hit_sl = True
                     t['sl'] = c  # Force execution at close
                     exit_reason = 'time_decay'
@@ -1027,28 +1448,34 @@ class TradeManager:
                     if side == 'long': exit_px = max(o, tp) if o > tp else tp
                     else: exit_px = min(o, tp) if o < tp else tp
 
-                pnl = (exit_px - entry) * t['total_size'] if side == 'long' else (entry - exit_px) * t['total_size']
-                cost = (entry * t['total_size'] + exit_px * t['total_size']) * fee
-                t['pnl_r'] = (pnl - cost) / risk 
+                raw_pnl = (exit_px - entry) if side == 'long' else (entry - exit_px)
+                t['pnl_r'] = (raw_pnl / raw_risk) - (fee * 2)
                 t['exit_price'] = exit_px
                 t['exit_reason'] = exit_reason
-                t['exit_ts'] = time.time()
+                t['exit_ts'] = current_ts
                 
                 closed.append(t)
                 self.mem.record_exit(t)
                 continue
 
             # AUTO-BREAKEVEN
-            #if not t.get('be_locked', False) and t['pnl_r'] >= 1.0:
-                #if side == 'long': t['sl'] = entry + (entry * fee * 2) 
-                #else: t['sl'] = entry - (entry * fee * 2)
-                #t['be_locked'] = True
+            be_trigger = getattr(self.cfg, 'be_trigger_r', 0.0)
+            if be_trigger > 0 and not t.get('be_locked', False) and t.get('max_unrealized_pnl_r', 0.0) >= be_trigger:
+                if side == 'long':
+                    t['sl'] = max(t['sl'], entry + (entry * fee * 2))
+                else:
+                    t['sl'] = min(t['sl'], entry - (entry * fee * 2))
+            if self.cfg.be_trigger_r > 0 and not t.get('be_locked', False) and t['pnl_r'] >= self.cfg.be_trigger_r:
+                if side == 'long': t['sl'] = entry + (entry * fee * 2)
+                else: t['sl'] = entry - (entry * fee * 2)
+                t['be_locked'] = True
                 
             # STRUCTURAL TRAILING
-            #if side == 'long' and swing_low > 0 and swing_low > t['sl'] and swing_low < c:
-            #    #t['sl'] = swing_low
-            #elif side == 'short' and swing_high > 0 and swing_high < t['sl'] and swing_high > c:
-            #    t['sl'] = swing_high
+            if t['pnl_r'] >= 1.5:
+                if side == 'long' and swing_low > 0 and swing_low > t['sl'] and swing_low < c:
+                    t['sl'] = swing_low
+                elif side == 'short' and swing_high > 0 and swing_high < t['sl'] and swing_high > c:
+                    t['sl'] = swing_high
 
             if self.cfg.use_dca and t['dca_level'] < self.cfg.dca_max_safety_orders:
                 hit_safe = (side == 'long' and l <= t['next_safety_price']) or (side == 'short' and h >= t['next_safety_price'])
@@ -1068,7 +1495,8 @@ class TradeManager:
                         t['tp'] = t['avg_price'] - base_risk * self.cfg.dca_tp_scale
                         t['next_safety_price'] += base_risk
 
-            if trail_trig > 0:
+            is_entry_bar = (t.get('bars_open', 1) == 1)
+            if trail_trig > 0 and not is_entry_bar:
                 ru = t.get('initial_risk_unit', 0.0)
                 if ru == 0: ru = abs(t['entry'] - t['sl'])
                 if ru > 0:
@@ -1096,16 +1524,6 @@ def plan_trade(cfg, f):
     return None
 
 def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
-    if cfg.filter_hurst_strict and base.get("hurst", 0.5) < 0.45:
-        return None
-
-    ts = base.get("timestamp", 0)
-    hour = base.get("hour_of_day", 0)
-    
-    if cfg.filter_time_of_day and ts > 0:
-        if 2 <= hour <= 6:
-            return None
-
     px = base.get("price")
     if not px: return None
     
@@ -1115,8 +1533,9 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     # DYNAMIC TP SCALING
     bb_width = base.get("bb_width", 0.0)
     if getattr(cfg, 'dynamic_tp_enabled', True):
-        if bb_width > 5.0: tp_atr_dist = current_atr * 2.5
-        else: tp_atr_dist = current_atr * 1.5
+        # Scale structurally relative to Bollinger Band volatility expansion
+        bb_mult = min(max(bb_width / 2.0, 1.5), 5.0)
+        tp_atr_dist = current_atr * bb_mult
     else:
         tp_atr_dist = base.get("atr_ltf_pct",0)*0.01*px*cfg.atr_mult_tp
         
@@ -1138,12 +1557,8 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     vah = base.get("vah", px)
     val = base.get("val", px)
     
-    if base.get("candle_range_atr", 0.0) > 1.5: return None
-        
     can_long = True
     can_short = True
-    if rsi > 70: can_long = False
-    if rsi < 30: can_short = False
     
     # SPOOFING PROTECTION
     if bid_ask_imbalance > 0.80: can_long = False
@@ -1164,252 +1579,211 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     reversion_penalty = 1.0
     if adx_val > 30: reversion_penalty = 0.5 
     
-    candidates = []
+    # ==========================================================
+    # FUZZY LOGIC & MASSIVE STRATEGY EXPANSION
+    # ==========================================================
+    setup_type = None
+    logic_desc = ""
+    entry_target = px
+    side = None
+
+    # Pre-fetch variables for fuzzy logic
+    fvg_bull = base.get("fvg_bull", 0); fvg_bear = base.get("fvg_bear", 0)
+    ob_bull = base.get("ob_bull_price", 0); ob_bear = base.get("ob_bear_price", 0)
+    fib_786_l = base.get("fib_786_long", 0); fib_786_s = base.get("fib_786_short", 0)
+    macro_high = max(base.get("last_swing_high", px), base.get("last_swing_low", px))
+    macro_low = min(base.get("last_swing_high", px), base.get("last_swing_low", px))
+    fib_618_l = macro_low + ((macro_high - macro_low) * 0.382)
+    fib_618_s = macro_high - ((macro_high - macro_low) * 0.382)
+    qm_bull = base.get("qm_bull", 0); qm_bear = base.get("qm_bear", 0)
+    spring = base.get("wyckoff_spring", 0); upthrust = base.get("wyckoff_upthrust", 0)
+
+    # Fuzzy Proximity Helper (Phantom Fill Fix)
+    def is_tapped(level, buffer_atr_mult=0.5):
+        if level <= 0: return False
+        buffer = current_atr * buffer_atr_mult
+        return (abs(px - level) < buffer) or ((pre.l[iL] - buffer) <= level <= (pre.h[iL] + buffer))
+
+    # Regime Filtering (Hurst Exponent)
+    hurst_val = base.get("hurst", 0.5)
+    is_trending_regime = hurst_val > 0.55
+    is_ranging_regime = hurst_val < 0.45
+
+    # Evaluate Longs
+    if can_long:
+        side = 'long'
+        is_bull_rejection = (base.get("pin_bull", 0) > 0 or base.get("engulf_bull", 0) > 0)
+
+        # Strat Alpha (Trend Pullbacks) - Prioritize in Trending Regime
+        if is_trending_regime and base.get("trend_align_up_3tf", 0) >= 2.0 and ((fib_786_l <= px <= fib_618_l) or (ob_bull > 0 and is_tapped(ob_bull))) and is_bull_rejection:
+            setup_type = "ALPHA_LONG"
+            entry_target = ob_bull if ob_bull > 0 else px
+            logic_desc = "Trend Pullback: 3-TF alignment. Structural bounce confirmed on 0.618-0.786 Fib or active OB."
+        # Strat Beta (Momentum Breakouts) - Prioritize in Trending Regime
+        elif is_trending_regime and base.get("squeeze_fired", 0) > 0 and rvol > 1.5 and base.get("vol_spike", 0) > 0 and base.get("bos_up", 0) > 0:
+            setup_type = "BETA_LONG"
+            entry_target = px
+            logic_desc = "Momentum Breakout: Squeeze fired with volume spike and Structural BOS. Entering momentum explosion."
+        # Strat Gamma (Liquidity Traps) - Prioritize in Ranging/Reversion
+        elif sweep_bull > 0 and is_bull_rejection and base.get("cvd_div_bull", 0) > 0:
+            setup_type = "GAMMA_LONG"
+            entry_target = base.get("last_swing_low", px)
+            logic_desc = "Liquidity Trap: Retail stops hunted with bullish rejection and CVD absorption divergence."
+        # Strat Delta (Fractal Mitigation)
+        elif fvg_bull > 0 and ob_bull > 0 and is_tapped(ob_bull):
+            setup_type = "DELTA_LONG"
+            entry_target = ob_bull
+            logic_desc = "Fractal Mitigation: Fair Value Gap perfectly aligns with institutional Order Block."
+        # Strat Epsilon (Quasimodo)
+        elif qm_bull > 0 and is_tapped(qm_bull) and is_bull_rejection:
+            setup_type = "EPSILON_LONG"
+            entry_target = qm_bull
+            logic_desc = "Quasimodo Structure: Structural bounce confirmed on the QM left shoulder retest."
+        # Strat Zeta (Wyckoff Spring / Judas Swing)
+        elif spring > 0 or (base.get("asian_range_swept_dn", 0) > 0 and is_bull_rejection):
+            setup_type = "ZETA_LONG"
+            entry_target = px
+            logic_desc = "Wyckoff/Judas Spring: HTF/Asian swing swept with immediate volume/CVD reclaim."
+        # Strat Omega (Auction Market Theory) - Prioritize in Ranging Regime
+        elif (is_ranging_regime or adx_val < 25) and is_bull_rejection and is_tapped(val) and base.get("poc", 0) > entry_target:
+            setup_type = "OMEGA_LONG"
+            entry_target = val
+            logic_desc = "Auction Market Theory: Ranging environment. Bullish rejection confirmed at Value Area Low (VAL)."
+
+    # Evaluate Shorts
+    if not setup_type and can_short:
+        side = 'short'
+        is_bear_rejection = (base.get("pin_bear", 0) > 0 or base.get("engulf_bear", 0) > 0)
+
+        # Strat Alpha (Trend Pullbacks)
+        if is_trending_regime and base.get("trend_align_down_3tf", 0) >= 2.0 and ((fib_618_s <= px <= fib_786_s) or (ob_bear > 0 and is_tapped(ob_bear))) and is_bear_rejection:
+            setup_type = "ALPHA_SHORT"
+            entry_target = ob_bear if ob_bear > 0 else px
+            logic_desc = "Trend Pullback: 3-TF alignment. Structural rejection confirmed on 0.618-0.786 Fib or active OB."
+        # Strat Beta (Momentum Breakouts)
+        elif is_trending_regime and base.get("squeeze_fired", 0) > 0 and rvol > 1.5 and base.get("vol_spike", 0) > 0 and base.get("bos_down", 0) > 0:
+            setup_type = "BETA_SHORT"
+            entry_target = px
+            logic_desc = "Momentum Breakout: Squeeze fired with volume spike and Structural BOS. Entering momentum explosion."
+        # Strat Gamma (Liquidity Traps)
+        elif sweep_bear > 0 and is_bear_rejection and base.get("cvd_div_bear", 0) > 0:
+            setup_type = "GAMMA_SHORT"
+            entry_target = base.get("last_swing_high", px)
+            logic_desc = "Liquidity Trap: Retail stops hunted with bearish rejection and CVD absorption divergence."
+        # Strat Delta (Fractal Mitigation)
+        elif fvg_bear > 0 and ob_bear > 0 and is_tapped(ob_bear):
+            setup_type = "DELTA_SHORT"
+            entry_target = ob_bear
+            logic_desc = "Fractal Mitigation: Fair Value Gap perfectly aligns with institutional Order Block."
+        # Strat Epsilon (Quasimodo)
+        elif qm_bear > 0 and is_tapped(qm_bear) and is_bear_rejection:
+            setup_type = "EPSILON_SHORT"
+            entry_target = qm_bear
+            logic_desc = "Quasimodo Structure: Structural rejection confirmed on the QM left shoulder retest."
+        # Strat Zeta (Wyckoff Upthrust / Judas Swing)
+        elif upthrust > 0 or (base.get("asian_range_swept_up", 0) > 0 and is_bear_rejection):
+            setup_type = "ZETA_SHORT"
+            entry_target = px
+            logic_desc = "Wyckoff/Judas Upthrust: HTF/Asian swing swept with immediate volume/CVD reclaim."
+        # Strat Omega (Auction Market Theory)
+        elif (is_ranging_regime or adx_val < 25) and is_bear_rejection and is_tapped(vah) and base.get("poc", px) < entry_target:
+            setup_type = "OMEGA_SHORT"
+            entry_target = vah
+            logic_desc = "Auction Market Theory: Ranging environment. Bearish rejection confirmed at Value Area High (VAH)."
+
+    if not setup_type:
+        return None
 
     # ==========================================================
-    # 1. CALCULATE GLOBAL DYNAMIC URGENCY
+    # RELAX THE MATHEMATICAL STRAITJACKET & DYNAMIC ESCALATION
     # ==========================================================
-    trend_strength = base.get("adx", 0)
-    vol_surge = base.get("rvol", 1.0)
-
-    if trend_strength > 35 and vol_surge > 1.5:
-        # Rocket taking off: High urgency, very shallow pullback
-        discount_atr = 0.1
-    elif trend_strength > 25:
-        # Normal momentum: Standard institutional pullback
-        discount_atr = 0.382
+    # 1. Smart Stop Loss (Reject if > 2.5 ATR or < 0.5 ATR)
+    if side == 'long':
+        sl = base.get("last_swing_low", entry_target - current_atr) - (current_atr * 0.2)
     else:
-        # Choppy/Ranging: Low urgency, wait for the deep wick hunt
-        discount_atr = 0.618
+        sl = base.get("last_swing_high", entry_target + current_atr) + (current_atr * 0.2)
+
+    dynamic_risk = abs(entry_target - sl)
+
+    if dynamic_risk > (current_atr * 2.5) or dynamic_risk < (current_atr * 0.5):
+        return None
+
+    # 2. Dynamic TP Escalation (The RR Rescue Loop)
+    tp = entry_target
+    min_escalation_rr = getattr(cfg, 'min_rr', 1.8)
+
+    if side == 'long':
+        raw_targets = [
+            base.get("ob_bear_price", 0),
+            base.get("last_swing_high", 0),
+            base.get("vah", 0),
+            htf_sh,
+            base.get("asian_high", 0)
+        ]
+        valid_targets = sorted([t for t in raw_targets if t > entry_target])
+
+        tp_found = False
+        for t in valid_targets:
+            if abs(t - entry_target) / max(1e-12, dynamic_risk) >= min_escalation_rr:
+                tp = t
+                tp_found = True
+                break
+
+        if not tp_found:
+            # Artificial projection
+            tp = entry_target + (dynamic_risk * min_escalation_rr)
+
+    else:
+        raw_targets = [
+            base.get("ob_bull_price", 0),
+            base.get("last_swing_low", 0),
+            base.get("val", 0),
+            htf_sl,
+            base.get("asian_low", 0)
+        ]
+        valid_targets = sorted([t for t in raw_targets if t > 0 and t < entry_target], reverse=True)
+
+        tp_found = False
+        for t in valid_targets:
+            if abs(entry_target - t) / max(1e-12, dynamic_risk) >= min_escalation_rr:
+                tp = t
+                tp_found = True
+                break
+
+        if not tp_found:
+            # Artificial projection
+            tp = entry_target - (dynamic_risk * min_escalation_rr)
+
+    rr = abs(tp - entry_target) / max(1e-12, dynamic_risk)
 
     # ==========================================================
-    # STRATEGY ARSENAL (Dynamic Bidding Applied)
+    # THE COMPREHENSIVE ANALYST RATIONALE
     # ==========================================================
+    analysis_str = f"SETUP: {setup_type}. LOGIC: {logic_desc} ENTRY: Limit @ {entry_target:.2f}. TARGET: Liquidity Extracted @ {tp:.2f} ({rr:.2f} RR). INVALIDATION: Structural failure if 1H closes beyond {sl:.2f}. Risk strictly clamped to {dynamic_risk/current_atr:.2f} ATR."
 
-    # ALPHA (TTM SQUEEZE + CVD BREAKOUT)
-    if getattr(cfg, 'strat_alpha_enabled', True):
-        if can_long and base.get("squeeze_fired", 0) > 0 and cvd_roc > 0 and base.get("bos_up", 0) > 0:
-            optimal_entry = px
-            candidates.append({
-                "strat": "ALPHA_LONG", "priority": 1.25, "side": "long",
-                "entry": optimal_entry, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "market"
-            })
-        if can_short and base.get("squeeze_fired", 0) > 0 and cvd_roc < 0 and base.get("bos_down", 0) > 0:
-            optimal_entry = px
-            candidates.append({
-                "strat": "ALPHA_SHORT", "priority": 1.25, "side": "short",
-                "entry": optimal_entry, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "market"
-            })
+    # ==========================================================
+    # DYNAMIC EV GATE
+    # ==========================================================
+    # DYNAMIC EV GATE
+    # ==========================================================
+    prob = 1.0
+    risk_factor = 1.0
+    if brain:
+        prob = brain.predict_prob(side, base, adv, iH, iM, iL, px, pre)
+        required_ev_prob = (1.0 / (1.0 + rr)) + 0.02 # Mathematical Breakeven + 2% Edge
+        min_user_prob = cfg.min_prob_long if side == 'long' else cfg.min_prob_short
+        final_required_prob = max(required_ev_prob, min_user_prob)
+        if prob < final_required_prob:
+            return None
 
-    # OMEGA (AVWAP MEAN REVERSION)
-    if getattr(cfg, 'strat_omega_enabled', False) and getattr(cfg, 'allow_mean_reversion', True):
-        if can_long and (w_pattern > 0 or sweep_bull > 0) and rsi < 40:
-            candidates.append({
-                "strat": "OMEGA_LONG", "priority": 1.0 * reversion_penalty, "side": "long",
-                "entry": px, "sl_offset": sl_atr, "tp_target": base.get("avwap_bear", px + tp_atr_dist), "risk_mult": 1.0, "type": "limit"
-            })
-        if can_short and (m_pattern > 0 or sweep_bear > 0) and rsi > 60:
-            candidates.append({
-                "strat": "OMEGA_SHORT", "priority": 1.0 * reversion_penalty, "side": "short",
-                "entry": px, "sl_offset": sl_atr, "tp_target": base.get("avwap_bull", px - tp_atr_dist), "risk_mult": 1.0, "type": "limit"
-            })
+        edge = prob - final_required_prob
+        base_risk = 1.0 + (edge * 10.0)
+        risk_factor = min(base_risk, getattr(cfg, 'max_risk_factor', 2.0))
 
-    # GAMMA (ORDER BLOCKS) - Institutional Wick Snipe
-    if getattr(cfg, 'strat_gamma_enabled', True):
-        if can_long and base.get("ob_bull_price", 0) > 0 and base.get("ob_bull_dist", 99) < 1.0:
-            if base.get("engulf_bull", 0) > 0 or base.get("pin_bull", 0) > 0:
-                optimal_entry = base.get("ob_bull_price", px)
-                candidates.append({
-                    "strat": "GAMMA_LONG", "priority": 1.5, "side": "long",
-                    "entry": optimal_entry, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "limit"
-                })
-        if can_short and base.get("ob_bear_price", 0) > 0 and base.get("ob_bear_dist", 99) < 1.0:
-            if base.get("engulf_bear", 0) > 0 or base.get("pin_bear", 0) > 0:
-                optimal_entry = base.get("ob_bear_price", px)
-                candidates.append({
-                    "strat": "GAMMA_SHORT", "priority": 1.5, "side": "short",
-                    "entry": optimal_entry, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "limit"
-                })
-
-    # DELTA (AVWAP / FVG CONTINUATION) - Momentum Market Entry
-    if getattr(cfg, 'strat_delta_enabled', True):
-        avwap_bull = base.get("avwap_bull", 0.0)
-        avwap_bear = base.get("avwap_bear", 0.0)
-        
-        if can_long and base.get("fvg_bull", 0) > 0 and abs(px - avwap_bull) < current_atr * 0.5:
-            optimal_entry = px
-            candidates.append({
-                "strat": "DELTA_LONG", "priority": 1.1, "side": "long",
-                "entry": optimal_entry, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "market"
-            })
-        if can_short and base.get("fvg_bear", 0) > 0 and abs(px - avwap_bear) < current_atr * 0.5:
-            optimal_entry = px
-            candidates.append({
-                "strat": "DELTA_SHORT", "priority": 1.1, "side": "short",
-                "entry": optimal_entry, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.0, "type": "market"
-            })
-
-    # EPSILON (FRACTAL LIQUIDITY SWEEP) - Structural Wick Snipe
-    if getattr(cfg, 'strat_epsilon_enabled', True):
-        is_fractal_bull = (abs(px - htf_sl) < current_atr * 0.5) or (abs(px - mtf_sl) < current_atr * 0.5)
-        is_fractal_bear = (abs(px - htf_sh) < current_atr * 0.5) or (abs(px - mtf_sh) < current_atr * 0.5)
-        
-        if can_long and sweep_bull > 0 and is_fractal_bull:
-            dynamic_entry = base.get("last_swing_low", px)
-            candidates.append({
-                "strat": "EPSILON_LONG", "priority": 2.0, "side": "long",
-                "entry": dynamic_entry, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.25, "type": "limit"
-            })
-        if can_short and sweep_bear > 0 and is_fractal_bear:
-            dynamic_entry = base.get("last_swing_high", px)
-            candidates.append({
-                "strat": "EPSILON_SHORT", "priority": 2.0, "side": "short",
-                "entry": dynamic_entry, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.25, "type": "limit"
-            })
-
-    # SMC SMART WICK PREDICTOR (REPLACES ZETA)
-    # Predicts the exact depth of the wick reversal using confluence of 0.786/0.886 Fibs and Order Blocks.
-    if can_long and sweep_bull > 0:
-        fib_zone = base.get("fib_786_long", px)
-        ob_bull = base.get("ob_bull_price", 0.0)
-        # If the Fibonacci pull aligns closely with the Order Block (Fuzzy ATR Logic)
-        if ob_bull > 0 and abs(fib_zone - ob_bull) < current_atr * 0.5:
-            smart_entry = max(fib_zone, ob_bull)
-            smart_sl = base.get("last_swing_low", px - sl_atr) - (current_atr * 0.2)
-            smart_tp = base.get("last_swing_high", px + tp_atr_dist)
-
-            # Ensure proper SL spacing to prevent immediate stopped-out scenarios
-            if smart_entry - smart_sl > current_atr * 0.1:
-                candidates.append({
-                    "strat": "SMC_WICK_SNIPER_LONG", "priority": 3.0, "side": "long",
-                    "entry": smart_entry, "sl_override": smart_sl, "tp_target": smart_tp, "risk_mult": 1.5, "type": "limit"
-                })
-
-    if can_short and sweep_bear > 0:
-        fib_zone = base.get("fib_786_short", px)
-        ob_bear = base.get("ob_bear_price", 0.0)
-        if ob_bear > 0 and abs(fib_zone - ob_bear) < current_atr * 0.5:
-            smart_entry = min(fib_zone, ob_bear)
-            smart_sl = base.get("last_swing_high", px + sl_atr) + (current_atr * 0.2)
-            smart_tp = base.get("last_swing_low", px - tp_atr_dist)
-
-            if smart_sl - smart_entry > current_atr * 0.1:
-                candidates.append({
-                    "strat": "SMC_WICK_SNIPER_SHORT", "priority": 3.0, "side": "short",
-                    "entry": smart_entry, "sl_override": smart_sl, "tp_target": smart_tp, "risk_mult": 1.5, "type": "limit"
-                })
-
-    # ICT KILLZONES (ASIAN RANGE SWEEP)
-    # 7-10 (London), 13-16 (NY)
-    if hour in [7, 8, 9, 10, 13, 14, 15, 16]:
-        if base.get("asian_range_swept_up", 0) > 0 and base.get("pin_bear", 0) > 0:
-            candidates.append({
-                "strat": "ICT_SWEEP_SHORT", "priority": 2.5, "side": "short",
-                "entry": px, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.5, "type": "limit"
-            })
-        if base.get("asian_range_swept_dn", 0) > 0 and base.get("pin_bull", 0) > 0:
-            candidates.append({
-                "strat": "ICT_SWEEP_LONG", "priority": 2.5, "side": "long",
-                "entry": px, "sl_offset": sl_atr, "tp_offset": tp_atr_dist, "risk_mult": 1.5, "type": "limit"
-            })
-
-    # EVALUATE ALL CANDIDATES
-    best_plan = None
-    best_score = -999.0
-    
-    for cand in candidates:
-        side = cand['side']
-        order_type = cand.get('type', cfg.execution_style)
-        
-        entry = cand['entry']
-        if order_type == 'limit_pullback':
-            pb = current_atr * cfg.pullback_atr_mult
-            entry = entry - pb if side == 'long' else entry + pb
-
-        # DEFAULT BASELINE VARIABLES (If no brain is present)
-        prob = 1.0
-        risk_factor = cand.get('risk_mult', 1.0)
-        score = cand['priority']
-
-        if brain:
-            prob = brain.predict_prob(side, base, adv, iH, iM, iL, px, pre)
-            min_prob = cfg.min_prob_long if side == 'long' else cfg.min_prob_short
-            
-            if prob < min_prob:
-                continue 
-            
-            edge = prob - min_prob
-            base_risk = 1.0 + (edge * 15.0) 
-            risk_factor = min(base_risk * cand.get('risk_mult', 1.0), getattr(cfg, 'max_risk_factor', 2.0))
-            score = prob * cand['priority']
-            
-        # CVD DIVERGENCE BOOST
-        if side == 'long' and base.get("cvd_div_bull", 0) > 0 and "GAMMA" in cand['strat']:
-            score += 0.2
-            risk_factor *= 1.2
-        elif side == 'short' and base.get("cvd_div_bear", 0) > 0 and "GAMMA" in cand['strat']:
-            score += 0.2
-            risk_factor *= 1.2
-
-        # LIQUIDATION SQUEEZE CASCADE
-        if delta_oi > 0.05 and funding < -0.01: # 5% jump + high negative funding
-            if side == 'long' and "GAMMA" in cand['strat']:
-                risk_factor *= 1.5
-                
-        if getattr(cfg, 'filter_htf_trend', False):
-            is_counter = (side == 'short' and btc_bullish > 0.5) or (side == 'long' and btc_bullish < 0.5)
-            if is_counter:
-                score *= 0.5
-                risk_factor *= 0.5
-
-        if score > best_score:
-            best_score = score
-            
-            if 'sl_override' in cand:
-                sl = cand['sl_override']
-            else:
-                if side == 'long': sl = entry - cand['sl_offset']
-                else: sl = entry + cand['sl_offset']
-            
-            # STRUCTURAL TP PROJECTOR
-            if 'tp_target' in cand:
-                tp = cand['tp_target']
-            elif cfg.execution_style == 'limit_pullback':
-                if side == 'long':
-                    targets = []
-                    if swing_high > 0 and swing_high > entry: targets.append(swing_high)
-                    ob_bear = base.get("ob_bear_price", 0.0)
-                    if ob_bear > entry: targets.append(ob_bear)
-                    
-                    if targets: tp = max(entry + (current_atr * 0.5), min(targets) - structure_buffer)
-                    else: tp = entry + cand['tp_offset']
-                else:
-                    targets = []
-                    if swing_low > 0 and swing_low < entry: targets.append(swing_low)
-                    ob_bull = base.get("ob_bull_price", 0.0)
-                    if ob_bull > 0 and ob_bull < entry: targets.append(ob_bull)
-                    
-                    if targets: tp = min(entry - (current_atr * 0.5), max(targets) + structure_buffer)
-                    else: tp = entry - cand['tp_offset']
-            else:
-                if side == 'long': tp = entry + cand['tp_offset']
-                else: tp = entry - cand['tp_offset']
-            
-            rr = abs(tp - entry) / max(1e-12, abs(entry - sl))
-            
-            if rr >= cfg.min_rr:
-                best_plan = {
-                    "side": side,
-                    "entry": entry,
-                    "sl": sl,
-                    "tp": tp,
-                    "rr": rr,
-                    "prob": prob,
-                    "key": f"{cand['strat']}_{side}",
-                    "features": base,
-                    "risk_factor": risk_factor,
-                    "strategy": cand['strat'],
-                    "type": order_type
-                }
-
+    best_plan = {
+        "side": side, "entry": entry_target, "sl": sl, "tp": tp, "rr": rr,
+        "prob": prob, "key": f"{setup_type}_{side}", "features": base,
+        "risk_factor": risk_factor, "strategy": setup_type, "type": "limit",
+        "analysis": analysis_str
+    }
     return best_plan
