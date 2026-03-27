@@ -31,17 +31,17 @@ def _strategy_overrides(cfg):
     cfg.risk_per_trade = 0.01          
     cfg.max_concurrent = 3             
     cfg.dynamic_risk_scaling = False   
-    cfg.max_risk_factor = 1.0          
+    cfg.max_risk_factor = 3.0
     
     # --- FILTERS (LET THE AI DECIDE) ---
     cfg.filter_htf_trend = True        
     cfg.filter_btc_regime = True       
     cfg.filter_funding_check = False    
     cfg.filter_btcd_regime = False      
-    cfg.filter_rvol_breakout = False   # Disabled: Let ML score it
-    cfg.filter_adx_chop = False        # Disabled: Let ML score it
+    cfg.filter_rvol_breakout = False
+    cfg.filter_adx_chop = False
     cfg.filter_time_of_day = False
-    cfg.filter_hurst_strict = False    # Disabled: Let ML score it
+    cfg.filter_hurst_strict = False
     cfg.use_macro_data = True
     cfg.use_meta_labeling = True
 
@@ -66,6 +66,7 @@ def _strategy_overrides(cfg):
     cfg.atr_mult_sl = 1.0           # Mathematical fallback for very tight snipes
     cfg.atr_mult_tp = 1.8           # Mathematical fallback to achieve >= 1.8 RR baseline
 
+    # --- STRICT AI GATES ---
     if "BTC" in symbol or "ETH" in symbol:
         cfg.min_conf_long = 1.0
         cfg.min_conf_short = 1.0

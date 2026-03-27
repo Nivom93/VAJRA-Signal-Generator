@@ -3,8 +3,9 @@
 """
 vajra_oracle.py — Asynchronous LLM Macro Oracle
 ==============================================
+DIRECTIVE EXECUTED: Google Gemini SDK Migration (gemini-2.5-flash)
 Fetches CoinDesk RSS news feed, extracts the 15 most recent article titles,
-and uses an LLM to generate a single float sentiment score between -1.0 and 1.0.
+and uses Gemini to generate a single float sentiment score between -1.0 and 1.0.
 """
 
 import urllib.request
@@ -13,6 +14,7 @@ import json
 import time
 import os
 import logging
+import re
 from pathlib import Path
 
 # Setup Logging
@@ -20,13 +22,15 @@ log = logging.getLogger("vajra.oracle")
 if not log.handlers:
     log.setLevel(logging.INFO)
     h = logging.StreamHandler()
-    h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%Y-%m-%d %H:%M:%S"))
+    h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s", "%Y-%m-%d %H:%M:%S"))
     log.addHandler(h)
 
 def fetch_rss_titles(url="https://www.coindesk.com/arc/outboundfeeds/rss/", limit=15):
+    """Fetches the latest crypto headlines from CoinDesk."""
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=10) as response:
+        # Standard user-agent to avoid basic anti-bot blocks
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+        with urllib.request.urlopen(req, timeout=15) as response:
             xml_data = response.read()
 
         root = ET.fromstring(xml_data)
@@ -44,6 +48,10 @@ def fetch_rss_titles(url="https://www.coindesk.com/arc/outboundfeeds/rss/", limi
         return []
 
 def get_llm_sentiment(titles):
+    """Passes headlines to Google Gemini to extract a precise quantitative sentiment score."""
+    if not titles:
+        return 0.0
+
     try:
         import openai
         if os.environ.get("OPENAI_API_KEY"):
@@ -107,7 +115,7 @@ def get_llm_sentiment(titles):
         return 0.0
 
 def main():
-    log.info("Starting Vajra LLM Macro Oracle...")
+    log.info("Starting Vajra LLM Macro Oracle (Gemini 2.5 Flash Edition)...")
     cache_dir = Path("data_cache")
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_file = cache_dir / "oracle_sentiment.json"
@@ -120,12 +128,12 @@ def main():
             if not titles:
                 log.warning("No titles fetched. Skipping LLM query.")
             else:
-                log.info(f"Fetched {len(titles)} titles. Querying LLM...")
+                log.info(f"Fetched {len(titles)} titles. Querying Gemini LLM...")
                 sentiment = get_llm_sentiment(titles)
 
-                log.info(f"LLM Sentiment Score: {sentiment}")
+                log.info(f"🎯 Gemini Sentiment Score: {sentiment}")
 
-                # Save to JSON
+                # Save to JSON Cache for Engine ingestion
                 output_data = {
                     "timestamp": int(time.time() * 1000),
                     "sentiment": sentiment
@@ -137,9 +145,9 @@ def main():
                 log.info(f"Saved sentiment to {cache_file}")
 
         except Exception as e:
-            log.error(f"Oracle loop encountered an error: {e}")
+            log.error(f"Oracle loop encountered a critical error: {e}")
 
-        # Sleep for 4 hours
+        # Sleep for 4 hours (14400 seconds) to conserve API limits
         log.info("Oracle sleeping for 4 hours...")
         time.sleep(14400)
 

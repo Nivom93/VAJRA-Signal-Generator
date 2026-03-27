@@ -52,8 +52,23 @@ def fetch_macro_trend(ticker_symbol: str, ltf_timestamps: pd.Series) -> np.ndarr
         start_dt = pd.to_datetime(ltf_timestamps.iloc[0], unit='ms')
         end_dt = pd.to_datetime(ltf_timestamps.iloc[-1], unit='ms')
         start_dt_padded = start_dt - pd.Timedelta(days=30)
-        df = yf.download(ticker_symbol, start=start_dt_padded, end=end_dt, interval="1d", progress=False)
-        
+
+        fallback_tickers = [ticker_symbol]
+        if ticker_symbol == "DX=F":
+            fallback_tickers = ["DX-Y.NYB", "UUP", "DX=F"]
+        elif ticker_symbol == "ES=F":
+            fallback_tickers = ["^GSPC", "SPY", "ES=F"]
+
+        df = pd.DataFrame()
+        for t in fallback_tickers:
+            try:
+                temp_df = yf.download(t, start=start_dt_padded, end=end_dt, interval="1d", progress=False, auto_adjust=True)
+                if not temp_df.empty:
+                    df = temp_df
+                    break
+            except Exception:
+                continue
+
         if df.empty: return np.zeros(len(ltf_timestamps))
         
         if isinstance(df.columns, pd.MultiIndex):
@@ -70,6 +85,10 @@ def fetch_macro_trend(ticker_symbol: str, ltf_timestamps: pd.Series) -> np.ndarr
         
         # MACRO TIME LEAK FIX: Shift the daily close by 24h to ensure it is fully closed!
         trend_series = pd.Series(trend, index=df.index.view('int64') // 10**6)
+
+        # FIX: Strip duplicate indices to prevent reindex crashes
+        trend_series = trend_series[~trend_series.index.duplicated(keep='last')]
+
         trend_series.index = trend_series.index + 86400000 
         
         # PREVENT DUPLICATE INDEX CRASHES (Source)
@@ -87,6 +106,32 @@ def fetch_macro_trend(ticker_symbol: str, ltf_timestamps: pd.Series) -> np.ndarr
     except Exception as e:
         log.warning(f"yfinance failed for {ticker_symbol}: {e}")
         return np.zeros(len(ltf_timestamps))
+
+def fetch_historical_funding_rates(exw: ExchangeWrapper, symbol: str, ltf_timestamps: pd.Series) -> np.ndarray:
+    try:
+        target_symbol = symbol
+        if exw.client.id == 'bybit' and ':' not in symbol and '/' in symbol:
+            quote = symbol.split('/')[1]
+            target_symbol = f"{symbol}:{quote}"
+
+        if exw.client.has.get('fetchFundingRateHistory'):
+            # Fetch a larger history if possible, but CCXT often limits to 200/1000
+            funding = exw.client.fetch_funding_rate_history(target_symbol, limit=1000, params={'category': 'linear'})
+            if not funding: return np.zeros(len(ltf_timestamps))
+
+            df = pd.DataFrame(funding)
+            if 'fundingRate' not in df.columns or 'timestamp' not in df.columns:
+                return np.zeros(len(ltf_timestamps))
+
+            df['fundingRate'] = pd.to_numeric(df['fundingRate'], errors='coerce')
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+            df.set_index('timestamp', inplace=True)
+
+            aligned = df['fundingRate'].shift(1).reindex(pd.to_datetime(ltf_timestamps, unit='ms', utc=True), method='ffill').fillna(0.0)
+            return aligned.values
+    except Exception as e:
+        log.warning(f"CCXT fetch_funding failed for {symbol}: {e}")
+    return np.zeros(len(ltf_timestamps))
 
 def fetch_delta_oi(exw: ExchangeWrapper, symbol: str, timeframe: str, ltf_timestamps: pd.Series) -> np.ndarray:
     try:
@@ -119,7 +164,7 @@ def fetch_delta_oi(exw: ExchangeWrapper, symbol: str, timeframe: str, ltf_timest
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
             df.set_index('timestamp', inplace=True)
             
-            aligned = df['delta_oi'].shift(1).reindex(pd.to_datetime(ltf_timestamps, unit='ms', utc=True)).ffill().fillna(0.0)
+            aligned = df['delta_oi'].shift(1).reindex(pd.to_datetime(ltf_timestamps, unit='ms', utc=True), method='ffill').fillna(0.0)
             return aligned.values
     except Exception as e:
         log.warning(f"CCXT fetch_oi failed for {symbol}: {e}")
@@ -203,9 +248,32 @@ def main():
 
     log.info("Downloading Macro & Micro-Structure contextual data...")
     exw = ExchangeWrapper(cfg)
-    dxy_aligned = fetch_macro_trend("DX-Y.NYB", ltf["timestamp"])
-    spx_aligned = fetch_macro_trend("^GSPC", ltf["timestamp"])
+    dxy_aligned = fetch_macro_trend("DX=F", ltf["timestamp"])
+    spx_aligned = fetch_macro_trend("ES=F", ltf["timestamp"])
     oi_aligned = fetch_delta_oi(exw, cfg.symbol, cfg.ltf, ltf["timestamp"])
+    funding_aligned = fetch_historical_funding_rates(exw, cfg.symbol, ltf["timestamp"])
+
+    # Historical BTC.D Fetch
+    try:
+        import ccxt
+        binance_ex = ccxt.binance({'options': {'defaultType': 'swap'}})
+        btcd_raw = binance_ex.fetch_ohlcv("BTCDOM/USDT:USDT", timeframe="4h", limit=1000)
+        btcd_df = pd.DataFrame(btcd_raw, columns=["timestamp","open","high","low","close","volume"])
+        if not btcd_df.empty:
+            btcd_c = btcd_df['close'].values
+            btcd_trend = np.zeros_like(btcd_c)
+            for i in range(5, len(btcd_c)):
+                slope = (btcd_c[i] - btcd_c[i-5]) / btcd_c[i-5] * 100.0
+                if slope > 0.5: btcd_trend[i] = 1.0
+                elif slope < -0.5: btcd_trend[i] = -1.0
+
+            btcd_series = pd.Series(btcd_trend, index=pd.to_datetime(btcd_df['timestamp'], unit='ms', utc=True))
+            btcd_aligned = btcd_series.shift(1).reindex(pd.to_datetime(ltf["timestamp"], unit='ms', utc=True), method='ffill').fillna(0.0).values
+        else:
+            btcd_aligned = np.zeros(len(ltf))
+    except Exception as e:
+        log.warning(f"Failed to fetch BTCDOM: {e}")
+        btcd_aligned = np.zeros(len(ltf))
 
     pre_h, pre_m, pre_l = Precomp(htf), Precomp(mtf), Precomp(ltf)
     pre_map = {"htf": pre_h, "mtf": pre_m, "ltf": pre_l}
@@ -237,7 +305,7 @@ def main():
         
         iH = np.searchsorted(htf['timestamp'].values, ts, side='right') - 1
         iM = np.searchsorted(mtf['timestamp'].values, ts, side='right') - 1
-        iL = int(original_idx)
+        iL = int(row.Index)
         
         if iH < 0 or iM < 0: return
 
@@ -273,16 +341,17 @@ def main():
         
         extras = {
             "btc_bullish": btc_val,
-            "funding_rate": 0.0,
-            "btcd_trend": 0.0,
+            "funding_rate": float(funding_aligned[iL]) if iL < len(funding_aligned) else 0.0,
+            "btcd_trend": float(btcd_aligned[iL]) if iL < len(btcd_aligned) else 0.0,
             "dxy_trend": float(dxy_aligned[iL]) if iL < len(dxy_aligned) else 0.0,
             "spx_trend": float(spx_aligned[iL]) if iL < len(spx_aligned) else 0.0,
             "delta_oi": float(oi_aligned[iL]) if iL < len(oi_aligned) else 0.0,
-            "bid_ask_imbalance": 0.5,
+            "bid_ask_imbalance": float(bid_ask_aligned[iL]) if iL < len(bid_ask_aligned) else 0.5,
             "macro_sentiment": 0.0
         }
 
         base = confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, pre_map, extras=extras)
+        base["symbol"] = cfg.symbol
         plan = plan_trade_with_brain(cfg, None, base, adv_features, iH, iM, iL, pre_l)
         
         if plan:

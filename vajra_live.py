@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse, time, logging, traceback, os, requests, json, csv, sqlite3, threading, subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from collections import deque
 import pandas as pd
 import numpy as np
 import ccxt # Explicit import for network exception handling
@@ -42,6 +43,43 @@ if not log.handlers:
     log.addHandler(h)
 
 # --- AUTO RETRAINER ---
+
+class MacroFetcher(threading.Thread):
+    """
+    Background daemon that asynchronously fetches slow macro data (yfinance)
+    to prevent main execution loop freezing.
+    """
+    def __init__(self, cfg):
+        super().__init__(daemon=True)
+        self.cfg = cfg
+        self.state = {"dxy_val": 0.0, "spx_val": 0.0}
+
+    def run(self):
+        log.info("🌐 Macro Fetcher Daemon Active.")
+        while True:
+            if getattr(self.cfg, 'use_macro_data', False):
+                try:
+                    import yfinance as yf
+                    for t in ["DX-Y.NYB", "UUP", "DX=F"]:
+                        try:
+                            dxy_c = yf.Ticker(t).history(period="5d")['Close']
+                            if not dxy_c.empty:
+                                self.state["dxy_val"] = float(dxy_c.iloc[-2]) if len(dxy_c) > 1 else 0.0
+                                break
+                        except Exception:
+                            continue
+
+                    for t in ["^GSPC", "SPY", "ES=F"]:
+                        try:
+                            spx_c = yf.Ticker(t).history(period="5d")['Close']
+                            if not spx_c.empty:
+                                self.state["spx_val"] = float(spx_c.iloc[-2]) if len(spx_c) > 1 else 0.0
+                                break
+                        except Exception:
+                            continue
+                except Exception as e:
+                    log.debug(f"Macro Fetcher silent fail: {e}")
+            time.sleep(300) # Update every 5 minutes
 
 class AutoRetrainer(threading.Thread):
     """
@@ -101,6 +139,7 @@ class RealExecutionManager:
             log.error(f"Ticker Fetch Fail: {e}")
             return None
 
+    def execute_entry(self, symbol, side, qty, price, is_paper=True, rvol=1.0, plan_type='limit', sl=None, tp=None):
     def execute_entry(self, symbol, side, qty, price, is_paper=True, rvol=1.0, plan_type='limit'):
         """
         Executes an entry order.
@@ -152,7 +191,7 @@ class RealExecutionManager:
         log.info(f"⚡ REAL EXECUTION: {c_side.upper()} {qty:.4f} {symbol}...")
         
         # BREAKOUT CONFIRMATION (TRIGGER ORDER)
-        if self.cfg.execution_style == 'breakout':
+        if plan_type == 'breakout':
             curr_px = self.get_best_book_price(symbol, c_side)
             if not curr_px: curr_px = price
             
@@ -160,6 +199,16 @@ class RealExecutionManager:
             
             if triggered:
                 log.info(f"⚡ Breakout confirmed (Price {curr_px} passed Trigger {price}). Executing MARKET.")
+                try:
+                    amount_r = self.client.amount_to_precision(symbol, qty)
+                    order = self.client.create_order(symbol, 'market', c_side, amount_r)
+                    avg = order.get('average')
+                    avg_px = float(avg if avg is not None else curr_px)
+                    log.info(f"✅ FILLED (Breakout-Market) @ {avg_px}")
+                    return avg_px
+                except Exception as e:
+                    log.error(f"CRITICAL: Breakout Market Order Failed: {e}")
+                    return None
             else:
                 try:
                     log.info(f"⚡ Placing STOP MARKET Order @ {price}")
@@ -171,54 +220,37 @@ class RealExecutionManager:
                     log.error(f"Stop Order Failed: {e}. Falling back to monitor...")
                     return None
 
-        # STANDARD LIMIT CHASE
-        current_limit_px = self.get_best_book_price(symbol, c_side)
-        if not current_limit_px: current_limit_px = price
-
-        for i in range(self.max_retries):
+        # TRUE LIMIT EXECUTION (PREDICTIVE SNIPING)
+        elif plan_type == 'limit':
             try:
                 params = {'timeInForce': 'PostOnly'}
-                price_r = self.client.price_to_precision(symbol, current_limit_px)
+                if sl: params['stopLoss'] = str(self.client.price_to_precision(symbol, sl))
+                if tp: params['takeProfit'] = str(self.client.price_to_precision(symbol, tp))
+
+                price_r = self.client.price_to_precision(symbol, price)
                 amount_r = self.client.amount_to_precision(symbol, qty)
-                
-                log.info(f"👉 Attempt {i+1}/{self.max_retries}: Post-Limit {c_side} @ {price_r}")
                 order = self.client.create_order(symbol, 'limit', c_side, amount_r, price_r, params)
-                order_id = order['id']
-                time.sleep(self.wait_time)
-                order = self.client.fetch_order(order_id, symbol)
-                status = order.get('status', 'unknown')
-
-                if status in ['closed', 'filled']:
-                    avg_px = float(order.get('average', current_limit_px))
-                    log.info(f"✅ FILLED (Limit) @ {avg_px}")
-                    return avg_px
-                
-                if status == 'open':
-                    log.info("Order unfilled. Cancelling to chase...")
-                    try: self.client.cancel_order(order_id, symbol)
-                    except: pass
-                
-                new_book = self.get_best_book_price(symbol, c_side)
-                if new_book: current_limit_px = new_book
-
-            except ccxt.InvalidOrder:
-                log.warning(f"Invalid Order (PostOnly?). Retrying...")
-                time.sleep(1)
+                log.info(f"✅ RESTING LIMIT PLACED: ID {order['id']}")
+                return price
             except Exception as e:
-                log.error(f"Execution Error: {e}")
-                time.sleep(1)
+                log.error(f"Execution Error (True Limit): {e}")
+                return None
 
-        # FALLBACK: MARKET ORDER
-        log.warning("⚠️ Limit Chase Failed. FORCING MARKET ORDER.")
-        try:
-            amount_r = self.client.amount_to_precision(symbol, qty)
-            order = self.client.create_order(symbol, 'market', c_side, amount_r)
-            avg_px = float(order.get('average', current_limit_px))
-            log.info(f"✅ FILLED (Market) @ {avg_px}")
-            return avg_px
-        except Exception as e:
-            log.error(f"CRITICAL: Market Order Failed: {e}")
-            return None
+        # STANDARD MARKET ORDER
+        else:
+            log.info("⚡ Executing INSTANT MARKET ORDER.")
+            try:
+                amount_r = self.client.amount_to_precision(symbol, qty)
+                order = self.client.create_order(symbol, 'market', c_side, amount_r)
+
+                current_limit_px = self.get_best_book_price(symbol, c_side)
+                avg = order.get('average')
+                avg_px = float(avg if avg is not None else current_limit_px)
+                log.info(f"✅ FILLED (Market) @ {avg_px}")
+                return avg_px
+            except Exception as e:
+                log.error(f"CRITICAL: Market Order Failed: {e}")
+                return None
 
     def place_stop_loss(self, symbol, side, qty, stop_price):
         """
@@ -242,12 +274,24 @@ class RealExecutionManager:
             log.error(f"CRITICAL: Failed to place Hard Stop! Error: {e}")
             return None
 
+    def place_take_profit(self, symbol, side, qty, tp_price):
+        try:
+            sl_side = 'sell' if side == 'long' else 'buy'
+            amount_r = self.client.amount_to_precision(symbol, qty)
+            price_r = self.client.price_to_precision(symbol, tp_price)
+            order = self.client.create_order(symbol, 'limit', sl_side, amount_r, price_r, params={'reduceOnly': True})
+            log.info(f"✅ HARD TP PLACED: ID {order['id']} @ {tp_price:.2f}")
+            return order
+        except Exception as e:
+            log.error(f"Failed to place Hard TP: {e}")
+            return None
+
     def execute_close(self, symbol, side, qty):
         try:
             order_side = 'sell' if side == 'long' else 'buy'
             log.info(f"⚡ EXECUTING EXIT: {symbol} {side} {qty} (Market {order_side})")
             amount_r = self.client.amount_to_precision(symbol, qty)
-            order = self.client.create_order(symbol, 'market', order_side, amount_r)
+            order = self.client.create_order(symbol, 'market', order_side, amount_r, params={'reduceOnly': True})
             return order
         except Exception as e:
             log.error(f"CRITICAL: Failed to execute close for {symbol}. Error: {e}")
@@ -510,35 +554,37 @@ def run_bot(args):
     retrainer = AutoRetrainer(brain, args.brain_long_path, args.brain_short_path)
     retrainer.start()
 
+    # 4. Start Macro Fetcher Daemon
+    macro_fetcher = MacroFetcher(cfg)
+    macro_fetcher.start()
+
     # PHASE 2: IN-MEMORY OHLCV CACHING SYSTEM (Prevents API ratelimits)
     log.info("Building In-Memory OHLCV Cache to prevent IP Bans...")
     market_cache = {}
     for sym in cfg.symbols:
         market_cache[sym] = {
-            "htf": ex.fetch_ohlcv_df(sym, cfg.htf, limit=250),
-            "mtf": ex.fetch_ohlcv_df(sym, cfg.mtf, limit=250),
-            "ltf": ex.fetch_ohlcv_df(sym, cfg.ltf, limit=500)
+            "htf": deque(ex.fetch_ohlcv_df(sym, cfg.htf, limit=250).to_dict('records'), maxlen=250),
+            "mtf": deque(ex.fetch_ohlcv_df(sym, cfg.mtf, limit=250).to_dict('records'), maxlen=250),
+            "ltf": deque(ex.fetch_ohlcv_df(sym, cfg.ltf, limit=500).to_dict('records'), maxlen=500)
         }
     
     global_cache = {
-        "btc_4h": ex.fetch_ohlcv_df("BTC/USDT", "4h", limit=1000),
-        "btc_ltf": ex.fetch_ohlcv_df("BTC/USDT", cfg.ltf, limit=500)
+        "btc_4h": deque(ex.fetch_ohlcv_df("BTC/USDT", "4h", limit=1000).to_dict('records'), maxlen=1000),
+        "btc_ltf": deque(ex.fetch_ohlcv_df("BTC/USDT", cfg.ltf, limit=500).to_dict('records'), maxlen=500)
     }
     try:
-        global_cache["btcd_4h"] = ex.fetch_ohlcv_df("BTCDOM/USDT", "4h", limit=50)
+        global_cache["btcd_4h"] = deque(ex.fetch_ohlcv_df("BTCDOM/USDT", "4h", limit=50).to_dict('records'), maxlen=50)
     except:
-        global_cache["btcd_4h"] = pd.DataFrame()
+        global_cache["btcd_4h"] = deque(maxlen=50)
         
     log.info("✅ Cache built successfully.")
 
-    log.info(f"✅ ENGINE v34 LIVE on {cfg.symbols}. Protocol: Liquidity Warlord.")
+    log.info(f"✅ ENGINE v35 LIVE on {cfg.symbols}. Protocol: Liquidity Warlord.")
     mode_str = "PAPER (Simulation)" if cfg.paper_mode else "REAL MONEY"
     log.info(f"EXECUTION MODE: {mode_str} | ENTRY STYLE: {cfg.execution_style}")
 
     btc_bullish = 1.0
     btcd_trend = 0.0 # Default Neutral
-    dxy_val = 0.0
-    spx_val = 0.0
     
     last_processed_ts = {}
 
@@ -556,18 +602,52 @@ def run_bot(args):
             for symbol in cfg.symbols:
                 cfg.symbol = symbol 
                 
-                # Fetch incremental update and apply to cache (Protect Rate Limits)
-                new_htf = ex.fetch_ohlcv_df(symbol, cfg.htf, limit=5)
-                market_cache[symbol]["htf"] = pd.concat([market_cache[symbol]["htf"], new_htf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
-                htf = market_cache[symbol]["htf"]
-                
-                new_mtf = ex.fetch_ohlcv_df(symbol, cfg.mtf, limit=5)
-                market_cache[symbol]["mtf"] = pd.concat([market_cache[symbol]["mtf"], new_mtf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
-                mtf = market_cache[symbol]["mtf"]
+                # --- STATE-AWARE ORDER CLEANUP ---
+                if not cfg.paper_mode:
+                    try:
+                        open_orders = ex.client.fetch_open_orders(symbol)
+                        pending_entries = [abs(p['entry']) for p in tm.pending_orders if p.get('symbol', cfg.symbol) == symbol]
+                        active_trades = [t for t in tm.open_trades if t.get('symbol', cfg.symbol) == symbol]
 
-                new_ltf = ex.fetch_ohlcv_df(symbol, cfg.ltf, limit=5)
-                market_cache[symbol]["ltf"] = pd.concat([market_cache[symbol]["ltf"], new_ltf]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True)
-                ltf = market_cache[symbol]["ltf"]
+                        for o in open_orders:
+                            is_protective = o.get('reduceOnly') or o.get('stopPrice') is not None or o.get('triggerPrice') is not None
+
+                            # If it's a protective stop/TP, but we have NO active trades for this symbol, it's a ghost trap. Delete it.
+                            if is_protective and len(active_trades) == 0:
+                                ex.client.cancel_order(o['id'], symbol)
+                                continue
+
+                            # If it's a protective stop/TP, and we DO have active trades, protect it.
+                            if is_protective:
+                                continue
+
+                            # Otherwise, it is a limit entry. Check if it is still valid in the Engine's pending queue.
+                            order_price = float(o.get('price') or o.get('stopPrice') or o.get('triggerPrice') or 0.0)
+                            is_active_pending = any(abs(order_price - pe) / (pe + 1e-9) < 0.001 for pe in pending_entries)
+
+                            # If it's not in our pending list, it's stale -> cancel it.
+                            if not is_active_pending and order_price > 0:
+                                ex.client.cancel_order(o['id'], symbol)
+                        log.debug(f"🧹 Cleaned up stale open orders & ghost traps for {symbol}")
+                    except Exception as e:
+                        log.warning(f"⚠️ Failed to cancel open orders for {symbol}: {e}")
+
+                # Fetch incremental update and apply to cache (Protect Rate Limits)
+                for timeframe, key, limit_n in [(cfg.htf, "htf", 250), (cfg.mtf, "mtf", 250), (cfg.ltf, "ltf", 500)]:
+                    new_data = ex.fetch_ohlcv_df(symbol, timeframe, limit=5).to_dict('records')
+                    existing_ts = {r['timestamp'] for r in market_cache[symbol][key]}
+                    for rec in new_data:
+                        if rec['timestamp'] not in existing_ts:
+                            market_cache[symbol][key].append(rec)
+                        else:
+                            for i, r in enumerate(market_cache[symbol][key]):
+                                if r['timestamp'] == rec['timestamp']:
+                                    market_cache[symbol][key][i] = rec
+                                    break
+                
+                htf = pd.DataFrame(list(market_cache[symbol]["htf"]))
+                mtf = pd.DataFrame(list(market_cache[symbol]["mtf"]))
+                ltf = pd.DataFrame(list(market_cache[symbol]["ltf"]))
                 
                 if ltf.empty or len(htf) < 2 or len(mtf) < 2 or len(ltf) < 2: continue
                 
@@ -622,9 +702,10 @@ def run_bot(args):
                 }
                 
                 # PHASE 1: PREVENT FEATURE REPAINTING (Strict evaluation on fully closed candle)
-                iH, iM, iL = len(htf)-2, len(mtf)-2, len(ltf)-2
+                iH, iM, iL = len(htf)-1, len(mtf)-1, len(ltf)-2
                 base = confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, pre_map, extras=extras)
                 base["timestamp"] = ltf.timestamp.iloc[-2]
+                base["symbol"] = symbol
                 
                 curr_bar = {"o":ltf.open.iloc[-2], "h":ltf.high.iloc[-2], "l":ltf.low.iloc[-2], "c":ltf.close.iloc[-2]}
                 
@@ -678,7 +759,9 @@ def run_bot(args):
                         dist = abs(plan['entry'] - plan['sl'])
                         
                         if dist > 0:
-                            qty = risk_amt / dist
+                            max_notional = cfg.account_notional * 10.0 # Hard 10x leverage cap
+                            raw_qty = risk_amt / dist
+                            qty = min(raw_qty, max_notional / plan['entry'])
                             
                             # Extract RVOL for Impact Calculation
                             rvol = plan['features'].get('rvol', 1.0)

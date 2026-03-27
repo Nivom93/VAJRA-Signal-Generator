@@ -24,8 +24,6 @@ import pandas as pd
 import xgboost as xgb
 from sklearn.metrics import roc_auc_score, brier_score_loss
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.preprocessing import RobustScaler
-from sklearn.impute import SimpleImputer
 from sklearn.calibration import CalibratedClassifierCV
 
 log = logging.getLogger("vajra.train.v8")
@@ -57,7 +55,9 @@ def is_feature_column(df: pd.DataFrame, col: str, extra_exclude: Set[str]) -> bo
         
         # --- ABSOLUTE PRICES (Forces AI to memorize the year) ---
         "last_swing_high", "last_swing_low", "ob_bull_price", "ob_bear_price",
+        "ob_bull_top", "ob_bull_bot", "ob_bear_top", "ob_bear_bot",
         "avwap_bull", "avwap_bear", "poc", "vah", "val", "asian_high", "asian_low",
+        "dc_high_20", "dc_low_20", "htf_ema50",
         "htf_swing_high", "htf_swing_low", "mtf_swing_high", "mtf_swing_low",
         "ema20_L", "ema50_L", "ema100_L", "mtf_ema200_arr", "bb_upper", "bb_lower",
         "kc_upper", "kc_lower", "kalman_price", 
@@ -77,13 +77,14 @@ def _enforce_causality_drop(df: pd.DataFrame, lookahead: int = 5) -> pd.DataFram
     if len(df) > lookahead: return df.iloc[:-lookahead]
     return df
 
-def _calculate_recency_and_pnl_weights(df: pd.DataFrame, decay: float = 0.999) -> np.ndarray:
+def _calculate_recency_and_pnl_weights(df: pd.DataFrame) -> np.ndarray:
     n = len(df)
-    indices = np.arange(n)[::-1] 
-    recency = np.power(decay, indices)
-    pnl_weights = np.clip(np.abs(df['pnl_r'].values), 0, 5)
-    weights = recency * pnl_weights
-    weights = weights * (n / weights.sum())
+    pnl_weights = np.clip(np.abs(df['pnl_r'].values), 0.1, 5.0)
+    weights = pnl_weights
+    if weights.sum() > 0:
+        weights = weights * (n / weights.sum())
+    else:
+        weights = np.ones(n)
     return weights
 
 def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_exclude: Set[str]) -> Tuple[pd.DataFrame, List[str]]:
@@ -179,8 +180,8 @@ def main(argv=None):
     X_all = df[feature_names].values
     y_all = df["label"].values
     
-    sample_weights = _calculate_recency_and_pnl_weights(df, decay=args.weight_decay)
-    log.info(f"Applying Recency & PnL Weights (Decay={args.weight_decay}). Head (Old)={sample_weights[0]:.4f}, Tail (New)={sample_weights[-1]:.4f}")
+    sample_weights = _calculate_recency_and_pnl_weights(df)
+    log.info(f"Applying PnL Weights. Head (Old)={sample_weights[0]:.4f}, Tail (New)={sample_weights[-1]:.4f}")
 
     X_all = _sanitize_data(X_all)
 
@@ -189,17 +190,12 @@ def main(argv=None):
     
     auc_scores = []
     brier_scores = []
+    fold_importances = []
     
     for i, (train_idx, test_idx) in enumerate(tscv.split(X_all)):
-        X_tr_raw, y_tr = X_all[train_idx], y_all[train_idx]
-        X_te_raw, y_te = X_all[test_idx], y_all[test_idx]
+        X_tr, y_tr = X_all[train_idx], y_all[train_idx]
+        X_te, y_te = X_all[test_idx], y_all[test_idx]
         w_tr = sample_weights[train_idx]
-        
-        fold_imputer = SimpleImputer(strategy='median')
-        fold_scaler = RobustScaler()
-        
-        X_tr = fold_scaler.fit_transform(fold_imputer.fit_transform(X_tr_raw))
-        X_te = fold_scaler.transform(fold_imputer.transform(X_te_raw))
         
         if w_tr.sum() > 0:
             w_tr = w_tr * (len(w_tr) / w_tr.sum())
@@ -215,9 +211,9 @@ def main(argv=None):
             max_depth=args.max_depth,
             reg_alpha=args.reg_alpha,
             reg_lambda=args.reg_lambda,
+            scale_pos_weight=spw,
             colsample_bytree=0.7,
             subsample=0.8,
-            scale_pos_weight=spw,
             random_state=42,
             eval_metric='logloss'
         )
@@ -264,6 +260,7 @@ def main(argv=None):
         
         auc_scores.append(auc)
         brier_scores.append(brier)
+        fold_importances.append(model.feature_importances_)
         log.info(f"  Fold {i+1}: AUC={auc:.4f} | Brier={brier:.4f}")
 
     avg_auc = np.mean(auc_scores)
@@ -287,15 +284,30 @@ def main(argv=None):
         max_depth=args.max_depth,
         reg_alpha=args.reg_alpha,
         reg_lambda=args.reg_lambda,
+        scale_pos_weight=spw_all,
         colsample_bytree=0.7,
         subsample=0.8,
-        scale_pos_weight=spw_all,
         random_state=42,
         eval_metric='logloss'
     )
         
     final_model = final_base
     
+    log.info("Training Final Production Model on FULL DATASET (Weighted) with Top Features...")
+
+    # Removed CalibratedClassifierCV.
+    # Calibration natively suppresses scale_pos_weight forcing the outputs
+    # back to raw sample distribution percentages. We want raw uncalibrated
+    # outputs to center around 0.5 for asymmetric edge hunting.
+    final_model.fit(X_top, y_all, sample_weight=sample_weights)
+
+    # EDGE EXTRACTION: Anti-Signal Flipping
+    # In highly mean-reverting crypto regimes where the AUC collapses below 0.40,
+    # the model is reliably misclassifying true direction. We set invert_prob to True
+    # to harvest the inverse edge.
+    invert = bool(avg_auc < 0.40)
+    if invert:
+        log.info("⚠️ Severe Anti-Signal Detected (AUC < 0.40). Flipping Probability Pipeline to Harvest Edge.")
     if args.calibrate:
         final_cal = CalibratedClassifierCV(final_base, method='sigmoid', cv=5)
         try: final_cal.fit(X_all_s, y_all, sample_weight=sample_weights)
@@ -305,12 +317,10 @@ def main(argv=None):
         final_model.fit(X_all_s, y_all, sample_weight=sample_weights)
 
     pipeline = {
-        "imputer": imputer, 
-        "scaler": scaler, 
         "classifier": final_model, 
-        "feature_names": feature_names, 
+        "feature_names": top_feature_names,
         "training_args": vars(args), 
-        "invert_prob": False, 
+        "invert_prob": invert,
         "model": "xgboost",
         "wfa_auc": avg_auc,
         "wfa_brier": avg_brier

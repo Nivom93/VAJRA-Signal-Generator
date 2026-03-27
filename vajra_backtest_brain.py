@@ -57,6 +57,10 @@ def run_backtest_with_brain(args, preloaded=None):
     if preloaded is None: pre = bt_helpers._preload_or_fetch(args)
     else: pre = preloaded
     htf, mtf, ltf = pre.htf, pre.mtf, pre.ltf
+
+    for df in (htf, mtf, ltf):
+        df.sort_values("timestamp", inplace=True, ignore_index=True)
+
     btc = pre.btc if pre.btc is not None else htf.copy()
 
     # --- CALC BTC TREND (Aligned) ---
@@ -99,19 +103,21 @@ def run_backtest_with_brain(args, preloaded=None):
     ltf_iter = ltf[(ltf["timestamp"] >= since_ms) & (ltf["timestamp"] < until_ms)]
 
     log.info("Downloading Macro Context for Backtester...")
-    dxy_aligned = fetch_macro_trend("DX-Y.NYB", ltf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(ltf))
-    spx_aligned = fetch_macro_trend("^GSPC", ltf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(ltf))
+    dxy_aligned = fetch_macro_trend("DX=F", ltf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(ltf))
+    spx_aligned = fetch_macro_trend("ES=F", ltf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(ltf))
     oi_aligned = fetch_delta_oi(ExchangeWrapper(cfg), cfg.symbol, cfg.ltf, ltf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(ltf))
 
+    for row in ltf_iter.itertuples():
     def _process_bar(row, original_idx):
         ts = int(row.timestamp)
         iH = np.searchsorted(htf['timestamp'].values, ts, side='right') - 1
         iM = np.searchsorted(mtf['timestamp'].values, ts, side='right') - 1
-        iL = int(original_idx)
+        iL = int(row.Index)
 
         if iH < 0 or iM < 0: return
 
         bar = {"o": row.open, "h": row.high, "l": row.low, "c": row.close}
+        closed = tm.step_bar(cfg.symbol, float(row.open), float(row.high), float(row.low), float(row.close), ts=ts)
         closed = tm.step_bar(bar["o"], bar["h"], bar["l"], bar["c"])
         all_closed.extend(closed)
 
@@ -130,6 +136,7 @@ def run_backtest_with_brain(args, preloaded=None):
 
         base = confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, pre_map, extras=extras)
         base["timestamp"] = ts 
+        base["symbol"] = cfg.symbol
 
         plan = plan_trade_with_brain(cfg, brain, base, adv_features, iH, iM, iL, pre_l)
         if plan: tm.submit_plan(plan, bar)
@@ -154,9 +161,9 @@ def run_backtest_with_brain(args, preloaded=None):
             if 'created_ts' in df_export.columns:
                 df_export['created_date'] = pd.to_datetime(df_export['created_ts'], unit='ms')
             if 'fill_ts' in df_export.columns:
-                df_export['fill_date'] = pd.to_datetime(df_export['fill_ts'], unit='s')
+                df_export['fill_date'] = pd.to_datetime(df_export['fill_ts'], unit='ms')
             if 'exit_ts' in df_export.columns:
-                df_export['exit_date'] = pd.to_datetime(df_export['exit_ts'], unit='s')
+                df_export['exit_date'] = pd.to_datetime(df_export['exit_ts'], unit='ms')
 
             desired_cols = [
                 'fill_date', 'exit_date', 'side', 'strategy', 'prob', 'rr',

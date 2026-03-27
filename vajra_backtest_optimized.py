@@ -239,14 +239,14 @@ def run_backtest(args, preloaded: Optional[Preloaded]=None, markets_data=None):
     if tqdm and getattr(args, "progress", "auto") != "off":
         progress = tqdm(total=len(ltf_iter), desc="Backtest", mininterval=1.0) 
 
-    for idx, (_, rowL) in enumerate(ltf_iter.iterrows()):
-        ts = int(rowL["timestamp"])
+    for rowL in ltf_iter.itertuples():
+        ts = int(rowL.timestamp)
 
         while iH+1 < len(htf) and int(htf["timestamp"].iloc[iH+1]) <= ts: iH += 1
         while iM+1 < len(mtf) and int(mtf["timestamp"].iloc[iM+1]) <= ts: iM += 1
-        iL = int(ltf.index.get_loc(rowL.name))
+        iL = int(ltf.index.get_loc(rowL.Index))
 
-        closed = tm.step_bar(float(rowL["open"]), float(rowL["high"]), float(rowL["low"]), float(rowL["close"]))
+        closed = tm.step_bar(cfg.symbol, float(rowL.open), float(rowL.high), float(rowL.low), float(rowL.close), ts=ts)
         if closed: all_closed.extend(closed)
 
         # Inject BTC Context & Orderbook Stub
@@ -260,12 +260,13 @@ def run_backtest(args, preloaded: Optional[Preloaded]=None, markets_data=None):
         }
 
         feats = confluence_features(cfg, htf, mtf, ltf, iH=iH, iM=iM, iL=iL, precomp=pre_map, extras=extras)
+        feats["symbol"] = cfg.symbol
         
         # Test baseline engine with NO brain
         plan = plan_trade_with_brain(cfg, None, feats, adv_features, iH, iM, iL, pre_ltf)
         
         if plan:
-            tm.submit_plan(plan, {"o": float(rowL["open"]), "h": float(rowL["high"]), "l": float(rowL["low"]), "c": float(rowL["close"])})
+            tm.submit_plan(plan, {"o": float(rowL.open), "h": float(rowL.high), "l": float(rowL.low), "c": float(rowL.close)})
 
         if progress: progress.update(1)
 
