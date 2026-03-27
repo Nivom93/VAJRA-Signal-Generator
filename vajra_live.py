@@ -503,12 +503,9 @@ def run_bot(args):
                             
                             if fill_price:
                                 plan['entry'] = fill_price 
-                                
-                                # FIX 2: EXECUTION DESYNC
-                                sl_order_id = None
 
                                 # Force Open instantly using the updated TradeManager args
-                                tm.submit_plan(plan, curr_bar, force_open=True, fill_price=fill_price, sl_order_id=sl_order_id)
+                                tm.submit_plan(plan, curr_bar, force_open=True, fill_price=fill_price, sl_order_id=None)
                         else:
                             log.warning(f"[{symbol}] Risk Distance is 0. Skipping.")
                     else:
