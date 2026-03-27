@@ -118,14 +118,12 @@ class AutoRetrainer(threading.Thread):
 
 class RealExecutionManager:
     """
-    Handles order execution.
-    - Paper Mode: Simulates realistic limit order waits + Quadratic Impact.
-    - Real Mode: Implements HFT Limit chase OR Breakout Trigger + Hard Stops.
+    Handles PAPER execution only for pure Signal Generation.
+    Implements Quadratic Impact simulation.
     """
     def __init__(self, client, cfg):
         self.client = client
         self.cfg = cfg
-        self.max_retries = 3
         self.wait_time = 5 # seconds
 
     def get_best_book_price(self, symbol, side):
@@ -145,48 +143,43 @@ class RealExecutionManager:
         """
         c_side = 'buy' if side == 'long' else 'sell'
         
-        # --- PAPER MODE ---
-        if is_paper:
-            log.info(f"📝 SIMULATION: Signal @ {price:.2f}. Mode: {plan_type.upper()} | RVOL: {rvol:.2f}")
-            
-            curr_px = self.get_best_book_price(symbol, c_side) or price
-            
-            # QUADRATIC SLIPPAGE (Protocol v34.0)
-            penalty_pct = 0.0001 * (rvol ** 2)
-            if rvol > 5.0 and side == 'short':
-                penalty_pct *= 1.5
-            
-            impact = price * penalty_pct
-            
-            # Worsen the price
-            if side == 'long': curr_px += impact
-            else: curr_px -= impact
-            
-            if impact > 0:
-                log.warning(f"📉 Quadratic Impact! RVOL {rvol:.1f} caused {impact:.2f} ({penalty_pct*100:.3f}%) slippage.")
+        log.info(f"📝 SIMULATION: Signal @ {price:.2f}. Mode: {plan_type.upper()} | RVOL: {rvol:.2f}")
 
-            if plan_type == 'market':
-                log.info(f"📝 SIMULATION: Market Order Filled Instantly @ {curr_px:.2f} (Incl. Impact)")
+        curr_px = self.get_best_book_price(symbol, c_side) or price
+
+        # QUADRATIC SLIPPAGE (Protocol v34.0)
+        penalty_pct = 0.0001 * (rvol ** 2)
+        if rvol > 5.0 and side == 'short':
+            penalty_pct *= 1.5
+
+        impact = price * penalty_pct
+
+        # Worsen the price
+        if side == 'long': curr_px += impact
+        else: curr_px -= impact
+
+        if impact > 0:
+            log.warning(f"📉 Quadratic Impact! RVOL {rvol:.1f} caused {impact:.2f} ({penalty_pct*100:.3f}%) slippage.")
+
+        if plan_type == 'market':
+            log.info(f"📝 SIMULATION: Market Order Filled Instantly @ {curr_px:.2f} (Incl. Impact)")
+            return curr_px
+        elif plan_type == 'breakout':
+            # Long: Enter if Price >= Trigger. Short: Enter if Price <= Trigger
+            triggered = (c_side == 'buy' and curr_px >= price) or (c_side == 'sell' and curr_px <= price)
+            
+            if not triggered:
+                log.warning(f"📝 SIMULATION: Breakout Trigger {price} not hit (Curr: {curr_px}). Order Pending/Skipped.")
+                return None
+            else:
+                log.info(f"📝 SIMULATION: Breakout Triggered! Filling at {curr_px:.2f} (Incl. Impact)")
                 return curr_px
-            elif plan_type == 'breakout':
-                # Long: Enter if Price >= Trigger. Short: Enter if Price <= Trigger
-                triggered = (c_side == 'buy' and curr_px >= price) or (c_side == 'sell' and curr_px <= price)
-                
-                if not triggered:
-                    log.warning(f"📝 SIMULATION: Breakout Trigger {price} not hit (Curr: {curr_px}). Order Pending/Skipped.")
-                    return None 
-                else:
-                    log.info(f"📝 SIMULATION: Breakout Triggered! Filling at {curr_px:.2f} (Incl. Impact)")
-                    return curr_px
-            
-            # Standard Limit Logic
-            time.sleep(self.wait_time) 
-            final_px = price + impact if side == 'long' else price - impact
-            log.info(f"📝 SIMULATION: Order Filled @ {final_px:.2f}")
-            return final_px
 
-        # This bot is now a Pure Paper Trading / Signal Generation Terminal.
-        # It never posts active orders to the exchange.
+        # Standard Limit Logic
+        time.sleep(self.wait_time)
+        final_px = price + impact if side == 'long' else price - impact
+        log.info(f"📝 SIMULATION: Order Filled @ {final_px:.2f}")
+        return final_px
 
 # --- MAIN BOT LOGIC ---
 
@@ -503,12 +496,9 @@ def run_bot(args):
                             
                             if fill_price:
                                 plan['entry'] = fill_price 
-                                
-                                # FIX 2: EXECUTION DESYNC
-                                sl_order_id = None
 
                                 # Force Open instantly using the updated TradeManager args
-                                tm.submit_plan(plan, curr_bar, force_open=True, fill_price=fill_price, sl_order_id=sl_order_id)
+                                tm.submit_plan(plan, curr_bar, force_open=True, fill_price=fill_price, sl_order_id=None)
                         else:
                             log.warning(f"[{symbol}] Risk Distance is 0. Skipping.")
                     else:
