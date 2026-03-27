@@ -1192,20 +1192,6 @@ class BrainLearningManager:
         b = self.brains.get(side)
         if not b: return 0.0
         try:
-            d = {**base}
-            for k, v in adv.items():
-                if hasattr(v, '__getitem__') and len(v) > iL:
-                    val = v[iL]
-                    d[k] = float(val) if np.isfinite(val) else 0.0
-                    if d[k] > 1e6: d[k] = 1e6
-                    elif d[k] < -1e6: d[k] = -1e6
-                else: d[k] = 0.0
-            d.update({
-                "pos_vs_swing_h": (px-pre_l.last_sh[iL])/px if px else 0.0,
-                "pos_vs_swing_l": (px-pre_l.last_sl[iL])/px if px else 0.0,
-                "dist_to_mtf_ema200_pct": (px-adv['mtf_ema200_arr'][iM])/px*100 if px and 'mtf_ema200_arr' in adv else 0.0,
-                "side": 1.0 if side=="long" else 0.0
-            })
             vec = self._build_vec(side, base, adv, iL, px, pre_l, b['feature_names'])
             # CRITICAL FIX: Clip all array values before casting to prevent float32 memory overflow
             vec = np.clip(np.nan_to_num(vec, nan=0.0), -1e10, 1e10).astype(np.float32)
@@ -1416,34 +1402,23 @@ class TradeManager:
             
             can_tp = t.get('can_tp_this_bar', True)
             if not can_tp:
-                # Reset for the next bar
                 t['can_tp_this_bar'] = True
 
-            # Real-time PnL calc for Management
-            # FIX: Use locked initial_risk_unit to prevent division-by-zero explosion on Breakeven/Trailing
             raw_risk = max(t.get('initial_risk_unit', abs(t['entry'] - t['sl'])), 1e-9)
 
-            # Unrealized PnL Calculation
             curr_pnl = (c - entry) if side == 'long' else (entry - c)
             t['pnl_r'] = (curr_pnl / raw_risk)
 
-            # True Intra-Bar Maximum Favorable Excursion (MFE)
-            if side == 'long':
-                intra_max_pnl = (h - entry)
-            else:
-                intra_max_pnl = (entry - l)
+            intra_max_pnl = (h - entry) if side == 'long' else (entry - l)
             intra_max_pnl_r = (intra_max_pnl / raw_risk)
 
             t['max_unrealized_pnl_r'] = max(t.get('max_unrealized_pnl_r', -999.0), t['pnl_r'], intra_max_pnl_r)
-            
             t['max_pnl_r'] = max(t.get('max_pnl_r', -99.0), intra_max_pnl_r)
 
             hit_sl = False
             hit_tp = False
             exit_reason = ''
             
-            is_entry_bar = (t.get('bars_open', 1) == 1)
-
             if side == 'long':
                 if l <= sl: hit_sl = True; exit_reason = 'sl'
                 elif h >= tp and can_tp: hit_tp = True; exit_reason = 'tp'
