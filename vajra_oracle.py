@@ -53,58 +53,65 @@ def get_llm_sentiment(titles):
         return 0.0
 
     try:
-        import google.generativeai as genai
-    except ImportError:
-        log.error("google-generativeai package not found. Install via: pip install google-generativeai")
-        return 0.0
-
-    try:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            log.warning("GEMINI_API_KEY not found in environment. Returning neutral sentiment (0.0).")
-            return 0.0
-
-        # Configure Google Gemini SDK
-        genai.configure(api_key=api_key)
-
-        # Initialize the specific high-speed reasoning model
-        model = genai.GenerativeModel('gemini-2.5-flash')
-
-        # Construct Prompt Geometry
-        system_instructions = (
-            "You are an elite quantitative macro analyst. "
-            "Read these recent crypto headlines. "
-            "Output a SINGLE FLOAT between -1.0 (extreme bearish) and 1.0 (extreme bullish). "
-            "Output NOTHING ELSE. Do not include markdown, text, or explanation. Just the number."
-        )
-
-        headlines_text = "\n".join([f"- {title}" for title in titles])
-        full_prompt = system_instructions + "\n\n" + headlines_text
-
-        # Generate Content securely with strict algorithmic parameters
-        response = model.generate_content(
-            full_prompt,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.0,
-                max_output_tokens=10,
+        import openai
+        if os.environ.get("OPENAI_API_KEY"):
+            client = openai.OpenAI()
+            prompt = (
+                "You are an elite quantitative macro analyst. "
+                "Read these recent crypto headlines. "
+                "Output a SINGLE FLOAT between -1.0 (extreme bearish) and 1.0 (extreme bullish). "
+                "Output NOTHING ELSE."
             )
-        )
-
-        result_text = response.text.strip()
-        log.debug(f"Raw Gemini Response: {result_text}")
-
-        # Safely extract the float using Regex to prevent hallucination crashes
-        match = re.search(r"[-+]?\d*\.\d+|\d+", result_text)
-        if match:
-            sentiment_score = float(match.group())
-            # Ensure strictly mathematically bounded between -1.0 and 1.0
+            headlines_text = "\n".join([f"- {title}" for title in titles])
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": headlines_text}
+                ],
+                temperature=0.0,
+                max_tokens=10
+            )
+            result_text = response.choices[0].message.content.strip()
+            sentiment_score = float(result_text)
             return max(-1.0, min(1.0, sentiment_score))
-        else:
-            log.warning(f"Could not parse float from Gemini response: {result_text}")
-            return 0.0
 
     except Exception as e:
-        log.error(f"Failed to execute Gemini LLM sentiment extraction: {e}")
+        log.warning(f"OpenAI API unavailable or failed ({e}). Falling back to Free Oracle...")
+
+    # ==========================================================
+    # FREE MACRO ORACLE FALLBACK (Alternative.me + Basic NLP)
+    # ==========================================================
+    log.info("Executing 100% FREE Macro Oracle Fallback (Fear & Greed + RSS NLP).")
+    try:
+        # 1. Alternative.me Crypto Fear & Greed Index
+        fg_url = "https://api.alternative.me/fng/?limit=1"
+        req = urllib.request.Request(fg_url, headers={'User-Agent': 'Mozilla/5.0'})
+        fg_score = 0.0
+        with urllib.request.urlopen(req, timeout=10) as response:
+            fg_data = json.loads(response.read().decode('utf-8'))
+            if 'data' in fg_data and len(fg_data['data']) > 0:
+                raw_fg = float(fg_data['data'][0]['value']) # 0 to 100
+                fg_score = (raw_fg - 50.0) / 50.0 # Map to -1.0 to 1.0
+
+        # 2. Basic Keyword NLP on RSS Titles
+        bull_words = {'surge', 'rally', 'bull', 'high', 'gain', 'jump', 'soar', 'approve', 'adoption', 'up', 'buy', 'long'}
+        bear_words = {'crash', 'plunge', 'bear', 'low', 'loss', 'drop', 'dive', 'reject', 'ban', 'down', 'sell', 'short', 'hack', 'scam', 'sec'}
+
+        nlp_score = 0.0
+        if titles:
+            bull_count = sum(1 for t in titles for w in bull_words if w in t.lower())
+            bear_count = sum(1 for t in titles for w in bear_words if w in t.lower())
+            total = bull_count + bear_count
+            if total > 0:
+                nlp_score = (bull_count - bear_count) / total
+
+        # 3. Blended Sentiment (Weighted 70% F&G, 30% NLP)
+        final_sentiment = (0.7 * fg_score) + (0.3 * nlp_score)
+        return max(-1.0, min(1.0, final_sentiment))
+
+    except Exception as fallback_e:
+        log.error(f"Free Oracle Fallback completely failed: {fallback_e}")
         return 0.0
 
 def main():

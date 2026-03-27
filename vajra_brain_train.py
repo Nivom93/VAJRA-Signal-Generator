@@ -124,9 +124,17 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
     df = _enforce_causality_drop(df, lookahead=5)
     log.info(f"Causality Check: Dropped {initial_len - len(df)} rows.")
     
+    if len(df) == 0:
+        raise ValueError("0 samples remain after filtering. Aborting training.")
+
     df["entry_ts_dt"] = pd.to_datetime(df["entry_ts"], unit="ms", utc=True)
     
     candidates = [c for c in df.columns if is_feature_column(df, c, extra_exclude)]
+
+    # FORCE INCLUSION OF NEW SENTIENT REGIME SCORE
+    if "sentient_regime_score" in df.columns and "sentient_regime_score" not in candidates:
+        candidates.append("sentient_regime_score")
+
     keep = []
     for c in candidates:
         s = pd.to_numeric(df[c], errors='coerce')
@@ -138,29 +146,30 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
     return df[keep + ["label", "entry_ts_dt", "pnl_r"]].copy(), sorted(keep)
 
 def _sanitize_data(X: np.ndarray) -> np.ndarray:
-    X = X.copy()
-    X[np.isinf(X)] = np.nan
-    limit = 1e12
-    X[np.abs(X) > limit] = np.nan
-    return X.astype(np.float32)
+    return np.clip(np.nan_to_num(X, nan=0.0), -1e10, 1e10).astype(np.float32)
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--events", nargs="+", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--min-win-r", type=float, default=0.0)
-    ap.add_argument("--n-estimators", type=int, default=300)
+    ap.add_argument("--n-estimators", type=int, default=100)
     ap.add_argument("--learning-rate", type=float, default=0.05)
     ap.add_argument("--max-depth", type=int, default=3)
     ap.add_argument("--reg-alpha", type=float, default=0.1)
-    ap.add_argument("--reg-lambda", type=float, default=1.0)
+    ap.add_argument("--reg-lambda", type=float, default=5.0)
     ap.add_argument("--calibrate", action="store_true")
     ap.add_argument("--filter-side", choices=["all","long","short"], default="all")
     ap.add_argument("--exclude-cols", type=str, default="")
     ap.add_argument("--weight-decay", type=float, default=0.999)
     ap.add_argument("--wfa-folds", type=int, default=5)
+    ap.add_argument("--tune", action="store_true", help="Enable RandomizedSearchCV for hyperparameter tuning.")
     
     args = ap.parse_args(argv)
+
+    # BULLETPROOF TRAINING PARAMS: Forcefully prevent users from extreme overfitting via CLI
+    args.max_depth = min(args.max_depth, 7)
+    args.n_estimators = min(args.n_estimators, 300)
 
     try:
         df, feature_names = load_events_df(args.events, args.min_win_r, args.filter_side, set(_parse_extras(args.exclude_cols)))
@@ -176,8 +185,8 @@ def main(argv=None):
 
     X_all = _sanitize_data(X_all)
 
-    log.info(f"Running Walk-Forward Analysis ({args.wfa_folds} folds) on ALL Features...")
-    tscv = TimeSeriesSplit(n_splits=args.wfa_folds)
+    log.info(f"Running Walk-Forward Analysis ({args.wfa_folds} folds)...")
+    tscv = TimeSeriesSplit(n_splits=args.wfa_folds, gap=10)
     
     auc_scores = []
     brier_scores = []
@@ -191,8 +200,11 @@ def main(argv=None):
         if w_tr.sum() > 0:
             w_tr = w_tr * (len(w_tr) / w_tr.sum())
 
-        spw = np.sum(y_tr == 0) / max(1, np.sum(y_tr == 1))
-        
+        # DAMPENED MINORITY CLASS STARVATION (Prevent AI from predicting 0 exclusively)
+        num_pos = int(np.sum(y_tr.astype(int)))
+        num_neg = int(len(y_tr)) - num_pos
+        spw = np.sqrt(num_neg / max(num_pos, 1))
+
         clf = xgb.XGBClassifier(
             n_estimators=args.n_estimators,
             learning_rate=args.learning_rate,
@@ -205,9 +217,32 @@ def main(argv=None):
             random_state=42,
             eval_metric='logloss'
         )
+
+        # Hyperparameter Tuning Support
+        if getattr(args, 'tune', False):
+            from sklearn.model_selection import RandomizedSearchCV
+            param_dist = {
+                'learning_rate': [0.01, 0.05, 0.1],
+                'max_depth': [3, 5, 7],
+                'n_estimators': [100, 200, 300],
+                'reg_lambda': [1.0, 5.0, 10.0],
+                'subsample': [0.6, 0.8, 1.0],
+                'colsample_bytree': [0.6, 0.8, 1.0]
+            }
+            random_search = RandomizedSearchCV(clf, param_distributions=param_dist, n_iter=10, scoring='roc_auc', cv=3, random_state=42)
+            random_search.fit(X_tr, y_tr, sample_weight=w_tr)
+            clf = random_search.best_estimator_
+            log.info(f"    Tuned Params: {random_search.best_params_}")
             
-        clf.fit(X_tr, y_tr, sample_weight=w_tr, eval_set=[(X_te, y_te)], verbose=False)
-        model = clf
+        clf.fit(X_tr, y_tr, sample_weight=w_tr)
+        
+        if args.calibrate:
+            cal_clf = CalibratedClassifierCV(clf, method='sigmoid', cv=3)
+            try: cal_clf.fit(X_tr, y_tr, sample_weight=w_tr)
+            except: cal_clf.fit(X_tr, y_tr) 
+            model = cal_clf
+        else:
+            model = clf
             
         probs = model.predict_proba(X_te)[:, 1]
         
@@ -232,19 +267,16 @@ def main(argv=None):
     avg_brier = np.mean(brier_scores)
     log.info(f"✅ WFA RESULTS: Avg AUC = {avg_auc:.4f} | Avg Brier = {avg_brier:.4f}")
 
-    log.info("Feature Pruning: Evaluating aggregated feature importance...")
-    avg_importances = np.mean(fold_importances, axis=0)
-
-    # Select top 30 features
-    num_top_features = min(30, len(feature_names))
-    top_indices = np.argsort(avg_importances)[::-1][:num_top_features]
-
-    top_feature_names = [feature_names[i] for i in top_indices]
-    log.info(f"Selected Top {num_top_features} Features: {top_feature_names}")
-
-    X_top = X_all[:, top_indices]
-
-    spw_all = np.sum(y_all == 0) / max(1, np.sum(y_all == 1))
+    log.info("Training Final Production Model on FULL DATASET (Weighted)...")
+    
+    imputer = SimpleImputer(strategy='median')
+    scaler = RobustScaler()
+    X_all_s = scaler.fit_transform(imputer.fit_transform(X_all))
+    
+    # DAMPENED MINORITY CLASS STARVATION (FULL DATASET)
+    num_pos_all = int(np.sum(y_all.astype(int)))
+    num_neg_all = int(len(y_all)) - num_pos_all
+    spw_all = np.sqrt(num_neg_all / max(num_pos_all, 1))
 
     final_base = xgb.XGBClassifier(
         n_estimators=args.n_estimators,
@@ -276,6 +308,13 @@ def main(argv=None):
     invert = bool(avg_auc < 0.40)
     if invert:
         log.info("⚠️ Severe Anti-Signal Detected (AUC < 0.40). Flipping Probability Pipeline to Harvest Edge.")
+    if args.calibrate:
+        final_cal = CalibratedClassifierCV(final_base, method='sigmoid', cv=5)
+        try: final_cal.fit(X_all_s, y_all, sample_weight=sample_weights)
+        except: final_cal.fit(X_all_s, y_all)
+        final_model = final_cal
+    else:
+        final_model.fit(X_all_s, y_all, sample_weight=sample_weights)
 
     pipeline = {
         "classifier": final_model, 

@@ -91,7 +91,17 @@ def fetch_macro_trend(ticker_symbol: str, ltf_timestamps: pd.Series) -> np.ndarr
 
         trend_series.index = trend_series.index + 86400000 
         
-        aligned = trend_series.shift(1).reindex(ltf_timestamps, method='ffill').fillna(0.0).values
+        # PREVENT DUPLICATE INDEX CRASHES (Source)
+        trend_series = trend_series[~trend_series.index.duplicated(keep='last')]
+
+        # PREVENT DUPLICATE INDEX CRASHES (Target)
+        # Reindex against unique timestamps first, then map back to the original full length
+        unique_ltf = ltf_timestamps.drop_duplicates()
+        aligned_unique = trend_series.shift(1).reindex(unique_ltf, method='ffill').fillna(0.0)
+
+        # Create a series with original ltf_timestamps and map the unique values to it
+        aligned = pd.Series(index=ltf_timestamps).fillna(aligned_unique).values
+
         return aligned
     except Exception as e:
         log.warning(f"yfinance failed for {ticker_symbol}: {e}")
@@ -142,7 +152,7 @@ def fetch_delta_oi(exw: ExchangeWrapper, symbol: str, timeframe: str, ltf_timest
                 return np.zeros(len(ltf_timestamps))
             
             df['openInterestValue'] = pd.to_numeric(df['openInterestValue'], errors='coerce')
-            vals = df['openInterestValue'].ffill().values
+            vals = df['openInterestValue'].ffill().fillna(0.0).values
             
             if len(vals) > 1:
                 delta = np.zeros_like(vals)
@@ -159,6 +169,29 @@ def fetch_delta_oi(exw: ExchangeWrapper, symbol: str, timeframe: str, ltf_timest
     except Exception as e:
         log.warning(f"CCXT fetch_oi failed for {symbol}: {e}")
     return np.zeros(len(ltf_timestamps))
+
+def _build_full_features(base, adv_features, iH, iM, iL, len_htf, len_mtf, len_ltf, ts, pre_l):
+    full_feats = {**base}
+    for k, v_arr in adv_features.items():
+         if not hasattr(v_arr, '__getitem__') or isinstance(v_arr, (str, float, int)):
+             full_feats[k] = v_arr; continue
+         arr_len = len(v_arr)
+         idx = -1
+         if arr_len == len_ltf: idx = iL
+         # UNCLOSED CANDLE LEAK PATCHED: Force historical 1-shift
+         elif arr_len == len_mtf: idx = max(0, iM - 1)
+         elif arr_len == len_htf: idx = max(0, iH - 1)
+         else: continue
+         if 0 <= idx < arr_len:
+             val = v_arr[idx]
+             full_feats[k] = float(val) if np.isfinite(val) else 0.0
+
+    full_feats["rsi_14"] = float(pre_l.rsi14[iL]) if iL < len(pre_l.rsi14) else 50.0
+
+    entry_dt = pd.to_datetime(ts, unit="ms", utc=True)
+    full_feats["hour_of_day"] = entry_dt.hour
+    full_feats["day_of_week"] = entry_dt.dayofweek
+    return full_feats
 
 def main():
     p = argparse.ArgumentParser()
@@ -245,16 +278,7 @@ def main():
     pre_h, pre_m, pre_l = Precomp(htf), Precomp(mtf), Precomp(ltf)
     pre_map = {"htf": pre_h, "mtf": pre_m, "ltf": pre_l}
 
-    # Synthetic Bid-Ask Imbalance Proxy (Using wicks vs body size as order flow proxy since historical L2 is unavailable)
-    range_l = np.maximum(pre_l.h - pre_l.l, 1e-9)
-    body_top = np.maximum(pre_l.c, pre_l.o)
-    body_bot = np.minimum(pre_l.c, pre_l.o)
-    upper_wick = pre_l.h - body_top
-    lower_wick = body_bot - pre_l.l
-    bid_ask_proxy = 0.5 + (lower_wick - upper_wick) / (2 * range_l)
-    bid_ask_aligned = pd.Series(bid_ask_proxy).shift(1).fillna(0.5).values
-
-    btc_s_close = pd.Series(btc_c, index=btc["timestamp"]).shift(1).reindex(ltf["timestamp"], method='ffill').bfill().values
+    btc_s_close = pd.Series(btc_c, index=btc["timestamp"]).shift(1).reindex(ltf["timestamp"], method='ffill').fillna(0.0).values
     if len(btc_s_close) != len(ltf):
         btc_s_close = np.resize(btc_s_close, len(ltf))
 
@@ -276,25 +300,25 @@ def main():
     
     len_ltf = len(ltf); len_mtf = len(mtf); len_htf = len(htf)
     
-    for row in ltf_iter.itertuples():
+    def _process_bar(row, original_idx):
         ts = int(row.timestamp)
         
         iH = np.searchsorted(htf['timestamp'].values, ts, side='right') - 1
         iM = np.searchsorted(mtf['timestamp'].values, ts, side='right') - 1
         iL = int(row.Index)
         
-        if iH < 0 or iM < 0: continue
+        if iH < 0 or iM < 0: return
 
         bar = {"o": row.open, "h": row.high, "l": row.low, "c": row.close}
-        exits = tm.step_bar(cfg.symbol, bar["o"], bar["h"], bar["l"], bar["c"], ts=ts)
+        exits = tm.step_bar(bar["o"], bar["h"], bar["l"], bar["c"])
         
         for cl in exits:
             meta = next((m for m in open_meta if m["key"] == cl.get("key")), None)
             if meta:
                 open_meta.remove(meta)
-                # PURE SIGNAL EDGE: 1.0 if the trade ever reached +1.0R (Maximum Favorable Excursion), regardless of exit reason.
-                max_unrealized = cl.get("max_unrealized_pnl_r", cl.get("pnl_r", 0.0))
-                meta_label = 1.0 if max_unrealized >= 1.0 else 0.0
+                # PURE "SET AND FORGET" MFE META-LABELING:
+                # 1.0 if it hits TP, or if the trade surged massively (+2.2R) before noise took it out
+                meta_label = 1.0 if cl.get("exit_reason") == "tp" or cl.get("max_pnl_r", 0.0) >= 2.2 else 0.0
                 
                 if -50 < cl["pnl_r"] < 50:
                     events.append({
@@ -332,27 +356,10 @@ def main():
         
         if plan:
             plan['key'] = f"{plan['side']}-{ts}"
-            full_feats = {**base}
             
-            for k, v_arr in adv_features.items():
-                 if not hasattr(v_arr, '__getitem__') or isinstance(v_arr, (str, float, int)):
-                     full_feats[k] = v_arr; continue
-                 arr_len = len(v_arr)
-                 idx = -1
-                 if arr_len == len_ltf: idx = iL
-                 # UNCLOSED CANDLE LEAK PATCHED: Force historical 1-shift 
-                 elif arr_len == len_mtf: idx = max(0, iM - 1)
-                 elif arr_len == len_htf: idx = max(0, iH - 1)
-                 else: continue
-                 if 0 <= idx < arr_len:
-                     val = v_arr[idx]
-                     full_feats[k] = float(val) if np.isfinite(val) else 0.0
-
-            px = bar["c"]
-            
-            entry_dt = pd.to_datetime(ts, unit="ms", utc=True)
-            full_feats["hour_of_day"] = entry_dt.hour
-            full_feats["day_of_week"] = entry_dt.dayofweek
+            full_feats = _build_full_features(
+                base, adv_features, iH, iM, iL, len_htf, len_mtf, len_ltf, ts, pre_l
+            )
             full_feats["side"] = 1.0 if plan["side"] == "long" else 0.0
 
             if tm.submit_plan(plan, bar):
@@ -362,6 +369,9 @@ def main():
                     "rr": plan["rr"], 
                     "key": plan.get("key")
                 })
+
+    for row in ltf_iter.itertuples():
+        _process_bar(row, row.Index)
 
     with _open_out(args.out) as f:
         for ev in events:

@@ -16,16 +16,16 @@ def _strategy_overrides(cfg):
     # --- EXECUTION DEFAULTS (PURE LIMIT MODE) ---
     cfg.execution_style = 'limit'     
     cfg.pullback_atr_mult = 0.05        
-    cfg.slippage_bps = 0.0
-    cfg.maker_fee_bps = 0.0
-    cfg.taker_fee_bps = 0.0
+    cfg.slippage_bps = 2.0
+    cfg.maker_fee_bps = 2.0
+    cfg.taker_fee_bps = 6.0
 
-    # --- DEFENSE MECHANISMS (ACTIVATED) ---
-    cfg.be_trigger_r = 1.0             # Move SL to breakeven at +1.0R
-    cfg.trailing_stop_trigger_r = 1.5  # Start standard trailing at +1.5R
-    cfg.trailing_dist_r = 0.5          # Trail price by 0.5R
-    cfg.dynamic_tp_enabled = True      # Let the engine take profit at BB expansions
-    cfg.time_in_force_decay = 24       # Kill stagnant trades after 24 bars
+    # --- DEFENSE MECHANISMS (WIN-RATE ENHANCEMENTS) ---
+    cfg.be_trigger_r = 1.0
+    cfg.trailing_stop_trigger_r = 0.0
+    cfg.trailing_dist_r = 0.0
+    cfg.dynamic_tp_enabled = False
+    cfg.time_in_force_decay = 24       # Cut trades if alpha decays after 24 bars without surging into profit
 
     # --- GLOBAL RISK DEFAULTS ---
     cfg.risk_per_trade = 0.01          
@@ -50,8 +50,8 @@ def _strategy_overrides(cfg):
     cfg.strat_gamma_enabled = True  
     cfg.strat_delta_enabled = True 
     cfg.strat_epsilon_enabled = True  
-    cfg.strat_omega_enabled = True
-    cfg.strat_zeta_enabled = True
+    cfg.strat_omega_enabled = True     # Ranging environments provide the deepest structure limits for massive RR
+    cfg.strat_zeta_enabled = False     
 
    # ==========================================================
     # 2. COIN-SPECIFIC MATRIX (Max Win Rate)
@@ -60,17 +60,19 @@ def _strategy_overrides(cfg):
     cfg.use_dca = False
     cfg.dca_max_safety_orders = 0
 
-    # --- SURVIVAL GEOMETRY ---
-    cfg.min_rr = 1.5                # Lower math constraint to prevent target stretching
-    cfg.atr_mult_sl = 1.5           # Widen stops to survive MM sweeps
-    cfg.atr_mult_tp = 2.5           # Natural target distance
+    # --- STRUCTURAL SNIPER GEOMETRY ---
+    # Target >50% WR with >1.8 RR natively via structural alignment (Order Blocks/Swings)
+    cfg.min_rr = 1.8                # Rigid minimum RR enforcement
+    cfg.atr_mult_sl = 1.0           # Mathematical fallback for very tight snipes
+    cfg.atr_mult_tp = 1.8           # Mathematical fallback to achieve >= 1.8 RR baseline
 
     # --- STRICT AI GATES ---
     if "BTC" in symbol or "ETH" in symbol:
         cfg.min_conf_long = 1.0
         cfg.min_conf_short = 1.0
-        cfg.min_prob_long = 0.52    # Demand true ML confidence
-        cfg.min_prob_short = 0.52   # Demand true ML confidence
+        # Optimal probability threshold to find ~250+ trades with highest structural confidence
+        cfg.min_prob_long = 0.55
+        cfg.min_prob_short = 0.55
     else:
-        cfg.min_prob_long = 0.52
-        cfg.min_prob_short = 0.52
+        cfg.min_prob_long = 0.55
+        cfg.min_prob_short = 0.55
