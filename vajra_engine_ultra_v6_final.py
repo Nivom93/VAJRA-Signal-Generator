@@ -1206,7 +1206,6 @@ class BrainLearningManager:
                 "dist_to_mtf_ema200_pct": (px-adv['mtf_ema200_arr'][iM])/px*100 if px and 'mtf_ema200_arr' in adv else 0.0,
                 "side": 1.0 if side=="long" else 0.0
             })
-            vec = np.array([d.get(n, 0.0) for n in b['feature_names']]).reshape(1,-1)
             vec = self._build_vec(side, base, adv, iL, px, pre_l, b['feature_names'])
             # CRITICAL FIX: Clip all array values before casting to prevent float32 memory overflow
             vec = np.clip(np.nan_to_num(vec, nan=0.0), -1e10, 1e10).astype(np.float32)
@@ -1609,7 +1608,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
 
     # Pre-fetch variables for fuzzy logic
     fvg_bull = base.get("fvg_bull", 0); fvg_bear = base.get("fvg_bear", 0)
-    ob_bull = base.get("ob_bull_price", 0); ob_bear = base.get("ob_bear_price", 0)
+    ob_bull = base.get("ob_bull_top", 0); ob_bear = base.get("ob_bear_bot", 0)
     fib_786_l = base.get("fib_786_long", 0); fib_786_s = base.get("fib_786_short", 0)
     macro_high = max(base.get("last_swing_high", px), base.get("last_swing_low", px))
     macro_low = min(base.get("last_swing_high", px), base.get("last_swing_low", px))
@@ -1734,7 +1733,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
 
     if side == 'long':
         raw_targets = [
-            base.get("ob_bear_price", 0),
+            base.get("ob_bear_bot", 0),
             base.get("last_swing_high", 0),
             base.get("vah", 0),
             htf_sh,
@@ -1751,11 +1750,11 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
 
         if not tp_found:
             # Artificial projection
-            tp = entry_target + (dynamic_risk * min_escalation_rr)
+            tp = entry_target + tp_atr_dist
 
     else:
         raw_targets = [
-            base.get("ob_bull_price", 0),
+            base.get("ob_bull_top", 0),
             base.get("last_swing_low", 0),
             base.get("val", 0),
             htf_sl,
@@ -1772,7 +1771,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
 
         if not tp_found:
             # Artificial projection
-            tp = entry_target - (dynamic_risk * min_escalation_rr)
+            tp = entry_target - tp_atr_dist
 
     rr = abs(tp - entry_target) / max(1e-12, dynamic_risk)
 
