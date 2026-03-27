@@ -522,12 +522,16 @@ def run_bot(args):
                         log.warning(f"⚠️ Failed to cancel open orders for {symbol}: {e}")
 
                 # Fetch incremental update and apply to cache (Protect Rate Limits)
-                for timeframe, key, limit_n in [(cfg.htf, "htf", 250), (cfg.mtf, "mtf", 250), (cfg.ltf, "ltf", 500)]:
-                    new_data = ex.fetch_ohlcv_df(symbol, timeframe, limit=5)
-                    market_cache[symbol][key] = pd.concat([market_cache[symbol][key], new_data]).drop_duplicates(subset=["timestamp"], keep="last").tail(limit_n).reset_index(drop=True)
-                
+                new_htf = ex.fetch_ohlcv_df(symbol, cfg.htf, limit=5)
+                market_cache[symbol]["htf"] = pd.concat([market_cache[symbol]["htf"], new_htf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
                 htf = market_cache[symbol]["htf"]
+
+                new_mtf = ex.fetch_ohlcv_df(symbol, cfg.mtf, limit=5)
+                market_cache[symbol]["mtf"] = pd.concat([market_cache[symbol]["mtf"], new_mtf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
                 mtf = market_cache[symbol]["mtf"]
+
+                new_ltf = ex.fetch_ohlcv_df(symbol, cfg.ltf, limit=5)
+                market_cache[symbol]["ltf"] = pd.concat([market_cache[symbol]["ltf"], new_ltf]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True)
                 ltf = market_cache[symbol]["ltf"]
                 
                 if ltf.empty or len(htf) < 2 or len(mtf) < 2 or len(ltf) < 2: continue
