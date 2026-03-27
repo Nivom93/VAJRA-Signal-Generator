@@ -137,11 +137,7 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
     return df[keep + ["label", "entry_ts_dt", "pnl_r"]].copy(), sorted(keep)
 
 def _sanitize_data(X: np.ndarray) -> np.ndarray:
-    X = X.copy()
-    X[np.isinf(X)] = np.nan
-    limit = 1e12
-    X[np.abs(X) > limit] = np.nan
-    return X.astype(np.float32)
+    return np.clip(np.nan_to_num(X, nan=0.0), -1e10, 1e10).astype(np.float32)
 
 def main(argv=None):
     ap = argparse.ArgumentParser()

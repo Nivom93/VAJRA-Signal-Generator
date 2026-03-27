@@ -868,8 +868,8 @@ class BrainLearningManager:
             if hasattr(v, '__getitem__') and len(v) > iL:
                 val = v[iL]
                 d[k] = float(val) if np.isfinite(val) else 0.0
-                if d[k] > 1e6: d[k] = 1e6
-                elif d[k] < -1e6: d[k] = -1e6
+                if d[k] > 1e10: d[k] = 1e10
+                elif d[k] < -1e10: d[k] = -1e10
             else: d[k] = 0.0
         d.update({
             "pos_vs_swing_h": (px-pl.last_sh[iL])/px if px else 0.0, 
