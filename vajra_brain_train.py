@@ -81,7 +81,7 @@ def _calculate_recency_and_pnl_weights(df: pd.DataFrame, decay: float = 0.999) -
     n = len(df)
     indices = np.arange(n)[::-1] 
     recency = np.power(decay, indices)
-    pnl_weights = np.clip(np.abs(df['pnl_r'].values), 0, 5)
+    pnl_weights = np.clip(np.abs(df['pnl_r'].values), 0.1, 5.0)
     weights = recency * pnl_weights
     weights = weights * (n / weights.sum())
     return weights
@@ -161,6 +161,9 @@ def main(argv=None):
     
     args = ap.parse_args(argv)
 
+    args.max_depth = min(args.max_depth, 7)
+    args.n_estimators = min(args.n_estimators, 300)
+
     try:
         df, feature_names = load_events_df(args.events, args.min_win_r, args.filter_side, set(_parse_extras(args.exclude_cols)))
     except Exception as e: 
@@ -176,7 +179,7 @@ def main(argv=None):
     X_all = _sanitize_data(X_all)
 
     log.info(f"Running Walk-Forward Analysis ({args.wfa_folds} folds)...")
-    tscv = TimeSeriesSplit(n_splits=args.wfa_folds)
+    tscv = TimeSeriesSplit(n_splits=args.wfa_folds, gap=10)
     
     auc_scores = []
     brier_scores = []
@@ -186,11 +189,8 @@ def main(argv=None):
         X_te_raw, y_te = X_all[test_idx], y_all[test_idx]
         w_tr = sample_weights[train_idx]
         
-        fold_imputer = SimpleImputer(strategy='median')
-        fold_scaler = RobustScaler()
-        
-        X_tr = fold_scaler.fit_transform(fold_imputer.fit_transform(X_tr_raw))
-        X_te = fold_scaler.transform(fold_imputer.transform(X_te_raw))
+        X_tr = X_tr_raw
+        X_te = X_te_raw
         
         if w_tr.sum() > 0:
             w_tr = w_tr * (len(w_tr) / w_tr.sum())
@@ -198,7 +198,7 @@ def main(argv=None):
         # FIX MINORITY CLASS STARVATION
         num_pos = int(np.sum(y_tr.astype(int)))
         num_neg = int(len(y_tr)) - num_pos
-        spw = min(num_neg / max(num_pos, 1), 5.0)
+        spw = np.sqrt(num_neg / max(num_pos, 1))
         
         clf = xgb.XGBClassifier(
             n_estimators=args.n_estimators,
@@ -216,7 +216,7 @@ def main(argv=None):
         clf.fit(X_tr, y_tr, sample_weight=w_tr)
         
         if args.calibrate:
-            cal_clf = CalibratedClassifierCV(clf, method='isotonic', cv=3) 
+            cal_clf = CalibratedClassifierCV(clf, method='sigmoid', cv=3)
             try: cal_clf.fit(X_tr, y_tr, sample_weight=w_tr)
             except: cal_clf.fit(X_tr, y_tr) 
             model = cal_clf
@@ -247,14 +247,12 @@ def main(argv=None):
 
     log.info("Training Final Production Model on FULL DATASET (Weighted)...")
     
-    imputer = SimpleImputer(strategy='median')
-    scaler = RobustScaler()
-    X_all_s = scaler.fit_transform(imputer.fit_transform(X_all))
+    X_all_s = X_all
     
     # FIX MINORITY CLASS STARVATION (FULL DATASET)
     num_pos_all = int(np.sum(y_all.astype(int)))
     num_neg_all = int(len(y_all)) - num_pos_all
-    spw_all = min(num_neg_all / max(num_pos_all, 1), 5.0)
+    spw_all = np.sqrt(num_neg_all / max(num_pos_all, 1))
 
     final_base = xgb.XGBClassifier(
         n_estimators=args.n_estimators,
@@ -272,7 +270,7 @@ def main(argv=None):
     final_model = final_base
     
     if args.calibrate:
-        final_cal = CalibratedClassifierCV(final_base, method='isotonic', cv=5)
+        final_cal = CalibratedClassifierCV(final_base, method='sigmoid', cv=5)
         try: final_cal.fit(X_all_s, y_all, sample_weight=sample_weights)
         except: final_cal.fit(X_all_s, y_all)
         final_model = final_cal
@@ -280,8 +278,8 @@ def main(argv=None):
         final_model.fit(X_all_s, y_all, sample_weight=sample_weights)
 
     pipeline = {
-        "imputer": imputer, 
-        "scaler": scaler, 
+        "imputer": None,
+        "scaler": None,
         "classifier": final_model, 
         "feature_names": feature_names, 
         "training_args": vars(args), 
