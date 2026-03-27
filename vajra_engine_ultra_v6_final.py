@@ -465,23 +465,38 @@ class MemoryManager:
 
 class ExchangeWrapper:
     def __init__(self, cfg, markets_data=None):
-        if ccxt is None: raise RuntimeError("ccxt missing")
+        if ccxt is None:
+            raise RuntimeError("ccxt missing")
+
         self.client = getattr(ccxt, cfg.exchange_id)({
-            "enableRateLimit": True, "options": {"defaultType": cfg.market_type}, "timeout": 30000
+            "enableRateLimit": True,
+            "options": {"defaultType": cfg.market_type},
+            "timeout": 30000
         })
-        if markets_data: self.client.markets = markets_data
-        else: 
+
+        if markets_data:
+            self.client.markets = markets_data
+        else:
             for attempt in range(3):
-                try: self.client.load_markets(); break
+                try:
+                    self.client.load_markets()
+                    break
                 except Exception as e:
-                    if attempt == 2: raise e
-                    print(f"Connection warning: {e}. Retrying..."); time.sleep(2)
+                    if attempt == 2:
+                        raise e
+                    print(f"Connection warning: {e}. Retrying...")
+                    time.sleep(2)
+
     def fetch_ohlcv_df(self, sym, tf, limit=1000, since=None):
-        r = self.client.fetch_ohlcv(sym, timeframe=tf, limit=min(1000,limit), since=since)
-        return pd.DataFrame(r, columns=["timestamp","open","high","low","close","volume"])
+        r = self.client.fetch_ohlcv(sym, timeframe=tf, limit=min(1000, limit), since=since)
+        return pd.DataFrame(r, columns=["timestamp", "open", "high", "low", "close", "volume"])
+
     def fetch_funding_rate(self, symbol):
-        try: funding = self.client.fetch_funding_rate(symbol); return float(funding.get('fundingRate', 0.0))
-        except: return 0.0
+        try:
+            funding = self.client.fetch_funding_rate(symbol)
+            return float(funding.get('fundingRate', 0.0))
+        except:
+            return 0.0
 
 # ==============================================================================
 # 6. MARKET STRUCTURE & FEATURE ENGINEERING
