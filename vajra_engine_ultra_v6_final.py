@@ -1269,17 +1269,17 @@ class TradeManager:
             # Bypass PENDING and go straight to OPEN (Execution Desync Fix)
             planned_risk = abs(order['entry'] - order['sl'])
             if planned_risk < 1e-9: planned_risk = order['entry'] * 0.01
-            initial_risk = planned_risk
 
             trade = order.copy()
             trade['avg_price'] = fill_price
             trade['total_size'] = order.get('total_size', 1.0 * order.get('risk_factor', 1.0))
-            trade['initial_risk_unit'] = initial_risk
+            trade['initial_risk_unit'] = planned_risk
             trade['status'] = 'OPEN'
             trade['fill_ts'] = time.time()
             trade['bars_open'] = 0
             trade['next_safety_price'] = 0.0
             trade['sl_order_id'] = sl_order_id
+            trade['can_tp_this_bar'] = False  # <--- CRITICAL FIX
 
             self.open_trades.append(trade)
             self.mem.record_fill(trade)
