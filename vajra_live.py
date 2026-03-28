@@ -271,15 +271,6 @@ def _fetch_macro_context(ex, global_cache, cfg):
                 else: btcd_trend = 0.0
                 log.info(f"BTC.D Trend: {slope:.2f}% (Regime: {btcd_trend})")
 
-        if getattr(cfg, 'use_macro_data', False):
-            try:
-                import yfinance as yf
-                dxy_c = yf.Ticker("DX-Y.NYB").history(period="5d")['Close']
-                spx_c = yf.Ticker("^GSPC").history(period="5d")['Close']
-                dxy_val = float(dxy_c.iloc[-1]) if not dxy_c.empty else 0.0
-                spx_val = float(spx_c.iloc[-1]) if not spx_c.empty else 0.0
-            except: pass
-
     except Exception as e:
         log.warning(f"Macro Sync Failed: {e}")
 
@@ -294,7 +285,7 @@ def _fetch_macro_context(ex, global_cache, cfg):
     except Exception as e:
         log.warning(f"Oracle Sentiment Sync Failed: {e}")
 
-    return btc_bullish, btcd_trend, dxy_val, spx_val, oracle_sentiment_val
+    return btc_bullish, btcd_trend, 0.0, 0.0, oracle_sentiment_val
 
 def run_bot(args):
     """Main Bot Loop"""
@@ -369,7 +360,9 @@ def run_bot(args):
             log.info(f"Waiting {sleep_sec:.1f}s for next candle...")
             time.sleep(sleep_sec + 1)
 
-            btc_bullish, btcd_trend, dxy_val, spx_val, oracle_sentiment_val = _fetch_macro_context(ex, global_cache, cfg)
+            btc_bullish, btcd_trend, _, _, oracle_sentiment_val = _fetch_macro_context(ex, global_cache, cfg)
+            dxy_val = macro_fetcher.state["dxy_val"]
+            spx_val = macro_fetcher.state["spx_val"]
             btc_ltf = global_cache.get("btc_ltf", pd.DataFrame())
 
             # --- MULTI-SYMBOL SCANNING LOOP ---
