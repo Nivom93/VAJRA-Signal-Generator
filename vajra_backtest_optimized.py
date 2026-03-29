@@ -113,10 +113,11 @@ def _fetch_ohlcv_paged(exw: ExchangeWrapper, symbol: str, timeframe: str, since_
 
 @dataclass
 class Preloaded:
+    macro_tf: pd.DataFrame
+    swing_tf: pd.DataFrame
     htf: pd.DataFrame
-    mtf: pd.DataFrame
-    ltf: pd.DataFrame
-    btc: Optional[pd.DataFrame] = None # Added BTC Dataframe
+    exec_tf: pd.DataFrame
+    btc: Optional[pd.DataFrame] = None
 
 def _preload_or_fetch(args) -> Preloaded:
     if pd is None:
@@ -145,12 +146,12 @@ def _preload_or_fetch(args) -> Preloaded:
             df.to_csv(fname, index=False)
         return df
 
-    htf = one(args.symbol, args.htf)
-    mtf = one(args.symbol, args.mtf)
-    ltf = one(args.symbol, args.ltf)
+    macro_df = one(args.symbol, args.macro_tf)
+    swing_df = one(args.symbol, args.swing_tf)
+    htf_df = one(args.symbol, args.htf)
+    exec_df = one(args.symbol, args.exec_tf)
     
     # FETCH BTC Context (Regime Filter)
-    # STRICTLY USE 4H FOR REGIME, IGNORING STRATEGY HTF
     btc_df = None
     if args.symbol != "BTC/USDT":
         log.info("Fetching BTC/USDT (4h) context data...")
@@ -158,7 +159,7 @@ def _preload_or_fetch(args) -> Preloaded:
     else:
         btc_df = one("BTC/USDT", "4h") 
 
-    return Preloaded(htf=htf, mtf=mtf, ltf=ltf, btc=btc_df)
+    return Preloaded(macro_tf=macro_df, swing_tf=swing_df, htf=htf_df, exec_tf=exec_df, btc=btc_df)
 
 # --------- Config mapping ---------
 
@@ -167,8 +168,10 @@ def args_to_cfg(args) -> EngineConfig:
     cfg.exchange_id = args.exchange_id
     cfg.market_type = args.market_type
     cfg.symbol = args.symbol
-    cfg.htf = args.htf; cfg.mtf = args.mtf; cfg.ltf = args.ltf
-    cfg.scalper_tf = getattr(args, "scalper_tf", "1m")
+    cfg.macro_tf = args.macro_tf
+    cfg.swing_tf = args.swing_tf
+    cfg.htf = args.htf
+    cfg.exec_tf = args.exec_tf
     for k in ["min_rr","rr","atr_mult_sl","atr_mult_tp","scalper_rr","risk_per_trade",
               "min_conf_long","min_conf_short","min_prob","max_concurrent",
               "max_concurrent_buy","max_concurrent_sell"]:
@@ -189,10 +192,10 @@ def run_backtest(args, preloaded: Optional[Preloaded]=None, markets_data=None):
 
     if preloaded is None:
         pre = _preload_or_fetch(args)
-        htf, mtf, ltf, btc = pre.htf, pre.mtf, pre.ltf, pre.btc
+        macro_tf, swing_tf, htf, exec_tf, btc = pre.macro_tf, pre.swing_tf, pre.htf, pre.exec_tf, pre.btc
     else:
-        htf, mtf, ltf = preloaded.htf.copy(), preloaded.mtf.copy(), preloaded.ltf.copy()
-        btc = preloaded.btc.copy() if preloaded.btc is not None else htf.copy()
+        macro_tf, swing_tf, htf, exec_tf = preloaded.macro_tf.copy(), preloaded.swing_tf.copy(), preloaded.htf.copy(), preloaded.exec_tf.copy()
+        btc = preloaded.btc.copy() if preloaded.btc is not None else macro_tf.copy()
 
     # Calculate BTC Trend
     btc.sort_values("timestamp", inplace=True, ignore_index=True)
@@ -202,55 +205,57 @@ def run_backtest(args, preloaded: Optional[Preloaded]=None, markets_data=None):
     btc_bull_arr = (btc_c > btc_ema_trend).astype(float)
     
     btc_s = pd.Series(btc_bull_arr, index=btc["timestamp"]).shift(1) 
-    btc_aligned = btc_s.reindex(ltf["timestamp"], method='ffill').fillna(1.0).values 
+    btc_aligned = btc_s.reindex(exec_tf["timestamp"], method='ffill').fillna(1.0).values
 
     # Align BTC Close for relative strength features
-    btc_s_close = pd.Series(btc_c, index=btc["timestamp"]).shift(1).reindex(ltf["timestamp"], method='ffill').fillna(0.0).values
-    if len(btc_s_close) != len(ltf):
-        btc_s_close = np.resize(btc_s_close, len(ltf))
+    btc_s_close = pd.Series(btc_c, index=btc["timestamp"]).shift(1).reindex(exec_tf["timestamp"], method='ffill').fillna(0.0).values
+    if len(btc_s_close) != len(exec_tf):
+        btc_s_close = np.resize(btc_s_close, len(exec_tf))
 
-    brain = BrainLearningManager(cfg) 
+    brain = BrainLearningManager(cfg, getattr(args, 'brains_dir', None))
     mem = MemoryManager(cfg, db=None)
     tm = TradeManager(cfg, exw, mem, brain, narrative_map=None)
 
-    for df in (htf, mtf, ltf):
+    for df in (macro_tf, swing_tf, htf, exec_tf):
         df.sort_values("timestamp", inplace=True, ignore_index=True)
 
     since_ms = parse_time(args.since)
     until_ms = parse_time(args.until)
-    ltf_iter = ltf[(ltf["timestamp"] >= since_ms) & (ltf["timestamp"] < until_ms)]
+    exec_iter = exec_tf[(exec_tf["timestamp"] >= since_ms) & (exec_tf["timestamp"] < until_ms)]
 
     log.info("Generating Engine V7 Precomputed features for base engine parity...")
-    pre_htf = Precomp(htf)
-    pre_mtf = Precomp(mtf)
-    pre_ltf = Precomp(ltf)
-    pre_map = {"htf": pre_htf, "mtf": pre_mtf, "ltf": pre_ltf}
+    pMacro = Precomp(macro_tf)
+    pSwing = Precomp(swing_tf)
+    pHtf = Precomp(htf)
+    pExec = Precomp(exec_tf)
+    pre_map = {"macro_tf": pMacro, "swing_tf": pSwing, "htf": pHtf, "exec_tf": pExec}
 
     adv_features = precompute_v6_features(
-        pre_htf, pre_mtf, pre_ltf, htf, mtf, ltf, 
+        pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf,
         btc_close_arr=btc_s_close
     )
 
-    iH = 0; iM = 0
+    iMacro = 0; iSwing = 0; iHtf = 0
     all_closed: List[Dict[str, Any]] = []
     
     # OPTIMIZED PROGRESS BAR (Less I/O)
     progress = None
     if tqdm and getattr(args, "progress", "auto") != "off":
-        progress = tqdm(total=len(ltf_iter), desc="Backtest", mininterval=1.0) 
+        progress = tqdm(total=len(exec_iter), desc="Backtest", mininterval=1.0)
 
-    for rowL in ltf_iter.itertuples():
+    for rowL in exec_iter.itertuples():
         ts = int(rowL.timestamp)
 
-        while iH+1 < len(htf) and int(htf["timestamp"].iloc[iH+1]) <= ts: iH += 1
-        while iM+1 < len(mtf) and int(mtf["timestamp"].iloc[iM+1]) <= ts: iM += 1
-        iL = int(ltf.index.get_loc(rowL.Index))
+        while iMacro+1 < len(macro_tf) and int(macro_tf["timestamp"].iloc[iMacro+1]) <= ts: iMacro += 1
+        while iSwing+1 < len(swing_tf) and int(swing_tf["timestamp"].iloc[iSwing+1]) <= ts: iSwing += 1
+        while iHtf+1 < len(htf) and int(htf["timestamp"].iloc[iHtf+1]) <= ts: iHtf += 1
+        iExec = int(exec_tf.index.get_loc(rowL.Index))
 
         closed = tm.step_bar(cfg.symbol, float(rowL.open), float(rowL.high), float(rowL.low), float(rowL.close), ts=ts)
         if closed: all_closed.extend(closed)
 
         # Inject BTC Context & Orderbook Stub
-        btc_bull_val = btc_aligned[iL] if iL < len(btc_aligned) else 1.0
+        btc_bull_val = btc_aligned[iExec] if iExec < len(btc_aligned) else 1.0
         extras = {
             "btc_bullish": btc_bull_val, 
             "funding_rate": 0.0,
@@ -259,11 +264,10 @@ def run_backtest(args, preloaded: Optional[Preloaded]=None, markets_data=None):
             "macro_sentiment": 0.0
         }
 
-        feats = confluence_features(cfg, htf, mtf, ltf, iH=iH, iM=iM, iL=iL, precomp=pre_map, extras=extras)
+        feats = confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, max(0, iMacro-1), max(0, iSwing-1), max(0, iHtf-1), iExec, precomp=pre_map, extras=extras)
         feats["symbol"] = cfg.symbol
         
-        # Test baseline engine with NO brain
-        plan = plan_trade_with_brain(cfg, None, feats, adv_features, iH, iM, iL, pre_ltf)
+        plan = plan_trade_with_brain(cfg, brain, feats, adv_features, iExec, pExec)
         
         if plan:
             tm.submit_plan(plan, {"o": float(rowL.open), "h": float(rowL.high), "l": float(rowL.low), "c": float(rowL.close)})
@@ -278,7 +282,7 @@ def run_backtest(args, preloaded: Optional[Preloaded]=None, markets_data=None):
     dur_s = time.perf_counter() - start_t
     summary = {
         "symbol": cfg.symbol,
-        "bars": int(len(ltf_iter)),
+        "bars": int(len(exec_iter)),
         "trades": int(len(all_closed)),
         "winrate_pct": float(winrate),
         "total_r": float(total_r),
@@ -294,8 +298,11 @@ def build_arg_parser():
     p.add_argument("--symbol", default="BTC/USDT")
     p.add_argument("--since", required=True)
     p.add_argument("--until", required=True)
-    p.add_argument("--htf", default="12h"); p.add_argument("--mtf", default="1h"); p.add_argument("--ltf", default="15m")
-    p.add_argument("--scalper-tf", default="1m")
+    p.add_argument("--macro-tf", default="1d")
+    p.add_argument("--swing-tf", default="4h")
+    p.add_argument("--htf", default="1h")
+    p.add_argument("--exec-tf", default="15m")
+    p.add_argument("--brains-dir", default=None, help="Directory containing localized strategy brains")
     p.add_argument("--account-notional", type=float, default=1000.0)
     p.add_argument("--min-rr", type=float, default=2.5)
     p.add_argument("--rr", type=float, default=3.0)

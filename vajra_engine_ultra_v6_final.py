@@ -444,7 +444,7 @@ def _donchian_channels_np(high, low, window=20):
 @dataclass
 class AadhiraayanEngineConfig:
     exchange_id: str = "bybit"; market_type: str = "swap"; symbol: str = "BTC/USDT"
-    htf: str = "12h"; mtf: str = "1h"; ltf: str = "15m"; scalper_tf: str = "1m"
+    macro_tf: str = "1d"; swing_tf: str = "4h"; htf: str = "1h"; exec_tf: str = "15m"
     risk_per_trade: float = 0.01; min_rr: float = 1.0; rr: float = 2.0
     atr_mult_sl: float = 1.0; atr_mult_tp: float = 2.0; scalper_rr: float = 2.0
     use_dca: bool = False; dca_max_safety_orders: int = 1
@@ -802,34 +802,42 @@ class Precomp:
 def _trend_flags(e50, e200): return (1.0, 0.0) if e50>e200 else ((0.0, 1.0) if e50<e200 else (0.0, 0.0))
 def _ensure_precomp(df, pre): return pre if isinstance(pre, Precomp) else Precomp(df)
 
-def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=None):
-    if iH is None: iH=len(htf)-1; iM=len(mtf)-1; iL=len(ltf)-1
+def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, iHtf, iExec, precomp=None, extras=None):
+    if iMacro is None: iMacro=len(macro_tf)-1; iSwing=len(swing_tf)-1; iHtf=len(htf)-1; iExec=len(exec_tf)-1
     
-    idx_H = max(0, iH - 1)
-    idx_M = max(0, iM - 1)
-    idx_L = iL 
+    # Strictly aligned pointers for fully closed candles to prevent lookahead
+    idx_Macro = max(0, iMacro)
+    idx_Swing = max(0, iSwing)
+    idx_Htf = max(0, iHtf)
+    idx_Exec = iExec
     
-    ph=_ensure_precomp(htf, precomp.get("htf") if precomp else None)
-    pm=_ensure_precomp(mtf, precomp.get("mtf") if precomp else None)
-    pl=_ensure_precomp(ltf, precomp.get("ltf") if precomp else None)
+    pMacro=_ensure_precomp(macro_tf, precomp.get("macro_tf") if precomp else None)
+    pSwing=_ensure_precomp(swing_tf, precomp.get("swing_tf") if precomp else None)
+    pHtf=_ensure_precomp(htf, precomp.get("htf") if precomp else None)
+    pExec=_ensure_precomp(exec_tf, precomp.get("exec_tf") if precomp else None)
     
     f={}
-    f["htf_up"], f["htf_down"] = _trend_flags(ph.ema50[idx_H], ph.ema200[idx_H])
-    f["mtf_up"], f["mtf_down"] = _trend_flags(pm.ema50[idx_M], pm.ema200[idx_M])
-    f["htf_ema50"] = float(ph.ema50[idx_H])
+    f["macro_up"], f["macro_down"] = _trend_flags(pMacro.ema50[idx_Macro], pMacro.ema200[idx_Macro])
+    f["swing_up"], f["swing_down"] = _trend_flags(pSwing.ema50[idx_Swing], pSwing.ema200[idx_Swing])
+    f["htf_up"], f["htf_down"] = _trend_flags(pHtf.ema50[idx_Htf], pHtf.ema200[idx_Htf])
+    f["macro_ema50"] = float(pMacro.ema50[idx_Macro])
+    f["swing_ema50"] = float(pSwing.ema50[idx_Swing])
+    f["htf_ema50"] = float(pHtf.ema50[idx_Htf])
     
-    px = pl.c[idx_L]; f["price"]=float(px); 
+    px = pExec.c[idx_Exec]; f["price"]=float(px);
     
-    f["atr_htf_pct"]=float(ph.atr14[idx_H]/max(px,1e-9)*100.0)
-    f["atr_mtf_pct"]=float(pm.atr14[idx_M]/max(px,1e-9)*100.0)
-    f["atr_ltf_pct"]=float(pl.atr14[idx_L]/max(px,1e-9)*100.0)
+    f["atr_macro_pct"]=float(pMacro.atr14[idx_Macro]/max(px,1e-9)*100.0)
+    f["atr_swing_pct"]=float(pSwing.atr14[idx_Swing]/max(px,1e-9)*100.0)
+    f["atr_htf_pct"]=float(pHtf.atr14[idx_Htf]/max(px,1e-9)*100.0)
+    f["atr_exec_pct"]=float(pExec.atr14[idx_Exec]/max(px,1e-9)*100.0)
+    f["atr_ltf_pct"]=f["atr_exec_pct"] # Backwards compatibility alias
     
-    f["last_swing_high"] = float(pl.last_sh[idx_L])
-    f["last_swing_low"] = float(pl.last_sl[idx_L])
-    f["ob_bull_top"] = float(pl.ob_bull_top[idx_L])
-    f["ob_bull_bot"] = float(pl.ob_bull_bot[idx_L])
-    f["ob_bear_bot"] = float(pl.ob_bear_bot[idx_L])
-    f["ob_bear_top"] = float(pl.ob_bear_top[idx_L])
+    f["last_swing_high"] = float(pExec.last_sh[idx_Exec])
+    f["last_swing_low"] = float(pExec.last_sl[idx_Exec])
+    f["ob_bull_top"] = float(pExec.ob_bull_top[idx_Exec])
+    f["ob_bull_bot"] = float(pExec.ob_bull_bot[idx_Exec])
+    f["ob_bear_bot"] = float(pExec.ob_bear_bot[idx_Exec])
+    f["ob_bear_top"] = float(pExec.ob_bear_top[idx_Exec])
     
     px_safe = px if px > 1e-12 else 1.0
     f["dist_last_sh_pct"] = (px - f["last_swing_high"]) / px_safe * 100
@@ -837,54 +845,54 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     f["dist_ob_bull_pct"] = (px - f["ob_bull_top"]) / px_safe * 100
     f["dist_ob_bear_pct"] = (f["ob_bear_bot"] - px) / px_safe * 100
 
-    atr_abs = ph.atr14[idx_H]
+    atr_abs = pHtf.atr14[idx_Htf]
     if atr_abs < 1e-9: atr_abs = px * 0.01
-    current_range = pl.h[idx_L] - pl.l[idx_L]
+    current_range = pExec.h[idx_Exec] - pExec.l[idx_Exec]
     f["candle_range_atr"] = float(current_range / atr_abs)
     
     for k in ["bos_up","bos_down","fvg_up","fvg_dn","engulf_bull","engulf_bear","pin_bull","pin_bear","inside_bar"]:
-        f[k]=float(getattr(pl,k)[idx_L])
-    f["sweep_high"] = float(pl.sweep_up[idx_L])
-    f["sweep_low"] = float(pl.sweep_dn[idx_L])
+        f[k]=float(getattr(pExec,k)[idx_Exec])
+    f["sweep_high"] = float(pExec.sweep_up[idx_Exec])
+    f["sweep_low"] = float(pExec.sweep_dn[idx_Exec])
     
-    f["choch_up"]=float(1.0 if pl.bos_up[idx_L] and idx_L>=5 and pl.bos_down[idx_L-5] else 0.0)
-    f["choch_down"]=float(1.0 if pl.bos_down[idx_L] and idx_L>=5 and pl.bos_up[idx_L-5] else 0.0)
-    f["bars_since_ob_bull"] = float(pl.bars_since_ob_bull[idx_L])
-    f["bars_since_ob_bear"] = float(pl.bars_since_ob_bear[idx_L])
+    f["choch_up"]=float(1.0 if pExec.bos_up[idx_Exec] and idx_Exec>=5 and pExec.bos_down[idx_Exec-5] else 0.0)
+    f["choch_down"]=float(1.0 if pExec.bos_down[idx_Exec] and idx_Exec>=5 and pExec.bos_up[idx_Exec-5] else 0.0)
+    f["bars_since_ob_bull"] = float(pExec.bars_since_ob_bull[idx_Exec])
+    f["bars_since_ob_bear"] = float(pExec.bars_since_ob_bear[idx_Exec])
 
     # Safely pull velocity_atr_3 if precomputed, else 0
-    if hasattr(pl, 'velocity_atr_3'):
-        f["velocity_atr_3"] = float(pl.velocity_atr_3[idx_L])
+    if hasattr(pExec, 'velocity_atr_3'):
+        f["velocity_atr_3"] = float(pExec.velocity_atr_3[idx_Exec])
 
-    f["vol_spike"] = float(pl.vol_spike[idx_L])
-    f["kalman_vel"] = float(pl.kalman_vel[idx_L]); f["hurst"] = float(pl.hurst[idx_L])
+    f["vol_spike"] = float(pExec.vol_spike[idx_Exec])
+    f["kalman_vel"] = float(pExec.kalman_vel[idx_Exec]); f["hurst"] = float(pExec.hurst[idx_Exec])
     
-    f["cvd"] = float(pl.cvd[idx_L])
-    f["adx"] = float(pl.adx[idx_L])
-    f["bb_width"] = float(pl.bb_width[idx_L])
-    f["rvol"] = float(pl.rvol[idx_L]) 
-    f["bb_upper"] = float(pl.bb_upper[idx_L])
-    f["bb_lower"] = float(pl.bb_lower[idx_L])
-    f["kc_upper"] = float(pl.kc_upper[idx_L])
-    f["kc_lower"] = float(pl.kc_lower[idx_L])
+    f["cvd"] = float(pExec.cvd[idx_Exec])
+    f["adx"] = float(pExec.adx[idx_Exec])
+    f["bb_width"] = float(pExec.bb_width[idx_Exec])
+    f["rvol"] = float(pExec.rvol[idx_Exec])
+    f["bb_upper"] = float(pExec.bb_upper[idx_Exec])
+    f["bb_lower"] = float(pExec.bb_lower[idx_Exec])
+    f["kc_upper"] = float(pExec.kc_upper[idx_Exec])
+    f["kc_lower"] = float(pExec.kc_lower[idx_Exec])
 
     f["dist_bb_upper_pct"] = (px - f["bb_upper"]) / px_safe * 100
     f["dist_bb_lower_pct"] = (px - f["bb_lower"]) / px_safe * 100
-    f["rsi_14"] = float(pl.rsi14[idx_L])
+    f["rsi_14"] = float(pExec.rsi14[idx_Exec])
     
-    f["w_pattern"] = float(pl.w_pattern[idx_L])
-    f["m_pattern"] = float(pl.m_pattern[idx_L])
-    f["fvg_bull"] = float(pl.fvg_bull_p[idx_L])
-    f["fvg_bear"] = float(pl.fvg_bear_p[idx_L])
-    f["sweep_bull_p"] = float(pl.sweep_bull_p[idx_L])
-    f["sweep_bear_p"] = float(pl.sweep_bear_p[idx_L])
+    f["w_pattern"] = float(pExec.w_pattern[idx_Exec])
+    f["m_pattern"] = float(pExec.m_pattern[idx_Exec])
+    f["fvg_bull"] = float(pExec.fvg_bull_p[idx_Exec])
+    f["fvg_bear"] = float(pExec.fvg_bear_p[idx_Exec])
+    f["sweep_bull_p"] = float(pExec.sweep_bull_p[idx_Exec])
+    f["sweep_bear_p"] = float(pExec.sweep_bear_p[idx_Exec])
 
     # MICRO-STRUCTURE EXTRACTION
-    f["avwap_bull"] = float(pl.avwap_bull[idx_L])
-    f["avwap_bear"] = float(pl.avwap_bear[idx_L])
-    f["poc"] = float(pl.poc[idx_L])
-    f["vah"] = float(pl.vah[idx_L])
-    f["val"] = float(pl.val[idx_L])
+    f["avwap_bull"] = float(pExec.avwap_bull[idx_Exec])
+    f["avwap_bear"] = float(pExec.avwap_bear[idx_Exec])
+    f["poc"] = float(pExec.poc[idx_Exec])
+    f["vah"] = float(pExec.vah[idx_Exec])
+    f["val"] = float(pExec.val[idx_Exec])
 
     f["dist_avwap_bull_pct"] = (px - f["avwap_bull"]) / px_safe * 100
     f["dist_avwap_bear_pct"] = (px - f["avwap_bear"]) / px_safe * 100
@@ -892,24 +900,24 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     f["dist_vah_pct"] = (px - f["vah"]) / px_safe * 100
     f["dist_val_pct"] = (px - f["val"]) / px_safe * 100
 
-    f["is_squeezed"] = float(pl.is_squeezed[idx_L])
-    f["squeeze_fired"] = float(pl.squeeze_fired[idx_L])
-    f["mtf_is_squeezed"] = float(pm.is_squeezed[idx_M])
-    f["mtf_squeeze_fired"] = float(pm.squeeze_fired[idx_M])
-    f["cvd_div_bull"] = float(pl.cvd_div_bull[idx_L])
-    f["cvd_div_bear"] = float(pl.cvd_div_bear[idx_L])
-    f["cvd_roc"] = float(pl.cvd_roc[idx_L])
-    f["cvd_acceleration"] = float(pl.cvd_acceleration[idx_L])
+    f["is_squeezed"] = float(pExec.is_squeezed[idx_Exec])
+    f["squeeze_fired"] = float(pExec.squeeze_fired[idx_Exec])
+    f["swing_is_squeezed"] = float(pSwing.is_squeezed[idx_Swing])
+    f["swing_squeeze_fired"] = float(pSwing.squeeze_fired[idx_Swing])
+    f["cvd_div_bull"] = float(pExec.cvd_div_bull[idx_Exec])
+    f["cvd_div_bear"] = float(pExec.cvd_div_bear[idx_Exec])
+    f["cvd_roc"] = float(pExec.cvd_roc[idx_Exec])
+    f["cvd_acceleration"] = float(pExec.cvd_acceleration[idx_Exec])
 
-    f["qm_bull"] = float(pl.qm_bull[idx_L])
-    f["qm_bear"] = float(pl.qm_bear[idx_L])
-    f["wyckoff_spring"] = float(pl.spring[idx_L])
-    f["wyckoff_upthrust"] = float(pl.upthrust[idx_L])
+    f["qm_bull"] = float(pExec.qm_bull[idx_Exec])
+    f["qm_bear"] = float(pExec.qm_bear[idx_Exec])
+    f["wyckoff_spring"] = float(pExec.spring[idx_Exec])
+    f["wyckoff_upthrust"] = float(pExec.upthrust[idx_Exec])
 
-    f["asian_high"] = float(pl.asian_high[idx_L])
-    f["asian_low"] = float(pl.asian_low[idx_L])
-    f["dc_high_20"] = float(pl.dc_high_20[idx_L])
-    f["dc_low_20"] = float(pl.dc_low_20[idx_L])
+    f["asian_high"] = float(pExec.asian_high[idx_Exec])
+    f["asian_low"] = float(pExec.asian_low[idx_Exec])
+    f["dc_high_20"] = float(pExec.dc_high_20[idx_Exec])
+    f["dc_low_20"] = float(pExec.dc_low_20[idx_Exec])
     
     f["dist_asian_high_pct"] = (px - f["asian_high"]) / px_safe * 100
     f["dist_asian_low_pct"] = (px - f["asian_low"]) / px_safe * 100
@@ -933,10 +941,10 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
     f["dist_fib_886_short_pct"] = (px - f["fib_886_short"]) / px_safe * 100
 
     # Check if Asian Range was just swept
-    f["asian_range_swept_up"] = 1.0 if pl.h[idx_L] > pl.asian_high[idx_L] and pl.c[idx_L] < pl.asian_high[idx_L] else 0.0
-    f["asian_range_swept_dn"] = 1.0 if pl.l[idx_L] < pl.asian_low[idx_L] and pl.c[idx_L] > pl.asian_low[idx_L] else 0.0
+    f["asian_range_swept_up"] = 1.0 if pExec.h[idx_Exec] > pExec.asian_high[idx_Exec] and pExec.c[idx_Exec] < pExec.asian_high[idx_Exec] else 0.0
+    f["asian_range_swept_dn"] = 1.0 if pExec.l[idx_Exec] < pExec.asian_low[idx_Exec] and pExec.c[idx_Exec] > pExec.asian_low[idx_Exec] else 0.0
     
-    ts = ltf.timestamp.iloc[idx_L]
+    ts = exec_tf.timestamp.iloc[idx_Exec]
     f["hour_of_day"] = float((int(ts) // 3600000) % 24)
     
     dt = pd.to_datetime(ts, unit='ms', utc=True)
@@ -958,16 +966,16 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
 
     # FIX FEATURE LEAK: Generate Interaction features in the core dictionary so they export correctly
     f["inter_htf_bos_up"] = f.get("htf_up",0) * f.get("bos_up",0)
-    f["inter_mtf_down_sweep_high"] = f.get("mtf_down",0) * f.get("sweep_high",0)
-    ema20_gt = 1.0 if (pl.ema20[idx_L] > _ema_np(pl.c, 100)[idx_L] if hasattr(pl, 'ema20') else 0) else 0.0
-    f["trend_align_up_3tf"] = f.get("htf_up",0) + f.get("mtf_up",0) + ema20_gt
-    f["trend_align_down_3tf"] = f.get("htf_down",0) + f.get("mtf_down",0) + (1.0 - ema20_gt)
+    f["inter_swing_down_sweep_high"] = f.get("swing_down",0) * f.get("sweep_high",0)
+    ema20_gt = 1.0 if (pExec.ema20[idx_Exec] > _ema_np(pExec.c, 100)[idx_Exec] if hasattr(pExec, 'ema20') else 0) else 0.0
+    f["trend_align_up_3tf"] = f.get("macro_up",0) + f.get("swing_up",0) + f.get("htf_up",0) + ema20_gt
+    f["trend_align_down_3tf"] = f.get("macro_down",0) + f.get("swing_down",0) + f.get("htf_down",0) + (1.0 - ema20_gt)
 
     # ---------------------------------------------------------
     # DIRECTIVE 1: THE REGIME DETECTION MATRIX
     # ---------------------------------------------------------
     adx_val = f["adx"]
-    atr_p = pl.atr_percentile_100[idx_L] * 100.0
+    atr_p = pExec.atr_percentile_100[idx_Exec] * 100.0
     htf_trend = "UP" if f["htf_up"] > 0 else ("DOWN" if f["htf_down"] > 0 else "NEUTRAL")
 
     is_bb_outside = (px > f["bb_upper"]) or (px < f["bb_lower"])
@@ -977,9 +985,9 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
 
     if is_bb_outside and has_cvd_div:
         market_regime = "REVERSAL_WARNING"
-    elif htf_trend == "UP" and f["price"] < pl.rolling_vwap_20[idx_L]:
+    elif htf_trend == "UP" and f["price"] < pExec.rolling_vwap_20[idx_Exec]:
         market_regime = "RETRACEMENT"
-    elif htf_trend == "DOWN" and f["price"] > pl.rolling_vwap_20[idx_L]:
+    elif htf_trend == "DOWN" and f["price"] > pExec.rolling_vwap_20[idx_Exec]:
         market_regime = "RETRACEMENT"
     elif adx_val >= 25 and atr_p >= 50:
         market_regime = "EXPANSION"
@@ -1002,73 +1010,73 @@ def confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, precomp=None, extras=Non
 
     return f
 
-def precompute_v6_features(ph, pm, pl, htf, mtf, ltf, btc_close_arr=None):
-    cl=pl.c; f={}
+def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, btc_close_arr=None):
+    cl=pExec.c; f={}
     if cl.size==0: return {}
     eps=1e-12
     f['ema20_L']=_ema_np(cl,20)
-    f['ema50_L']=pl.ema50
+    f['ema50_L']=pExec.ema50
     f['ema100_L']=_ema_np(cl,100)
 
     f['dist_ema20_pct']=(cl - f['ema20_L']) / (np.abs(cl)+eps) * 100
     f['dist_ema50_pct']=(cl - f['ema50_L']) / (np.abs(cl)+eps) * 100
     f['dist_ema100_pct']=(cl - f['ema100_L']) / (np.abs(cl)+eps) * 100
 
-    f['ts_50_200']=(pl.ema50-pl.ema200)/(np.abs(cl)+eps)
+    f['ts_50_200']=(pExec.ema50-pExec.ema200)/(np.abs(cl)+eps)
     f['ts_20_100']=(_ema_np(cl,20)-_ema_np(cl,100))/(np.abs(cl)+eps)
     f['ts_roll_mean_10']=_rolling_mean(f['ts_50_200'],10)
     f['ts_roll_std_10']=_rolling_std(f['ts_50_200'],10)
     f['ts_roc_5']=_roc(f['ts_50_200'],5)
     f['ema20_gt_ema100']=(_ema_np(cl,20)>_ema_np(cl,100)).astype(float)
-    f['bb_width_pct_20']=pl.bb_width 
-    f['atr14_L']=pl.atr14
-    f['atr_pct_ltf']=pl.atr14/(np.abs(cl)+eps)*100
-    f['rsi14_ltf']=pl.rsi14
+    f['bb_width_pct_20']=pExec.bb_width
+    f['atr14_L']=pExec.atr14
+    f['atr_pct_ltf']=pExec.atr14/(np.abs(cl)+eps)*100
+    f['rsi14_ltf']=pExec.rsi14
     f['vol_ratio_200']=f['atr_pct_ltf']/_rolling_mean(f['atr_pct_ltf'],200,20)
     f['vol_ratio_200']=np.nan_to_num(f['vol_ratio_200'],nan=1.0)
-    mtf_ema200_s = pd.Series(pm.ema200, index=mtf.timestamp).shift(1).reindex(ltf.timestamp, method='ffill').fillna(0).values
+    mtf_ema200_s = pd.Series(pSwing.ema200, index=swing_tf.timestamp).shift(1).reindex(exec_tf.timestamp, method='ffill').fillna(0).values
     f['mtf_ema200_arr']=mtf_ema200_s
     f['dist_mtf_ema200_pct']=np.where(cl>0, (cl - mtf_ema200_s) / cl * 100, 0.0)
-    cm=pm.c
-    f['trend_strength_mtf_arr']=(pm.ema50-pm.ema200)/(np.abs(cm)+eps)
+    cm=pSwing.c
+    f['trend_strength_mtf_arr']=(pSwing.ema50-pSwing.ema200)/(np.abs(cm)+eps)
     f['atr_pct_ltf_roc_5_arr']=_roc(f['atr_pct_ltf'],5)
     f['vol_ltf_accel_5_arr']=_roc(f['atr_pct_ltf_roc_5_arr'],5)
-    f['trend_strength_ltf_ema20_50_arr']=(_ema_np(cl,20)-pl.ema50)/(np.abs(cl)+eps)
+    f['trend_strength_ltf_ema20_50_arr']=(_ema_np(cl,20)-pExec.ema50)/(np.abs(cl)+eps)
     
-    htf_s = pd.Series(ph.atr14/ph.c*100, index=htf.timestamp).shift(1).reindex(ltf.timestamp, method='ffill').fillna(0).values
+    htf_s = pd.Series(pMacro.atr14/pMacro.c*100, index=macro_tf.timestamp).shift(1).reindex(exec_tf.timestamp, method='ffill').fillna(0).values
     f['atr_pct_htf_aligned']=htf_s
-    mtf_s = pd.Series(f['trend_strength_mtf_arr'], index=mtf.timestamp).shift(1).reindex(ltf.timestamp, method='ffill').fillna(0).values
+    mtf_s = pd.Series(f['trend_strength_mtf_arr'], index=swing_tf.timestamp).shift(1).reindex(exec_tf.timestamp, method='ffill').fillna(0).values
     f['trend_strength_mtf_aligned']=mtf_s
     
     # INJECT ALIGNED HTF/MTF FRACTAL SWINGS
-    f['htf_swing_high'] = pd.Series(ph.last_sh, index=htf.timestamp).shift(1).reindex(ltf.timestamp, method='ffill').fillna(0.0).values
-    f['htf_swing_low'] = pd.Series(ph.last_sl, index=htf.timestamp).shift(1).reindex(ltf.timestamp, method='ffill').fillna(0.0).values
-    f['mtf_swing_high'] = pd.Series(pm.last_sh, index=mtf.timestamp).shift(1).reindex(ltf.timestamp, method='ffill').fillna(0.0).values
-    f['mtf_swing_low'] = pd.Series(pm.last_sl, index=mtf.timestamp).shift(1).reindex(ltf.timestamp, method='ffill').fillna(0.0).values
+    f['htf_swing_high'] = pd.Series(pMacro.last_sh, index=macro_tf.timestamp).shift(1).reindex(exec_tf.timestamp, method='ffill').fillna(0.0).values
+    f['htf_swing_low'] = pd.Series(pMacro.last_sl, index=macro_tf.timestamp).shift(1).reindex(exec_tf.timestamp, method='ffill').fillna(0.0).values
+    f['mtf_swing_high'] = pd.Series(pSwing.last_sh, index=swing_tf.timestamp).shift(1).reindex(exec_tf.timestamp, method='ffill').fillna(0.0).values
+    f['mtf_swing_low'] = pd.Series(pSwing.last_sl, index=swing_tf.timestamp).shift(1).reindex(exec_tf.timestamp, method='ffill').fillna(0.0).values
 
-    htf_tr = np.where(ph.ema50>ph.ema200,1,np.where(ph.ema50<ph.ema200,-1,0))
-    htf_tr_s = pd.Series(htf_tr, index=htf.timestamp).shift(1).reindex(ltf.timestamp, method='ffill').fillna(0).values.astype(int)
+    htf_tr = np.where(pMacro.ema50>pMacro.ema200,1,np.where(pMacro.ema50<pMacro.ema200,-1,0))
+    htf_tr_s = pd.Series(htf_tr, index=macro_tf.timestamp).shift(1).reindex(exec_tf.timestamp, method='ffill').fillna(0).values.astype(int)
     f['bars_since_htf_trend_flip_arr']=_bars_since_change(htf_tr_s)
-    f['atr7_L']=_atr_np(pl.h,pl.l,pl.c,7)
+    f['atr7_L']=_atr_np(pExec.h,pExec.l,pExec.c,7)
     f['atr_pct_ltf_7_arr']=f['atr7_L']/(np.abs(cl)+eps)*100
     
-    f['dist_to_bull_ob_arr'] = np.where(pl.ob_bull_top>0, (cl-pl.ob_bull_top)/cl*100, 0.0)
-    f['dist_to_bear_ob_arr'] = np.where(pl.ob_bear_bot>0, (pl.ob_bear_bot-cl)/cl*100, 0.0)
-    f['is_sweep_high_arr'] = pl.sweep_up.astype(float)
-    f['is_sweep_low_arr'] = pl.sweep_dn.astype(float)
+    f['dist_to_bull_ob_arr'] = np.where(pExec.ob_bull_top>0, (cl-pExec.ob_bull_top)/cl*100, 0.0)
+    f['dist_to_bear_ob_arr'] = np.where(pExec.ob_bear_bot>0, (pExec.ob_bear_bot-cl)/cl*100, 0.0)
+    f['is_sweep_high_arr'] = pExec.sweep_up.astype(float)
+    f['is_sweep_low_arr'] = pExec.sweep_dn.astype(float)
     
-    l_mom = np.where(pl.rsi14>50,0.5,-0.5)+np.where(pl.macd>pl.macd_sig,0.5,-0.5)
-    m_mom_s = pd.Series(np.where(pm.rsi14>50,0.5,-0.5)+np.where(pm.macd>pm.macd_sig,0.5,-0.5), index=mtf.timestamp).shift(1).reindex(ltf.timestamp, method='ffill').fillna(0).values
-    h_mom_s = pd.Series(np.where(ph.rsi14>50,0.5,-0.5)+np.where(ph.macd>ph.macd_sig,0.5,-0.5), index=htf.timestamp).shift(1).reindex(ltf.timestamp, method='ffill').fillna(0).values
+    l_mom = np.where(pExec.rsi14>50,0.5,-0.5)+np.where(pExec.macd>pExec.macd_sig,0.5,-0.5)
+    m_mom_s = pd.Series(np.where(pSwing.rsi14>50,0.5,-0.5)+np.where(pSwing.macd>pSwing.macd_sig,0.5,-0.5), index=swing_tf.timestamp).shift(1).reindex(exec_tf.timestamp, method='ffill').fillna(0).values
+    h_mom_s = pd.Series(np.where(pMacro.rsi14>50,0.5,-0.5)+np.where(pMacro.macd>pMacro.macd_sig,0.5,-0.5), index=macro_tf.timestamp).shift(1).reindex(exec_tf.timestamp, method='ffill').fillna(0).values
     f['momentum_alignment_score_arr'] = l_mom + m_mom_s + h_mom_s
     
-    f['market_efficiency_ratio'] = pl.eff_ratio
-    rng = pl.last_sh - pl.last_sl
+    f['market_efficiency_ratio'] = pExec.eff_ratio
+    rng = pExec.last_sh - pExec.last_sl
     safe_rng = np.where(rng == 0, 1.0, rng)
-    f['premium_discount_index'] = np.where(rng > 0, (cl - pl.last_sl) / safe_rng, 0.5)
+    f['premium_discount_index'] = np.where(rng > 0, (cl - pExec.last_sl) / safe_rng, 0.5)
 
-    f['div_bull_arr'] = pl.div_bull
-    f['div_bear_arr'] = pl.div_bear
+    f['div_bull_arr'] = pExec.div_bull
+    f['div_bear_arr'] = pExec.div_bear
     
     if btc_close_arr is not None and len(btc_close_arr) == len(cl):
         safe_btc = np.where(btc_close_arr == 0, 1.0, btc_close_arr)
@@ -1088,8 +1096,8 @@ def precompute_v6_features(ph, pm, pl, htf, mtf, ltf, btc_close_arr=None):
     # ---------------------------------------------------------
     # DIRECTIVE 1: MULTI-TIMEFRAME VOLATILITY SQUEEZE
     # ---------------------------------------------------------
-    bbw_arr = pl.bb_width
-    kc_upper_arr, kc_lower_arr = _keltner_channels_np(cl, pl.h, pl.l, 20, 1.5)
+    bbw_arr = pExec.bb_width
+    kc_upper_arr, kc_lower_arr = _keltner_channels_np(cl, pExec.h, pExec.l, 20, 1.5)
     ema20_arr = _ema_np(cl, 20)
     kcw_arr = np.where(ema20_arr > 0, (kc_upper_arr - kc_lower_arr) / ema20_arr * 100.0, 0.0)
 
@@ -1112,55 +1120,55 @@ def precompute_v6_features(ph, pm, pl, htf, mtf, ltf, btc_close_arr=None):
     f['squeeze_momentum'] = squeeze_mom
 
     # Volatility Expansion Filter: ATR Percentile (100-period)
-    f['atr_percentile_100'] = pl.atr_percentile_100 * 100.0
+    f['atr_percentile_100'] = pExec.atr_percentile_100 * 100.0
 
     # ---------------------------------------------------------
     # DIRECTIVE 2: ICT & MICROSTRUCTURE PROXIES
     # ---------------------------------------------------------
     # rolling 20-bar Swing High/Low
-    rolling_sh = pd.Series(pl.h).rolling(20, min_periods=1).max().to_numpy()
-    rolling_sl = pd.Series(pl.l).rolling(20, min_periods=1).min().to_numpy()
-    atr_safe = np.where(pl.atr14 > 1e-9, pl.atr14, cl * 0.01)
+    rolling_sh = pd.Series(pExec.h).rolling(20, min_periods=1).max().to_numpy()
+    rolling_sl = pd.Series(pExec.l).rolling(20, min_periods=1).min().to_numpy()
+    atr_safe = np.where(pExec.atr14 > 1e-9, pExec.atr14, cl * 0.01)
 
     f['dist_to_rolling_sh_atr'] = (rolling_sh - cl) / atr_safe
     f['dist_to_rolling_sl_atr'] = (cl - rolling_sl) / atr_safe
 
     # Wick Rejection Ratio
-    total_range = pl.h - pl.l
+    total_range = pExec.h - pExec.l
     total_range_safe = np.where(total_range > 1e-9, total_range, 1e-9)
-    body_top = np.maximum(pl.o, cl)
-    body_bottom = np.minimum(pl.o, cl)
-    f['upper_wick_pct'] = (pl.h - body_top) / total_range_safe
-    f['lower_wick_pct'] = (body_bottom - pl.l) / total_range_safe
+    body_top = np.maximum(pExec.o, cl)
+    body_bottom = np.minimum(pExec.o, cl)
+    f['upper_wick_pct'] = (pExec.h - body_top) / total_range_safe
+    f['lower_wick_pct'] = (body_bottom - pExec.l) / total_range_safe
 
     # Killzone Session Flags
-    hours = pd.to_datetime(ltf.timestamp, unit='ms', utc=True).dt.hour.values
+    hours = pd.to_datetime(exec_tf.timestamp, unit='ms', utc=True).dt.hour.values
     f['is_london_killzone'] = np.where((hours >= 7) & (hours <= 10), 1.0, 0.0)
     f['is_ny_killzone'] = np.where((hours >= 13) & (hours <= 16), 1.0, 0.0)
     f['is_asian_range'] = np.where((hours >= 0) & (hours <= 6), 1.0, 0.0)
 
     # Wyckoff Volume Absorption (Directive 3)
-    candle_spread = pl.h - pl.l
-    body_size = np.abs(cl - pl.o)
-    f['vol_absorption'] = np.where((pl.rvol > 1.5) & ((body_size / (candle_spread + 1e-9)) < 0.3), 1.0, 0.0)
+    candle_spread = pExec.h - pExec.l
+    body_size = np.abs(cl - pExec.o)
+    f['vol_absorption'] = np.where((pExec.rvol > 1.5) & ((body_size / (candle_spread + 1e-9)) < 0.3), 1.0, 0.0)
 
     # Time at Mode (Liquidity Consumption proxy)
     # Measures how many bars in the last 20 were within 0.5 ATR of the VWAP
-    diff_from_vwap = np.abs(cl - pl.rolling_vwap_20)
+    diff_from_vwap = np.abs(cl - pExec.rolling_vwap_20)
     is_near_vwap = np.where(diff_from_vwap <= atr_safe * 0.5, 1.0, 0.0)
     f['time_at_mode'] = pd.Series(is_near_vwap).rolling(20, min_periods=1).sum().to_numpy()
 
     # ---------------------------------------------------------
     # DIRECTIVE 3: VWAP & MEAN REVERSION EXTREMES
     # ---------------------------------------------------------
-    f['vwap_z_score'] = (cl - pl.rolling_vwap_20) / atr_safe
+    f['vwap_z_score'] = (cl - pExec.rolling_vwap_20) / atr_safe
 
     # Liquidation Cascade Velocity Filter (Anti-Falling Knife)
     # Measures the speed of the price drop/rally over the last 3 bars
     cl_shifted_3 = pd.Series(cl).shift(3).fillna(cl[0]).to_numpy()
     velocity_atr_3_arr = np.abs(cl - cl_shifted_3) / atr_safe
     f['velocity_atr_3'] = velocity_atr_3_arr
-    pl.velocity_atr_3 = velocity_atr_3_arr
+    pExec.velocity_atr_3 = velocity_atr_3_arr
 
     # ---------------------------------------------------------
     # DIRECTIVE 4: STRIP COLLINEAR NOISE
@@ -1177,45 +1185,60 @@ def precompute_v6_features(ph, pm, pl, htf, mtf, ltf, btc_close_arr=None):
     return f
 
 class BrainLearningManager:
-    def __init__(self, cfg, long_p=None, short_p=None):
-        self.cfg=cfg; self.brains={'long':None, 'short':None}
+    def __init__(self, cfg, brains_dir=None):
+        self.cfg = cfg
+        self.brains = {} # Format: {(strategy, side): model}
         if not joblib: return
-        self.load_brains(long_p, short_p)
+        self.load_brains(brains_dir)
 
-    def load_brains(self, long_p, short_p):
-        for s, p in [('long',long_p), ('short',short_p)]:
-            if p:
-                try: self.brains[s] = joblib.load(p)
-                except Exception as e: print(f"Load error {s}: {e}")
+    def load_brains(self, brains_dir):
+        if not brains_dir: return
+        p = Path(brains_dir)
+        if not p.is_dir(): return
 
-    def predict_prob(self, side, base, adv, iH, iM, iL, px, pre_l):
-        b = self.brains.get(side)
-        if not b: return 0.0
+        loaded = 0
+        for model_file in p.glob("brain_*.joblib"):
+            try:
+                # brain_{STRATEGY}_{SIDE}.joblib
+                parts = model_file.stem.split("_")
+                if len(parts) >= 3:
+                    strat = parts[1]
+                    side = parts[2]
+                    self.brains[(strat, side)] = joblib.load(str(model_file))
+                    loaded += 1
+            except Exception as e:
+                log.error(f"Load error {model_file.name}: {e}")
+        if loaded > 0:
+            log.info(f"Loaded {loaded} localized brain models from {brains_dir}")
+
+    def predict_expected_value(self, strategy, side, base, adv, iExec, px, pExec):
+        b = self.brains.get((strategy, side))
+        if not b: return None # Strict fallback block
         try:
-            vec = self._build_vec(side, base, adv, iL, px, pre_l, b['feature_names'])
-            # CRITICAL FIX: Clip all array values before casting to prevent float32 memory overflow
+            vec = self._build_vec(side, base, adv, iExec, px, pExec, b['feature_names'])
             vec = np.clip(np.nan_to_num(vec, nan=0.0), -1e10, 1e10).astype(np.float32)
-            p = b['classifier'].predict_proba(vec)[0][1]
-            return 1.0-p if b.get('invert_prob') else p
+            # Regressor predict logic
+            ev = b['classifier'].predict(vec)[0]
+            return ev
         except Exception as e:
             log.error(f"Brain Prediction Failed: {e}\n{traceback.format_exc()}")
-            return 0.0
+            return None
 
-    def _build_vec(self, side, b, a, iL, px, pl, fnames):
+    def _build_vec(self, side, b, a, iExec, px, pExec, fnames):
         d = {**b} 
         for k, v in a.items():
-            if hasattr(v, '__getitem__') and len(v) > iL:
-                val = v[iL]
+            if hasattr(v, '__getitem__') and len(v) > iExec:
+                val = v[iExec]
                 d[k] = float(val) if np.isfinite(val) else 0.0
                 if d[k] > 1e10: d[k] = 1e10
                 elif d[k] < -1e10: d[k] = -1e10
             else: d[k] = 0.0
 
-        # ALIGNMENT FIX: Use iL for mtf arrays since they were forward-filled to LTF length
+        # ALIGNMENT FIX
         d.update({
-            "pos_vs_swing_h": (px-pl.last_sh[iL])/px if px else 0.0, 
-            "pos_vs_swing_l": (px-pl.last_sl[iL])/px if px else 0.0,
-            "dist_to_mtf_ema200_pct": (px-a['mtf_ema200_arr'][iL])/px*100 if px and 'mtf_ema200_arr' in a else 0.0,
+            "pos_vs_swing_h": (px-pExec.last_sh[iExec])/px if px else 0.0,
+            "pos_vs_swing_l": (px-pExec.last_sl[iExec])/px if px else 0.0,
+            "dist_to_mtf_ema200_pct": (px-a['mtf_ema200_arr'][iExec])/px*100 if px and 'mtf_ema200_arr' in a else 0.0,
             "side": 1.0 if side=="long" else 0.0
         })
         return np.array([d.get(n, 0.0) for n in fnames]).reshape(1,-1)
@@ -1302,8 +1325,6 @@ class TradeManager:
         current_ts = ts if ts is not None else 0
 
         fee = (self.cfg.taker_fee_bps + self.cfg.slippage_bps) / 10000.0
-        trail_trig = self.cfg.trailing_stop_trigger_r
-        trail_dist = self.cfg.trailing_dist_r
         
         for order in self.pending_orders:
             if order.get('symbol', self.cfg.symbol) != symbol:
@@ -1356,7 +1377,6 @@ class TradeManager:
                     planned_risk = order['entry'] * 0.01
 
                 initial_risk = planned_risk
-                if self.cfg.use_dca: initial_risk /= (self.cfg.dca_max_safety_orders + 1.5)
                 
                 trade = order.copy()
                 trade['avg_price'] = fill_px
@@ -1365,17 +1385,6 @@ class TradeManager:
                 trade['status'] = 'OPEN'
                 trade['fill_ts'] = current_ts
                 trade['bars_open'] = 0
-                
-                if self.cfg.use_dca:
-                    dist = abs(fill_px - trade['sl'])
-                    if side == 'long': 
-                        trade['next_safety_price'] = fill_px - dist
-                        trade['sl'] -= dist * 1.5
-                    else: 
-                        trade['next_safety_price'] = fill_px + dist
-                        trade['sl'] += dist * 1.5
-                else:
-                    trade['next_safety_price'] = 0.0
 
                 # PREVENT INTRA-BAR LEAKAGE: A trade cannot hit TP on the same bar it triggers
                 # because we do not know if the high/low occurred before or after the trigger.
@@ -1419,6 +1428,7 @@ class TradeManager:
             hit_tp = False
             exit_reason = ''
             
+            # Pessimistic Check: SL evaluated first!
             if side == 'long':
                 if l <= sl: hit_sl = True; exit_reason = 'sl'
                 elif h >= tp and can_tp: hit_tp = True; exit_reason = 'tp'
@@ -1456,12 +1466,12 @@ def plan_trade(cfg, f):
     # Backward compatibility stub
     return None
 
-def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
+def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     px = base.get("price")
     if not px: return None
     
-    current_atr = pre.atr14[iL] if pre and iL < len(pre.atr14) else (px * 0.01)
-    sl_atr = base.get("atr_ltf_pct",0)*0.01*px*cfg.atr_mult_sl
+    current_atr = pExec.atr14[iExec] if pExec and iExec < len(pExec.atr14) else (px * 0.01)
+    sl_atr = base.get("atr_exec_pct",0)*0.01*px*cfg.atr_mult_sl
     
     # DYNAMIC TP SCALING
     bb_width = base.get("bb_width", 0.0)
@@ -1470,7 +1480,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
         bb_mult = min(max(bb_width / 2.0, 1.5), 5.0)
         tp_atr_dist = current_atr * bb_mult
     else:
-        tp_atr_dist = base.get("atr_ltf_pct",0)*0.01*px*cfg.atr_mult_tp
+        tp_atr_dist = base.get("atr_exec_pct",0)*0.01*px*cfg.atr_mult_tp
         
     structure_buffer = 0.5 * current_atr
     
@@ -1501,13 +1511,13 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     fvg_bull = base.get("fvg_bull", 0.0); fvg_bear = base.get("fvg_bear", 0.0)
     sweep_bull = base.get("sweep_bull_p", 0.0); sweep_bear = base.get("sweep_bear_p", 0.0)
     
-    swing_high = pre.last_sh[iL] if pre else 0.0
-    swing_low = pre.last_sl[iL] if pre else 0.0
+    swing_high = pExec.last_sh[iExec] if pExec else 0.0
+    swing_low = pExec.last_sl[iExec] if pExec else 0.0
     
-    htf_sh = adv.get('htf_swing_high', [0.0])[iL] if 'htf_swing_high' in adv else 0.0
-    htf_sl = adv.get('htf_swing_low', [0.0])[iL] if 'htf_swing_low' in adv else 0.0
-    mtf_sh = adv.get('mtf_swing_high', [0.0])[iL] if 'mtf_swing_high' in adv else 0.0
-    mtf_sl = adv.get('mtf_swing_low', [0.0])[iL] if 'mtf_swing_low' in adv else 0.0
+    htf_sh = adv.get('htf_swing_high', [0.0])[iExec] if 'htf_swing_high' in adv else 0.0
+    htf_sl = adv.get('htf_swing_low', [0.0])[iExec] if 'htf_swing_low' in adv else 0.0
+    mtf_sh = adv.get('mtf_swing_high', [0.0])[iExec] if 'mtf_swing_high' in adv else 0.0
+    mtf_sl = adv.get('mtf_swing_low', [0.0])[iExec] if 'mtf_swing_low' in adv else 0.0
 
     reversion_penalty = 1.0
     if adx_val > 30: reversion_penalty = 0.5 
@@ -1532,10 +1542,10 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     spring = base.get("wyckoff_spring", 0); upthrust = base.get("wyckoff_upthrust", 0)
 
     # Fuzzy Proximity Helper (Phantom Fill Fix)
-    def is_tapped(level, buffer_atr_mult=0.5):
+    def is_tapped(level, buffer_atr_mult=0.05):
         if level <= 0: return False
         buffer = current_atr * buffer_atr_mult
-        return (abs(px - level) < buffer) or ((pre.l[iL] - buffer) <= level <= (pre.h[iL] + buffer))
+        return (abs(px - level) < buffer) or ((pExec.l[iExec] - buffer) <= level <= (pExec.h[iExec] + buffer))
 
     # Regime Filtering (Hurst Exponent)
     hurst_val = base.get("hurst", 0.5)
@@ -1662,9 +1672,6 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 tp_found = True
                 break
 
-        if not tp_found:
-            # Artificial projection
-            tp = entry_target + tp_atr_dist
 
     else:
         raw_targets = [
@@ -1683,15 +1690,11 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
                 tp_found = True
                 break
 
-        if not tp_found:
-            # Artificial projection
-            tp = entry_target - tp_atr_dist
 
     rr = abs(tp - entry_target) / max(1e-12, dynamic_risk)
 
     if rr < 1.2:
-        tp = entry_target + (dynamic_risk * 1.2) if side == 'long' else entry_target - (dynamic_risk * 1.2)
-        rr = 1.2
+        return None # Strict RR constraint! No fake targets!
     elif rr > 3.0:
         tp = entry_target + (dynamic_risk * 3.0) if side == 'long' else entry_target - (dynamic_risk * 3.0)
         rr = 3.0
@@ -1706,23 +1709,30 @@ def plan_trade_with_brain(cfg, brain, base, adv, iH, iM, iL, pre):
     # ==========================================================
     # DYNAMIC EV GATE
     # ==========================================================
-    prob = 1.0
+    ev = rr
     risk_factor = 1.0
+
+    parts = setup_type.split("_")
+    strat = parts[0]
+
     if brain:
-        prob = brain.predict_prob(side, base, adv, iH, iM, iL, px, pre)
-        required_ev_prob = (1.0 / (1.0 + rr)) + 0.02 # Mathematical Breakeven + 2% Edge
-        min_user_prob = cfg.min_prob_long if side == 'long' else cfg.min_prob_short
-        final_required_prob = max(required_ev_prob, min_user_prob)
-        if prob < final_required_prob:
+        predicted_expected_value = brain.predict_expected_value(strat, side, base, adv, iExec, px, pExec)
+
+        if predicted_expected_value is None:
+            return None # Strict Fallback block! Needs model
+
+        if predicted_expected_value < getattr(cfg, 'min_rr', 1.2):
             return None
 
-        edge = prob - final_required_prob
-        base_risk = 1.0 + (edge * 10.0)
+        ev = predicted_expected_value
+        edge = max(0, ev - 1.2)
+        base_risk = 1.0 + (edge * 2.0)
         risk_factor = min(base_risk, getattr(cfg, 'max_risk_factor', 2.0))
 
     best_plan = {
         "side": side, "entry": entry_target, "sl": sl, "tp": tp, "rr": rr,
-        "prob": prob, "key": f"{setup_type}_{side}", "features": base,
+        "prob": 0.5, # Compatibility
+        "key": f"{setup_type}_{side}", "features": base,
         "risk_factor": risk_factor, "strategy": setup_type, "type": "limit",
         "analysis": analysis_str
     }
