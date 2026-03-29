@@ -187,19 +187,20 @@ def main(argv=None):
         df["strategy"] = "UNKNOWN"
 
     # Extract all distinct setups
-    for strategy in df["strategy"].unique():
+    base_strategies = list(set([s.split('_')[0] for s in df["strategy"].unique()]))
+    for strat_clean in base_strategies:
         # Strat names often have _LONG / _SHORT appended in the strategy string (e.g. ALPHA_LONG)
         # OR side is saved separately
         for side in ["long", "short"]:
             side_val = 1.0 if side == "long" else 0.0
             mask = (df["side"] == side_val) | (df["side"] == side) | (df["strategy"].str.endswith(side.upper()))
-            subset = df[(df["strategy"].str.startswith(strategy.split('_')[0])) & mask].copy()
+            subset = df[(df["strategy"].str.startswith(strat_clean)) & mask].copy()
 
             if len(subset) < 30:
-                log.info(f"Skipping {strategy}_{side} - Not enough samples ({len(subset)})")
+                log.info(f"Skipping {strat_clean}_{side} - Not enough samples ({len(subset)})")
                 continue
 
-            log.info(f"--- Training Isolated Brain: {strategy}_{side} ({len(subset)} samples) ---")
+            log.info(f"--- Training Isolated Brain: {strat_clean}_{side} ({len(subset)} samples) ---")
 
             X_all = subset[base_feature_names].values
             y_all = subset["label"].values
@@ -254,7 +255,7 @@ def main(argv=None):
                         'learning_rate': [0.01, 0.05, 0.1, 0.2],
                         'max_depth': [3, 5, 7, 9],
                         'n_estimators': [100, 300, 500],
-                        'reg_lambda': [1.0, 5.0, 10.0],
+                        'reg_lambda': [0.1, 1.0, 5.0],
                         'subsample': [0.6, 0.8, 1.0],
                         'colsample_bytree': [0.6, 0.8, 1.0]
                     }
@@ -308,7 +309,6 @@ def main(argv=None):
                 "wfa_r2": avg_r2
             }
 
-            strat_clean = strategy.split('_')[0]
             out_file = out_dir / f"brain_{strat_clean}_{side}.joblib"
             joblib.dump(pipeline, out_file)
             log.info(f"Saved Apex Predator XGBoost Brain to {out_file}\n")

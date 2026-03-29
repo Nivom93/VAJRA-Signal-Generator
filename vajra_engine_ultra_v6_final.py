@@ -1708,8 +1708,10 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
     rr = abs(tp - entry_target) / max(1e-12, dynamic_risk)
 
-    if rr < 2.2:
-        return None # Strict RR constraint! No fake targets!
+    if rr < 2.2 and brain is not None:
+        return None # Live Bot: Strict asymmetric risk required
+    elif rr < 1.0 and brain is None:
+        return None # Exporter: Allow base hits and failed setups so the AI learns the difference
     elif rr > 3.0:
         tp = entry_target + (dynamic_risk * 3.0) if side == 'long' else entry_target - (dynamic_risk * 3.0)
         rr = 3.0
