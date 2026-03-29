@@ -143,7 +143,8 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
         df[c] = s
         
     log.info(f"Selected {len(keep)} Normalized Features. Total Samples: {len(df)}")
-    return df[keep + ["label", "entry_ts_dt", "pnl_r"]].copy(), sorted(keep)
+    meta_cols = [c for c in ["side", "strategy"] if c in df.columns]
+    return df[keep + ["label", "entry_ts_dt", "pnl_r"] + meta_cols].copy(), sorted(keep)
 
 def _sanitize_data(X: np.ndarray) -> np.ndarray:
     return np.clip(np.nan_to_num(X, nan=0.0), -1e10, 1e10).astype(np.float32)
