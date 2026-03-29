@@ -1700,7 +1700,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
     rr = abs(tp - entry_target) / max(1e-12, dynamic_risk)
 
-    if rr < 1.0:
+    if rr < 2.2:
         return None # Strict RR constraint! No fake targets!
     elif rr > 3.0:
         tp = entry_target + (dynamic_risk * 3.0) if side == 'long' else entry_target - (dynamic_risk * 3.0)
@@ -1728,11 +1728,11 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         if predicted_expected_value is None:
             return None # Strict Fallback block! Needs model
 
-        if predicted_expected_value < getattr(cfg, 'min_rr', 1.0):
+        if predicted_expected_value < getattr(cfg, 'min_rr', 2.2):
             return None
 
         ev = predicted_expected_value
-        edge = max(0, ev - 1.0)
+        edge = max(0, ev - 2.2)
         base_risk = 1.0 + (edge * 2.0)
         risk_factor = min(base_risk, getattr(cfg, 'max_risk_factor', 2.0))
 
