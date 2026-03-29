@@ -63,7 +63,7 @@ def _strategy_overrides(cfg):
     cfg.dca_max_safety_orders = 0
 
     # --- STRUCTURAL SNIPER GEOMETRY ---
-    cfg.min_rr = 1.0
+    cfg.min_rr = 2.2
     cfg.atr_mult_sl = 1.0
     cfg.atr_mult_tp = 1.2
 
