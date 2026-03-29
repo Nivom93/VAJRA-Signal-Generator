@@ -210,7 +210,7 @@ def main(argv=None):
 
             # --- Feature Selection (RFE) ---
             log.info("Running RFE Feature Selection...")
-            estimator = xgb.XGBRegressor(n_estimators=50, max_depth=3, random_state=42)
+            estimator = xgb.XGBRegressor(n_estimators=25, max_depth=2, random_state=42)
             selector = RFE(estimator, n_features_to_select=min(args.max_features, len(base_feature_names)), step=1)
             selector = selector.fit(X_all, y_all)
             selected_features = [f for f, s in zip(base_feature_names, selector.support_) if s]
@@ -253,8 +253,9 @@ def main(argv=None):
                     from sklearn.model_selection import RandomizedSearchCV
                     param_dist = {
                         'learning_rate': [0.01, 0.05, 0.1, 0.2],
-                        'max_depth': [3, 5, 7, 9],
-                        'n_estimators': [100, 300, 500],
+                        'max_depth': [1, 2, 3, 4],
+                        'n_estimators': [50, 100, 150],
+                        'reg_alpha': [0.1, 1.0, 5.0],
                         'reg_lambda': [0.1, 1.0, 5.0],
                         'subsample': [0.6, 0.8, 1.0],
                         'colsample_bytree': [0.6, 0.8, 1.0]
