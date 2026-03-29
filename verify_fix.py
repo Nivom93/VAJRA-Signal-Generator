@@ -1,38 +1,49 @@
-try:
-    import defusedxml.ElementTree as ET
-    from defusedxml import DefusedXmlException
-except ImportError:
-    print("defusedxml is not installed. This script requires it to verify the fix.")
-    exit(0)
-
 import os
 
-# Malicious XML with XXE
-xml_with_xxe = """<?xml version="1.0" encoding="ISO-8859-1"?>
-<!DOCTYPE foo [
-  <!ENTITY xxe SYSTEM "file:///etc/passwd" >]>
-<rss version="2.0">
-<channel>
-  <item>
-    <title>&xxe;</title>
-  </item>
-</channel>
-</rss>
-"""
+with open('vajra_live.py', 'r') as f:
+    data = f.read()
 
-def test_defusedxml():
-    print("Testing with defusedxml.ElementTree:")
-    try:
-        # defusedxml should raise an error when encountering DTD/entities by default
-        root = ET.fromstring(xml_with_xxe)
-        print("VULNERABLE: defusedxml allowed XXE!")
-        for item in root.findall('.//item'):
-            title_elem = item.find('title')
-            print(f"Title: {title_elem.text}")
-    except DefusedXmlException as e:
-        print(f"SUCCESS: defusedxml blocked the attack: {e}")
+# 1. Update _fetch_macro_context variables and return
+data = data.replace('''def _fetch_macro_context(ex, global_cache, cfg):
+    btc_bullish = 1.0
+    btcd_trend = 0.0
+    dxy_val = 0.0
+    spx_val = 0.0
+    oracle_sentiment_val = 0.0
+
+    try:''', '''def _fetch_macro_context(ex, global_cache, cfg):
+    btc_bullish = 1.0
+    btcd_trend = 0.0
+    oracle_sentiment_val = 0.0
+
+    try:''')
+
+data = data.replace('''        if getattr(cfg, 'use_macro_data', False):
+            try:
+                import yfinance as yf
+                dxy_c = yf.Ticker("DX-Y.NYB").history(period="5d")['Close']
+                spx_c = yf.Ticker("^GSPC").history(period="5d")['Close']
+                dxy_val = float(dxy_c.iloc[-1]) if not dxy_c.empty else 0.0
+                spx_val = float(spx_c.iloc[-1]) if not spx_c.empty else 0.0
+            except: pass
+
     except Exception as e:
-        print(f"Caught unexpected exception: {e}")
+        log.warning(f"Macro Sync Failed: {e}")''', '''    except Exception as e:
+        log.warning(f"Macro Sync Failed: {e}")''')
 
-if __name__ == "__main__":
-    test_defusedxml()
+data = data.replace('''    except Exception as e:
+        log.warning(f"Oracle Sentiment Sync Failed: {e}")
+
+    return btc_bullish, btcd_trend, dxy_val, spx_val, oracle_sentiment_val''', '''    except Exception as e:
+        log.warning(f"Oracle Sentiment Sync Failed: {e}")
+
+    return btc_bullish, btcd_trend, 0.0, 0.0, oracle_sentiment_val''')
+
+data = data.replace('''            btc_bullish, btcd_trend, dxy_val, spx_val, oracle_sentiment_val = _fetch_macro_context(ex, global_cache, cfg)
+            btc_ltf = global_cache.get("btc_ltf", pd.DataFrame())''', '''            btc_bullish, btcd_trend, _, _, oracle_sentiment_val = _fetch_macro_context(ex, global_cache, cfg)
+            dxy_val = macro_fetcher.state["dxy_val"]
+            spx_val = macro_fetcher.state["spx_val"]
+            btc_ltf = global_cache.get("btc_ltf", pd.DataFrame())''')
+
+with open('vajra_live.py', 'w') as f:
+    f.write(data)
