@@ -1226,15 +1226,15 @@ class BrainLearningManager:
         if loaded > 0:
             log.info(f"Loaded {loaded} localized brain models from {brains_dir}")
 
-    def predict_expected_value(self, strategy, side, base, adv, iExec, px, pExec):
+    def predict_probability(self, strategy, side, base, adv, iExec, px, pExec):
         b = self.brains.get((strategy, side))
         if not b: return None # Strict fallback block
         try:
             vec = self._build_vec(side, base, adv, iExec, px, pExec, b['feature_names'])
             vec = np.clip(np.nan_to_num(vec, nan=0.0), -1e10, 1e10).astype(np.float32)
-            # Regressor predict logic
-            ev = b['classifier'].predict(vec)[0]
-            return ev
+            # Classifier predict_proba logic
+            prob = b['classifier'].predict_proba(vec)[0][1]
+            return prob
         except Exception as e:
             log.error(f"Brain Prediction Failed: {e}\n{traceback.format_exc()}")
             return None
@@ -1564,8 +1564,8 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
     # Regime Filtering (Hurst Exponent)
     hurst_val = base.get("hurst", 0.5)
-    is_trending_regime = hurst_val > 0.55
-    is_ranging_regime = hurst_val < 0.45
+    is_trending_regime = hurst_val > 0.50
+    is_ranging_regime = hurst_val <= 0.50
 
     # Evaluate Longs
     if can_long:
@@ -1728,27 +1728,27 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # ==========================================================
     ev = rr
     risk_factor = 1.0
-
     parts = setup_type.split("_")
     strat = parts[0]
 
     if brain:
-        predicted_expected_value = brain.predict_expected_value(strat, side, base, adv, iExec, px, pExec)
+        win_prob = brain.predict_probability(strat, side, base, adv, iExec, px, pExec)
+        if win_prob is None: return None # Strict Fallback block! Needs model
 
-        if predicted_expected_value is None:
-            return None # Strict Fallback block! Needs model
+        min_p = getattr(cfg, 'min_prob_long', 0.51) if side == 'long' else getattr(cfg, 'min_prob_short', 0.51)
+        if win_prob < min_p: return None
 
-        if predicted_expected_value < getattr(cfg, 'min_rr', 2.2):
-            return None
+        # Calculate true Expected Value (EV) = (Win% * Reward) - (Loss% * Risk)
+        ev = (win_prob * rr) - ((1.0 - win_prob) * 1.0)
+        if ev <= 0.1: return None # Only take trades with a positive mathematical edge
 
-        ev = predicted_expected_value
-        edge = max(0, ev - 2.2)
+        edge = ev
         base_risk = 1.0 + (edge * 2.0)
         risk_factor = min(base_risk, getattr(cfg, 'max_risk_factor', 2.0))
 
     best_plan = {
         "side": side, "entry": entry_target, "sl": sl, "tp": tp, "rr": rr,
-        "prob": 0.5, # Compatibility
+        "prob": win_prob if brain else 0.5, # Compatibility
         "key": f"{setup_type}_{side}", "features": base,
         "risk_factor": risk_factor, "strategy": setup_type, "type": "limit",
         "analysis": analysis_str
