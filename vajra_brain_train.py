@@ -269,12 +269,6 @@ def main(argv=None):
 
     log.info("Training Final Production Model on FULL DATASET (Weighted)...")
     
-    from sklearn.impute import SimpleImputer
-    from sklearn.preprocessing import RobustScaler
-    imputer = SimpleImputer(strategy='median')
-    scaler = RobustScaler()
-    X_all_s = scaler.fit_transform(imputer.fit_transform(X_all))
-    
     # DAMPENED MINORITY CLASS STARVATION (FULL DATASET)
     num_pos_all = int(np.sum(y_all.astype(int)))
     num_neg_all = int(len(y_all)) - num_pos_all
@@ -299,7 +293,7 @@ def main(argv=None):
     # Calibration natively suppresses scale_pos_weight forcing the outputs
     # back to raw sample distribution percentages. We want raw uncalibrated
     # outputs to center around 0.5 for asymmetric edge hunting.
-    final_model.fit(X_all_s, y_all, sample_weight=sample_weights)
+    final_model.fit(X_all, y_all, sample_weight=sample_weights)
 
     # EDGE EXTRACTION: Anti-Signal Flipping
     # In highly mean-reverting crypto regimes where the AUC collapses below 0.40,
@@ -310,11 +304,11 @@ def main(argv=None):
         log.info("⚠️ Severe Anti-Signal Detected (AUC < 0.40). Flipping Probability Pipeline to Harvest Edge.")
     if args.calibrate:
         final_cal = CalibratedClassifierCV(final_base, method='sigmoid', cv=5)
-        try: final_cal.fit(X_all_s, y_all, sample_weight=sample_weights)
-        except: final_cal.fit(X_all_s, y_all)
+        try: final_cal.fit(X_all, y_all, sample_weight=sample_weights)
+        except: final_cal.fit(X_all, y_all)
         final_model = final_cal
     else:
-        final_model.fit(X_all_s, y_all, sample_weight=sample_weights)
+        final_model.fit(X_all, y_all, sample_weight=sample_weights)
 
     pipeline = {
         "classifier": final_model, 

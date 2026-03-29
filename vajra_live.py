@@ -225,8 +225,6 @@ def log_to_csv(filepath, plan):
 def _fetch_macro_context(ex, global_cache, cfg):
     btc_bullish = 1.0
     btcd_trend = 0.0
-    dxy_val = 0.0
-    spx_val = 0.0
     oracle_sentiment_val = 0.0
 
     try:
