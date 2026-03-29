@@ -85,34 +85,42 @@ class AutoRetrainer(threading.Thread):
     Background sentinel that monitors model files for updates and 
     periodically triggers retraining if data is stale.
     """
-    def __init__(self, brain_manager, long_path, short_path, interval_hours=12):
+    def __init__(self, brain_manager, brains_dir, interval_hours=12):
         super().__init__(daemon=True)
         self.brain_manager = brain_manager
-        self.long_path = long_path
-        self.short_path = short_path
+        self.brains_dir = brains_dir
         self.interval = interval_hours * 3600
         self.last_mtimes = {}
         self._update_mtimes()
 
     def _update_mtimes(self):
-        for p in [self.long_path, self.short_path]:
-            if os.path.exists(p):
-                self.last_mtimes[p] = os.path.getmtime(p)
+        if not self.brains_dir: return
+        p = Path(self.brains_dir)
+        if p.is_dir():
+            for f in p.glob("brain_*.joblib"):
+                self.last_mtimes[str(f)] = os.path.getmtime(f)
 
     def run(self):
         log.info("🛡️ Auto-Retrainer Sentinel Active.")
         while True:
             time.sleep(60) # Check every minute for file changes, trigger retrain logic every interval
             
+            if not self.brains_dir: continue
+
             # 1. Hot Reload Check
-            for p in [self.long_path, self.short_path]:
-                if os.path.exists(p):
-                    curr_mtime = os.path.getmtime(p)
-                    if curr_mtime > self.last_mtimes.get(p, 0):
-                        log.info(f"🧠 Brain update detected: {p}. Hot reloading...")
-                        self.brain_manager.load_brains(self.long_path, self.short_path)
-                        self.last_mtimes[p] = curr_mtime
-                        log.info("✅ Brain Hot Reload Complete.")
+            p = Path(self.brains_dir)
+            needs_reload = False
+            if p.is_dir():
+                for f in p.glob("brain_*.joblib"):
+                    curr_mtime = os.path.getmtime(f)
+                    if curr_mtime > self.last_mtimes.get(str(f), 0):
+                        log.info(f"🧠 Brain update detected: {f.name}. Hot reloading...")
+                        self.last_mtimes[str(f)] = curr_mtime
+                        needs_reload = True
+
+            if needs_reload:
+                self.brain_manager.load_brains(self.brains_dir)
+                log.info("✅ Brain Hot Reload Complete.")
 
 # --- EXECUTION MANAGER ---
 
@@ -243,11 +251,11 @@ def _fetch_macro_context(ex, global_cache, cfg):
             dist_pct = (current_price - btc_ema100) / btc_ema100 * 100
             log.info(f"BTC Context (4H): Bullish={btc_bullish} (Dist={dist_pct:.2f}%)")
 
-        new_btc_ltf = ex.fetch_ohlcv_df("BTC/USDT", cfg.ltf, limit=5)
-        if global_cache["btc_ltf"].empty:
-            global_cache["btc_ltf"] = new_btc_ltf
+        new_btc_exec = ex.fetch_ohlcv_df("BTC/USDT", cfg.exec_tf, limit=5)
+        if global_cache["btc_exec_tf"].empty:
+            global_cache["btc_exec_tf"] = new_btc_exec
         else:
-            global_cache["btc_ltf"] = pd.concat([global_cache["btc_ltf"], new_btc_ltf]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True)
+            global_cache["btc_exec_tf"] = pd.concat([global_cache["btc_exec_tf"], new_btc_exec]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True)
 
         try:
             new_btcd = ex.fetch_ohlcv_df("BTCDOM/USDT", "4h", limit=5)
@@ -310,11 +318,11 @@ def run_bot(args):
             time.sleep(10)
 
     executor = RealExecutionManager(ex.client, cfg)
-    brain = BrainLearningManager(cfg, args.brain_long_path, args.brain_short_path)
+    brain = BrainLearningManager(cfg, args.brains_dir)
     tm = TradeManager(cfg, ex, mem, brain)
     
     # 3. Start Auto-Retrainer Sentinel
-    retrainer = AutoRetrainer(brain, args.brain_long_path, args.brain_short_path)
+    retrainer = AutoRetrainer(brain, args.brains_dir)
     retrainer.start()
 
     # 4. Start Macro Fetcher Daemon
@@ -326,14 +334,15 @@ def run_bot(args):
     market_cache = {}
     for sym in cfg.symbols:
         market_cache[sym] = {
+            "macro_tf": ex.fetch_ohlcv_df(sym, cfg.macro_tf, limit=250),
+            "swing_tf": ex.fetch_ohlcv_df(sym, cfg.swing_tf, limit=250),
             "htf": ex.fetch_ohlcv_df(sym, cfg.htf, limit=250),
-            "mtf": ex.fetch_ohlcv_df(sym, cfg.mtf, limit=250),
-            "ltf": ex.fetch_ohlcv_df(sym, cfg.ltf, limit=500)
+            "exec_tf": ex.fetch_ohlcv_df(sym, cfg.exec_tf, limit=500)
         }
     
     global_cache = {
         "btc_4h": ex.fetch_ohlcv_df("BTC/USDT", "4h", limit=1000),
-        "btc_ltf": ex.fetch_ohlcv_df("BTC/USDT", cfg.ltf, limit=500)
+        "btc_exec_tf": ex.fetch_ohlcv_df("BTC/USDT", cfg.exec_tf, limit=500)
     }
     try:
         global_cache["btcd_4h"] = ex.fetch_ohlcv_df("BTCDOM/USDT", "4h", limit=50)
@@ -361,29 +370,33 @@ def run_bot(args):
             btc_bullish, btcd_trend, _, _, oracle_sentiment_val = _fetch_macro_context(ex, global_cache, cfg)
             dxy_val = macro_fetcher.state["dxy_val"]
             spx_val = macro_fetcher.state["spx_val"]
-            btc_ltf = global_cache.get("btc_ltf", pd.DataFrame())
+            btc_exec_tf = global_cache.get("btc_exec_tf", pd.DataFrame())
 
             # --- MULTI-SYMBOL SCANNING LOOP ---
             for symbol in cfg.symbols:
                 cfg.symbol = symbol 
                 
                 # Fetch incremental update and apply to cache (Protect Rate Limits)
+                new_macro = ex.fetch_ohlcv_df(symbol, cfg.macro_tf, limit=5)
+                market_cache[symbol]["macro_tf"] = pd.concat([market_cache[symbol]["macro_tf"], new_macro]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
+                macro_tf = market_cache[symbol]["macro_tf"]
+
+                new_swing = ex.fetch_ohlcv_df(symbol, cfg.swing_tf, limit=5)
+                market_cache[symbol]["swing_tf"] = pd.concat([market_cache[symbol]["swing_tf"], new_swing]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
+                swing_tf = market_cache[symbol]["swing_tf"]
+
                 new_htf = ex.fetch_ohlcv_df(symbol, cfg.htf, limit=5)
                 market_cache[symbol]["htf"] = pd.concat([market_cache[symbol]["htf"], new_htf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
                 htf = market_cache[symbol]["htf"]
 
-                new_mtf = ex.fetch_ohlcv_df(symbol, cfg.mtf, limit=5)
-                market_cache[symbol]["mtf"] = pd.concat([market_cache[symbol]["mtf"], new_mtf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
-                mtf = market_cache[symbol]["mtf"]
-
-                new_ltf = ex.fetch_ohlcv_df(symbol, cfg.ltf, limit=5)
-                market_cache[symbol]["ltf"] = pd.concat([market_cache[symbol]["ltf"], new_ltf]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True)
-                ltf = market_cache[symbol]["ltf"]
+                new_exec = ex.fetch_ohlcv_df(symbol, cfg.exec_tf, limit=5)
+                market_cache[symbol]["exec_tf"] = pd.concat([market_cache[symbol]["exec_tf"], new_exec]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True)
+                exec_tf = market_cache[symbol]["exec_tf"]
                 
-                if ltf.empty or len(htf) < 2 or len(mtf) < 2 or len(ltf) < 2: continue
+                if exec_tf.empty or len(macro_tf) < 2 or len(swing_tf) < 2 or len(htf) < 2 or len(exec_tf) < 2: continue
                 
                 # FIX 1: THE GHOST CANDLE TIME-DILATION BUG
-                curr_ts = int(ltf.timestamp.iloc[-2])
+                curr_ts = int(exec_tf.timestamp.iloc[-2])
                 if curr_ts <= last_processed_ts.get(symbol, 0):
                     continue
                 last_processed_ts[symbol] = curr_ts
@@ -400,23 +413,23 @@ def run_bot(args):
                 except Exception as e:
                     log.debug(f"[{symbol}] L2 Orderbook fetch failed: {e}")
 
-                pre_l = Precomp(ltf)
-                pre_map = {"htf": Precomp(htf), "mtf": Precomp(mtf), "ltf": pre_l}
+                pMacro, pSwing, pHtf, pExec = Precomp(macro_tf), Precomp(swing_tf), Precomp(htf), Precomp(exec_tf)
+                pre_map = {"macro_tf": pMacro, "swing_tf": pSwing, "htf": pHtf, "exec_tf": pExec}
                 
                 btc_close_aligned = None
-                if not btc_ltf.empty and not ltf.empty:
-                    btc_s_close = pd.Series(btc_ltf.close.values, index=btc_ltf["timestamp"])
-                    btc_close_aligned = btc_s_close.reindex(ltf["timestamp"], method='ffill').fillna(0.0).values
+                if not btc_exec_tf.empty and not exec_tf.empty:
+                    btc_s_close = pd.Series(btc_exec_tf.close.values, index=btc_exec_tf["timestamp"])
+                    btc_close_aligned = btc_s_close.reindex(exec_tf["timestamp"], method='ffill').fillna(0.0).values
 
                 adv_features = precompute_v6_features(
-                    pre_map["htf"], pre_map["mtf"], pre_l, htf, mtf, ltf, 
+                    pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf,
                     btc_close_arr=btc_close_aligned
                 )
 
                 oi_val = 0.0
                 if getattr(cfg, 'use_macro_data', False):
                     try: 
-                        oi_arr = fetch_delta_oi(ex, symbol, cfg.ltf, ltf["timestamp"])
+                        oi_arr = fetch_delta_oi(ex, symbol, cfg.exec_tf, exec_tf["timestamp"])
                         oi_val = float(oi_arr[-2]) if len(oi_arr) > 1 else 0.0
                     except: pass
 
@@ -433,17 +446,25 @@ def run_bot(args):
                 }
                 
                 # PHASE 1: PREVENT FEATURE REPAINTING (Strict evaluation on fully closed candle)
-                iH, iM, iL = len(htf)-1, len(mtf)-1, len(ltf)-2
-                base = confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, pre_map, extras=extras)
-                base["timestamp"] = ltf.timestamp.iloc[-2]
+                # For Live Bot, [-1] is the open unclosed candle, [-2] is the completely closed one.
+                # So the completely closed timestamp is ts of [-2].
+                ts_closed = int(exec_tf.timestamp.iloc[-2])
+
+                iMacro = np.searchsorted(macro_tf['timestamp'].values, ts_closed, side='right') - 1
+                iSwing = np.searchsorted(swing_tf['timestamp'].values, ts_closed, side='right') - 1
+                iHtf = np.searchsorted(htf['timestamp'].values, ts_closed, side='right') - 1
+                iExec = len(exec_tf)-2
+
+                base = confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, max(0, iMacro-1), max(0, iSwing-1), max(0, iHtf-1), iExec, pre_map, extras=extras)
+                base["timestamp"] = exec_tf.timestamp.iloc[-2]
                 base["symbol"] = symbol
                 
-                curr_bar = {"o":ltf.open.iloc[-2], "h":ltf.high.iloc[-2], "l":ltf.low.iloc[-2], "c":ltf.close.iloc[-2]}
+                curr_bar = {"o":exec_tf.open.iloc[-2], "h":exec_tf.high.iloc[-2], "l":exec_tf.low.iloc[-2], "c":exec_tf.close.iloc[-2]}
                 
                 # Step 1: Manage Existing
                 # FIX 7: STRUCTURAL TRAILING STOP PARALYSIS (Pass swing_high/swing_low)
-                sh = pre_l.last_sh[iL] if iL < len(pre_l.last_sh) else 0.0
-                sl = pre_l.last_sl[iL] if iL < len(pre_l.last_sl) else 0.0
+                sh = pExec.last_sh[iExec] if iExec < len(pExec.last_sh) else 0.0
+                sl = pExec.last_sl[iExec] if iExec < len(pExec.last_sl) else 0.0
                 closed = tm.step_bar(symbol, curr_bar["o"], curr_bar["h"], curr_bar["l"], curr_bar["c"], ts=curr_ts, swing_high=sh, swing_low=sl)
 
                 if closed:
@@ -451,7 +472,7 @@ def run_bot(args):
                         log.info(f"[{symbol}] ⛔ Trade Closed: {t['side']} PnL: {t['pnl_r']:.2f}R")
 
                 # Step 2: Look for New Entries
-                plan = plan_trade_with_brain(cfg, brain, base, adv_features, iH, iM, iL, pre_l)
+                plan = plan_trade_with_brain(cfg, brain, base, adv_features, iExec, pExec)
                 
                 if plan:
                     # SPOOFING DEFENSE: Block limit orders if facing a massive spoofed wall
@@ -520,9 +541,11 @@ if __name__ == "__main__":
     p.add_argument("--symbol", default="ETH/USDT") 
     p.add_argument("--db-path", default="vajra.sqlite")
     p.add_argument("--csv-log-path", default="live_trades_log.csv")
-    p.add_argument("--brain-long-path", required=True)
-    p.add_argument("--brain-short-path", required=True)
-    p.add_argument("--htf", default="12h"); p.add_argument("--mtf", default="1h"); p.add_argument("--ltf", default="15m")
+    p.add_argument("--brains-dir", required=True, help="Directory containing localized strategy brains")
+    p.add_argument("--macro-tf", default="1d")
+    p.add_argument("--swing-tf", default="4h")
+    p.add_argument("--htf", default="1h")
+    p.add_argument("--exec-tf", default="15m")
     p.add_argument("--discord-webhook", default=os.getenv("DISCORD_WEBHOOK_URL"))
     args = p.parse_args()
     while True:

@@ -170,23 +170,25 @@ def fetch_delta_oi(exw: ExchangeWrapper, symbol: str, timeframe: str, ltf_timest
         log.warning(f"CCXT fetch_oi failed for {symbol}: {e}")
     return np.zeros(len(ltf_timestamps))
 
-def _build_full_features(base, adv_features, iH, iM, iL, len_htf, len_mtf, len_ltf, ts, pre_l):
+def _build_full_features(base, adv_features, iMacro, iSwing, iHtf, iExec, len_macro, len_swing, len_htf, len_exec, ts, pExec):
     full_feats = {**base}
     for k, v_arr in adv_features.items():
          if not hasattr(v_arr, '__getitem__') or isinstance(v_arr, (str, float, int)):
              full_feats[k] = v_arr; continue
          arr_len = len(v_arr)
          idx = -1
-         if arr_len == len_ltf: idx = iL
-         # UNCLOSED CANDLE LEAK PATCHED: Force historical 1-shift
-         elif arr_len == len_mtf: idx = max(0, iM - 1)
-         elif arr_len == len_htf: idx = max(0, iH - 1)
+         if arr_len == len_exec: idx = iExec
+         # UNCLOSED CANDLE LEAK PATCHED: Evaluate strictly on closed candles
+         elif arr_len == len_htf: idx = max(0, iHtf - 1)
+         elif arr_len == len_swing: idx = max(0, iSwing - 1)
+         elif arr_len == len_macro: idx = max(0, iMacro - 1)
          else: continue
+
          if 0 <= idx < arr_len:
              val = v_arr[idx]
              full_feats[k] = float(val) if np.isfinite(val) else 0.0
 
-    full_feats["rsi_14"] = float(pre_l.rsi14[iL]) if iL < len(pre_l.rsi14) else 50.0
+    full_feats["rsi_14"] = float(pExec.rsi14[iExec]) if iExec < len(pExec.rsi14) else 50.0
 
     entry_dt = pd.to_datetime(ts, unit="ms", utc=True)
     full_feats["hour_of_day"] = entry_dt.hour
@@ -200,7 +202,10 @@ def main():
     p.add_argument("--symbol", default="BTC/USDT")
     p.add_argument("--since", required=True)
     p.add_argument("--until", required=True)
-    p.add_argument("--htf", default="12h"); p.add_argument("--mtf", default="1h"); p.add_argument("--ltf", default="15m")
+    p.add_argument("--macro-tf", default="1d")
+    p.add_argument("--swing-tf", default="4h")
+    p.add_argument("--htf", default="1h")
+    p.add_argument("--exec-tf", default="15m")
     p.add_argument("--out", required=True)
     p.add_argument("--min-rr", type=float, default=-1.0)
     
@@ -217,22 +222,22 @@ def main():
     cfg.filter_adx_chop = False
 
     cfg.exchange_id = args.exchange_id; cfg.market_type = args.market_type; cfg.symbol = args.symbol
-    cfg.htf, cfg.mtf, cfg.ltf = args.htf, args.mtf, args.ltf
+    cfg.macro_tf = args.macro_tf
+    cfg.swing_tf = args.swing_tf
+    cfg.htf = args.htf
+    cfg.exec_tf = args.exec_tf
     if args.min_rr >= 0: cfg.min_rr = args.min_rr
     cfg.max_concurrent = 0  
 
-    if getattr(cfg, "use_meta_labeling", False):
-        log.info("META-LABEL MODE ACTIVE. Obeying Overrides Geometry.")
-
     log.info("="*60)
     log.info(f" EXPORT MODE: META-LABEL GENERATOR")
-    log.info(f" Logic Source: vajra_engine_ultra_v6_final.plan_trade")
+    log.info(f" Logic Source: vajra_engine_ultra_v6_final.plan_trade_with_brain")
     log.info("="*60)
 
     preloaded = bt._preload_or_fetch(args)
-    htf, mtf, ltf = preloaded.htf, preloaded.mtf, preloaded.ltf
+    macro_tf, swing_tf, htf, exec_tf = preloaded.macro_tf, preloaded.swing_tf, preloaded.htf, preloaded.exec_tf
     
-    btc = preloaded.btc if preloaded.btc is not None else htf.copy()
+    btc = preloaded.btc if preloaded.btc is not None else macro_tf.copy()
     btc.sort_values("timestamp", inplace=True, ignore_index=True)
     btc_c = btc["close"].values
     
@@ -240,18 +245,19 @@ def main():
     btc_bull_arr = (btc_c > btc_ema_trend).astype(float)
     
     btc_s = pd.Series(btc_bull_arr, index=btc["timestamp"]).shift(1)
-    btc_aligned = btc_s.reindex(ltf["timestamp"], method='ffill').fillna(1.0).values
+    btc_aligned = btc_s.reindex(exec_tf["timestamp"], method='ffill').fillna(1.0).values
 
+    macro_tf.sort_values("timestamp", inplace=True); macro_tf.reset_index(drop=True, inplace=True)
+    swing_tf.sort_values("timestamp", inplace=True); swing_tf.reset_index(drop=True, inplace=True)
     htf.sort_values("timestamp", inplace=True); htf.reset_index(drop=True, inplace=True)
-    mtf.sort_values("timestamp", inplace=True); mtf.reset_index(drop=True, inplace=True)
-    ltf.sort_values("timestamp", inplace=True); ltf.reset_index(drop=True, inplace=True)
+    exec_tf.sort_values("timestamp", inplace=True); exec_tf.reset_index(drop=True, inplace=True)
 
     log.info("Downloading Macro & Micro-Structure contextual data...")
     exw = ExchangeWrapper(cfg)
-    dxy_aligned = fetch_macro_trend("DX=F", ltf["timestamp"])
-    spx_aligned = fetch_macro_trend("ES=F", ltf["timestamp"])
-    oi_aligned = fetch_delta_oi(exw, cfg.symbol, cfg.ltf, ltf["timestamp"])
-    funding_aligned = fetch_historical_funding_rates(exw, cfg.symbol, ltf["timestamp"])
+    dxy_aligned = fetch_macro_trend("DX=F", exec_tf["timestamp"])
+    spx_aligned = fetch_macro_trend("ES=F", exec_tf["timestamp"])
+    oi_aligned = fetch_delta_oi(exw, cfg.symbol, cfg.exec_tf, exec_tf["timestamp"])
+    funding_aligned = fetch_historical_funding_rates(exw, cfg.symbol, exec_tf["timestamp"])
 
     # Historical BTC.D Fetch
     try:
@@ -268,23 +274,23 @@ def main():
                 elif slope < -0.5: btcd_trend[i] = -1.0
 
             btcd_series = pd.Series(btcd_trend, index=pd.to_datetime(btcd_df['timestamp'], unit='ms', utc=True))
-            btcd_aligned = btcd_series.shift(1).reindex(pd.to_datetime(ltf["timestamp"], unit='ms', utc=True), method='ffill').fillna(0.0).values
+            btcd_aligned = btcd_series.shift(1).reindex(pd.to_datetime(exec_tf["timestamp"], unit='ms', utc=True), method='ffill').fillna(0.0).values
         else:
-            btcd_aligned = np.zeros(len(ltf))
+            btcd_aligned = np.zeros(len(exec_tf))
     except Exception as e:
         log.warning(f"Failed to fetch BTCDOM: {e}")
-        btcd_aligned = np.zeros(len(ltf))
+        btcd_aligned = np.zeros(len(exec_tf))
 
-    pre_h, pre_m, pre_l = Precomp(htf), Precomp(mtf), Precomp(ltf)
-    pre_map = {"htf": pre_h, "mtf": pre_m, "ltf": pre_l}
+    pMacro, pSwing, pHtf, pExec = Precomp(macro_tf), Precomp(swing_tf), Precomp(htf), Precomp(exec_tf)
+    pre_map = {"macro_tf": pMacro, "swing_tf": pSwing, "htf": pHtf, "exec_tf": pExec}
 
-    btc_s_close = pd.Series(btc_c, index=btc["timestamp"]).shift(1).reindex(ltf["timestamp"], method='ffill').fillna(0.0).values
-    if len(btc_s_close) != len(ltf):
-        btc_s_close = np.resize(btc_s_close, len(ltf))
+    btc_s_close = pd.Series(btc_c, index=btc["timestamp"]).shift(1).reindex(exec_tf["timestamp"], method='ffill').fillna(0.0).values
+    if len(btc_s_close) != len(exec_tf):
+        btc_s_close = np.resize(btc_s_close, len(exec_tf))
 
     log.info("Generating V7 features...")
     adv_features = precompute_v6_features(
-        pre_h, pre_m, pre_l, htf, mtf, ltf, 
+        pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf,
         btc_close_arr=btc_s_close
     )
     
@@ -294,22 +300,21 @@ def main():
     events = []; open_meta = []
     
     since_ms, until_ms = _parse_date_or_ms(args.since), _parse_date_or_ms(args.until)
-    ltf_iter = ltf[(ltf["timestamp"] >= since_ms) & (ltf["timestamp"] < until_ms)]
+    exec_iter = exec_tf[(exec_tf["timestamp"] >= since_ms) & (exec_tf["timestamp"] < until_ms)]
 
-    log.info(f"Processing {len(ltf_iter)} bars...")
+    log.info(f"Processing {len(exec_iter)} bars...")
     
-    len_ltf = len(ltf); len_mtf = len(mtf); len_htf = len(htf)
-    htf_ts_vals = htf['timestamp'].values
-    mtf_ts_vals = mtf['timestamp'].values
+    len_macro = len(macro_tf); len_swing = len(swing_tf); len_htf = len(htf); len_exec = len(exec_tf)
     
     def _process_bar(row, original_idx):
         ts = int(row.timestamp)
         
-        iH = np.searchsorted(htf['timestamp'].values, ts, side='right') - 1
-        iM = np.searchsorted(mtf['timestamp'].values, ts, side='right') - 1
-        iL = int(row.Index)
+        iMacro = np.searchsorted(macro_tf['timestamp'].values, ts, side='right') - 1
+        iSwing = np.searchsorted(swing_tf['timestamp'].values, ts, side='right') - 1
+        iHtf = np.searchsorted(htf['timestamp'].values, ts, side='right') - 1
+        iExec = int(row.Index)
         
-        if iH < 0 or iM < 0: return
+        if iMacro < 0 or iSwing < 0 or iHtf < 0: return
 
         bar = {"o": row.open, "h": row.high, "l": row.low, "c": row.close}
         exits = tm.step_bar(cfg.symbol, bar["o"], bar["h"], bar["l"], bar["c"], ts=ts)
@@ -319,8 +324,7 @@ def main():
             if meta:
                 open_meta.remove(meta)
                 # PURE "SET AND FORGET" MFE META-LABELING:
-                # 1.0 if it hits TP, or if the trade surged massively (+2.2R) before noise took it out
-                meta_label = 1.0 if cl.get("exit_reason") == "tp" else 0.0
+                meta_label = max(cl.get("max_unrealized_pnl_r", 0.0), cl["pnl_r"])
                 
                 if -50 < cl["pnl_r"] < 50:
                     events.append({
@@ -339,28 +343,29 @@ def main():
                         **meta["features"]
                     })
 
-        btc_val = btc_aligned[iL] if iL < len(btc_aligned) else 1.0
+        btc_val = btc_aligned[iExec] if iExec < len(btc_aligned) else 1.0
         
         extras = {
             "btc_bullish": btc_val,
-            "funding_rate": float(funding_aligned[iL]) if iL < len(funding_aligned) else 0.0,
-            "btcd_trend": float(btcd_aligned[iL]) if iL < len(btcd_aligned) else 0.0,
-            "dxy_trend": float(dxy_aligned[iL]) if iL < len(dxy_aligned) else 0.0,
-            "spx_trend": float(spx_aligned[iL]) if iL < len(spx_aligned) else 0.0,
-            "delta_oi": float(oi_aligned[iL]) if iL < len(oi_aligned) else 0.0,
+            "funding_rate": float(funding_aligned[iExec]) if iExec < len(funding_aligned) else 0.0,
+            "btcd_trend": float(btcd_aligned[iExec]) if iExec < len(btcd_aligned) else 0.0,
+            "dxy_trend": float(dxy_aligned[iExec]) if iExec < len(dxy_aligned) else 0.0,
+            "spx_trend": float(spx_aligned[iExec]) if iExec < len(spx_aligned) else 0.0,
+            "delta_oi": float(oi_aligned[iExec]) if iExec < len(oi_aligned) else 0.0,
             "bid_ask_imbalance": 0.5,
             "macro_sentiment": 0.0
         }
 
-        base = confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, pre_map, extras=extras)
+        # iMacro-1, iSwing-1, iHtf-1 prevents lookahead. Only uses completely closed prior candles
+        base = confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, max(0, iMacro-1), max(0, iSwing-1), max(0, iHtf-1), iExec, pre_map, extras=extras)
         base["symbol"] = cfg.symbol
-        plan = plan_trade_with_brain(cfg, None, base, adv_features, iH, iM, iL, pre_l)
+        plan = plan_trade_with_brain(cfg, None, base, adv_features, iExec, pExec)
         
         if plan:
             plan['key'] = f"{plan['side']}-{ts}"
             
             full_feats = _build_full_features(
-                base, adv_features, iH, iM, iL, len_htf, len_mtf, len_ltf, ts, pre_l
+                base, adv_features, iMacro, iSwing, iHtf, iExec, len_macro, len_swing, len_htf, len_exec, ts, pExec
             )
             full_feats["side"] = 1.0 if plan["side"] == "long" else 0.0
 
@@ -369,14 +374,20 @@ def main():
                     "entry_ts": ts, 
                     "features": full_feats, 
                     "rr": plan["rr"], 
-                    "key": plan.get("key")
+                    "key": plan.get("key"),
+                    "strategy": plan.get("strategy", "UNKNOWN")
                 })
 
-    for row in ltf_iter.itertuples():
+    for row in exec_iter.itertuples():
         _process_bar(row, row.Index)
 
     with _open_out(args.out) as f:
         for ev in events:
+            # Ensure strategy propagates for group training
+            meta = next((m for m in open_meta if m["key"] == ev.get("key") or m["entry_ts"] == ev.get("entry_ts")), None)
+            if meta and "strategy" not in ev:
+                ev["strategy"] = meta.get("strategy", "UNKNOWN")
+
             clean_ev = {k: (float(v) if isinstance(v, (float, np.floating)) and np.isfinite(v) else v) for k,v in ev.items()}
             f.write(json.dumps(clean_ev) + "\n")
             

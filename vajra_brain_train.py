@@ -22,9 +22,9 @@ import joblib
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from sklearn.metrics import roc_auc_score, brier_score_loss
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.calibration import CalibratedClassifierCV
+from sklearn.feature_selection import RFE
 
 log = logging.getLogger("vajra.train.v8")
 if not log.handlers:
@@ -109,11 +109,11 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
     df.dropna(subset=["pnl_r"], inplace=True)
     
     if "meta_label" in df.columns:
-        df["label"] = df["meta_label"].astype(np.uint8)
-        log.info("🎯 Meta-Labeling detected. Training exclusively as Veto Meta-Model.")
+        df["label"] = df["meta_label"].astype(float)
+        log.info("🎯 Meta-Labeling detected. Training exclusively as MFE Regressor.")
     else:
-        log.warning("⚠️ No Meta-Label detected. Falling back to PnL heuristic.")
-        df["label"] = (df["pnl_r"] >= min_win_r).astype(np.uint8)
+        log.warning("⚠️ No Meta-Label detected. Falling back to PnL.")
+        df["label"] = df["pnl_r"].astype(float)
         
     df["entry_ts"] = pd.to_numeric(df["entry_ts"], errors='coerce')
     df.dropna(subset=["entry_ts"], inplace=True)
@@ -151,15 +151,14 @@ def _sanitize_data(X: np.ndarray) -> np.ndarray:
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--events", nargs="+", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--brains-dir", required=True, help="Directory to save individual strategy brains")
     ap.add_argument("--min-win-r", type=float, default=0.0)
     ap.add_argument("--n-estimators", type=int, default=100)
     ap.add_argument("--learning-rate", type=float, default=0.05)
     ap.add_argument("--max-depth", type=int, default=3)
     ap.add_argument("--reg-alpha", type=float, default=0.1)
     ap.add_argument("--reg-lambda", type=float, default=5.0)
-    ap.add_argument("--calibrate", action="store_true")
-    ap.add_argument("--filter-side", choices=["all","long","short"], default="all")
+    ap.add_argument("--max-features", type=int, default=20, help="Number of features to keep after RFE")
     ap.add_argument("--exclude-cols", type=str, default="")
     ap.add_argument("--weight-decay", type=float, default=0.999)
     ap.add_argument("--wfa-folds", type=int, default=5)
@@ -172,156 +171,142 @@ def main(argv=None):
     args.n_estimators = min(args.n_estimators, 300)
 
     try:
-        df, feature_names = load_events_df(args.events, args.min_win_r, args.filter_side, set(_parse_extras(args.exclude_cols)))
+        # Load all sides, we will filter manually
+        df, base_feature_names = load_events_df(args.events, args.min_win_r, "all", set(_parse_extras(args.exclude_cols)))
     except Exception as e: 
         log.error(f"Data load failed: {e}")
         return
 
-    X_all = df[feature_names].values
-    y_all = df["label"].values
+    out_dir = Path(args.brains_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     
-    sample_weights = _calculate_recency_and_pnl_weights(df)
-    log.info(f"Applying PnL Weights. Head (Old)={sample_weights[0]:.4f}, Tail (New)={sample_weights[-1]:.4f}")
+    # Find all strategies
+    if "strategy" not in df.columns:
+        log.warning("No 'strategy' column found in exported events! Defaulting to 'UNKNOWN'.")
+        df["strategy"] = "UNKNOWN"
 
-    X_all = _sanitize_data(X_all)
+    # Extract all distinct setups
+    for strategy in df["strategy"].unique():
+        # Strat names often have _LONG / _SHORT appended in the strategy string (e.g. ALPHA_LONG)
+        # OR side is saved separately
+        for side in ["long", "short"]:
+            side_val = 1.0 if side == "long" else 0.0
+            mask = (df["side"] == side_val) | (df["side"] == side) | (df["strategy"].str.endswith(side.upper()))
+            subset = df[(df["strategy"].str.startswith(strategy.split('_')[0])) & mask].copy()
 
-    log.info(f"Running Walk-Forward Analysis ({args.wfa_folds} folds)...")
-    tscv = TimeSeriesSplit(n_splits=args.wfa_folds, gap=10)
-    
-    auc_scores = []
-    brier_scores = []
-    fold_importances = []
-    
-    for i, (train_idx, test_idx) in enumerate(tscv.split(X_all)):
-        X_tr, y_tr = X_all[train_idx], y_all[train_idx]
-        X_te, y_te = X_all[test_idx], y_all[test_idx]
-        w_tr = sample_weights[train_idx]
-        
-        if w_tr.sum() > 0:
-            w_tr = w_tr * (len(w_tr) / w_tr.sum())
+            if len(subset) < 20:
+                log.info(f"Skipping {strategy}_{side} - Not enough samples ({len(subset)})")
+                continue
 
-        # DAMPENED MINORITY CLASS STARVATION (Prevent AI from predicting 0 exclusively)
-        num_pos = int(np.sum(y_tr.astype(int)))
-        num_neg = int(len(y_tr)) - num_pos
-        spw = np.sqrt(num_neg / max(num_pos, 1))
+            log.info(f"--- Training Isolated Brain: {strategy}_{side} ({len(subset)} samples) ---")
 
-        clf = xgb.XGBClassifier(
-            n_estimators=args.n_estimators,
-            learning_rate=args.learning_rate,
-            max_depth=args.max_depth,
-            reg_alpha=args.reg_alpha,
-            reg_lambda=args.reg_lambda,
-            scale_pos_weight=spw,
-            colsample_bytree=0.7,
-            subsample=0.8,
-            random_state=42,
-            eval_metric='logloss'
-        )
+            X_all = subset[base_feature_names].values
+            y_all = subset["label"].values
 
-        # Hyperparameter Tuning Support
-        if getattr(args, 'tune', False):
-            from sklearn.model_selection import RandomizedSearchCV
-            param_dist = {
-                'learning_rate': [0.01, 0.05, 0.1],
-                'max_depth': [3, 5, 7],
-                'n_estimators': [100, 200, 300],
-                'reg_lambda': [1.0, 5.0, 10.0],
-                'subsample': [0.6, 0.8, 1.0],
-                'colsample_bytree': [0.6, 0.8, 1.0]
+            sample_weights = _calculate_recency_and_pnl_weights(subset)
+            X_all = _sanitize_data(X_all)
+
+            # --- Feature Selection (RFE) ---
+            log.info("Running RFE Feature Selection...")
+            estimator = xgb.XGBRegressor(n_estimators=50, max_depth=3, random_state=42)
+            selector = RFE(estimator, n_features_to_select=min(args.max_features, len(base_feature_names)), step=1)
+            selector = selector.fit(X_all, y_all)
+            selected_features = [f for f, s in zip(base_feature_names, selector.support_) if s]
+
+            X_all_sel = X_all[:, selector.support_]
+            log.info(f"RFE selected {len(selected_features)} features.")
+
+            log.info(f"Running Walk-Forward Analysis ({args.wfa_folds} folds)...")
+            tscv = TimeSeriesSplit(n_splits=args.wfa_folds, gap=10)
+            
+            mae_scores = []
+            mse_scores = []
+            r2_scores = []
+            
+            for i, (train_idx, test_idx) in enumerate(tscv.split(X_all_sel)):
+                X_tr, y_tr = X_all_sel[train_idx], y_all[train_idx]
+                X_te, y_te = X_all_sel[test_idx], y_all[test_idx]
+                w_tr = sample_weights[train_idx]
+
+                if w_tr.sum() > 0:
+                    w_tr = w_tr * (len(w_tr) / w_tr.sum())
+
+                clf = xgb.XGBRegressor(
+                    n_estimators=args.n_estimators,
+                    learning_rate=args.learning_rate,
+                    max_depth=args.max_depth,
+                    reg_alpha=args.reg_alpha,
+                    reg_lambda=args.reg_lambda,
+                    colsample_bytree=0.7,
+                    subsample=0.8,
+                    random_state=42,
+                    objective='reg:squarederror'
+                )
+
+                # Hyperparameter Tuning Support
+                if getattr(args, 'tune', False):
+                    from sklearn.model_selection import RandomizedSearchCV
+                    param_dist = {
+                        'learning_rate': [0.01, 0.05, 0.1],
+                        'max_depth': [3, 5, 7],
+                        'n_estimators': [100, 200, 300],
+                        'reg_lambda': [1.0, 5.0, 10.0],
+                        'subsample': [0.6, 0.8, 1.0],
+                        'colsample_bytree': [0.6, 0.8, 1.0]
+                    }
+                    random_search = RandomizedSearchCV(clf, param_distributions=param_dist, n_iter=10, scoring='neg_mean_absolute_error', cv=3, random_state=42)
+                    random_search.fit(X_tr, y_tr, sample_weight=w_tr)
+                    clf = random_search.best_estimator_
+                    log.info(f"    Tuned Params: {random_search.best_params_}")
+
+                clf.fit(X_tr, y_tr, sample_weight=w_tr)
+
+                preds = clf.predict(X_te)
+
+                mae = mean_absolute_error(y_te, preds)
+                mse = mean_squared_error(y_te, preds)
+                r2 = r2_score(y_te, preds)
+
+                mae_scores.append(mae)
+                mse_scores.append(mse)
+                r2_scores.append(r2)
+                log.info(f"  Fold {i+1}: MAE={mae:.4f} | MSE={mse:.4f} | R2={r2:.4f}")
+
+            avg_mae = np.mean(mae_scores)
+            avg_mse = np.mean(mse_scores)
+            avg_r2 = np.mean(r2_scores)
+            log.info(f"✅ WFA RESULTS: Avg MAE = {avg_mae:.4f} | Avg MSE = {avg_mse:.4f} | Avg R2 = {avg_r2:.4f}")
+
+            log.info("Training Final Production Model on FULL DATASET (Weighted)...")
+
+            final_model = xgb.XGBRegressor(
+                n_estimators=args.n_estimators,
+                learning_rate=args.learning_rate,
+                max_depth=args.max_depth,
+                reg_alpha=args.reg_alpha,
+                reg_lambda=args.reg_lambda,
+                colsample_bytree=0.7,
+                subsample=0.8,
+                random_state=42,
+                objective='reg:squarederror'
+            )
+
+            final_model.fit(X_all_sel, y_all, sample_weight=sample_weights)
+
+            pipeline = {
+                "classifier": final_model,
+                "feature_names": selected_features,
+                "training_args": vars(args),
+                "model": "xgboost",
+                "wfa_mae": avg_mae,
+                "wfa_mse": avg_mse,
+                "wfa_r2": avg_r2
             }
-            random_search = RandomizedSearchCV(clf, param_distributions=param_dist, n_iter=10, scoring='roc_auc', cv=3, random_state=42)
-            random_search.fit(X_tr, y_tr, sample_weight=w_tr)
-            clf = random_search.best_estimator_
-            log.info(f"    Tuned Params: {random_search.best_params_}")
-            
-        clf.fit(X_tr, y_tr, sample_weight=w_tr)
-        
-        if args.calibrate:
-            cal_clf = CalibratedClassifierCV(clf, method='sigmoid', cv=3)
-            try: cal_clf.fit(X_tr, y_tr, sample_weight=w_tr)
-            except: cal_clf.fit(X_tr, y_tr) 
-            model = cal_clf
-        else:
-            model = clf
-            
-        probs = model.predict_proba(X_te)[:, 1]
-        
-        if len(np.unique(probs)) < 2:
-            log.warning(f"  Fold {i+1}: Model Collapse Detected (Constant output).")
-            auc = 0.5
-            brier = 0.25
-        else:
-            try:
-                auc = roc_auc_score(y_te, probs)
-                brier = brier_score_loss(y_te, probs)
-            except ValueError:
-                auc = 0.5
-                brier = 0.25
-        
-        auc_scores.append(auc)
-        brier_scores.append(brier)
-        fold_importances.append(model.feature_importances_)
-        log.info(f"  Fold {i+1}: AUC={auc:.4f} | Brier={brier:.4f}")
 
-    avg_auc = np.mean(auc_scores)
-    avg_brier = np.mean(brier_scores)
-    log.info(f"✅ WFA RESULTS: Avg AUC = {avg_auc:.4f} | Avg Brier = {avg_brier:.4f}")
-
-    log.info("Training Final Production Model on FULL DATASET (Weighted)...")
-    
-    # DAMPENED MINORITY CLASS STARVATION (FULL DATASET)
-    num_pos_all = int(np.sum(y_all.astype(int)))
-    num_neg_all = int(len(y_all)) - num_pos_all
-    spw_all = np.sqrt(num_neg_all / max(num_pos_all, 1))
-
-    final_base = xgb.XGBClassifier(
-        n_estimators=args.n_estimators,
-        learning_rate=args.learning_rate,
-        max_depth=args.max_depth,
-        reg_alpha=args.reg_alpha,
-        reg_lambda=args.reg_lambda,
-        scale_pos_weight=spw_all,
-        colsample_bytree=0.7,
-        subsample=0.8,
-        random_state=42,
-        eval_metric='logloss'
-    )
-        
-    final_model = final_base
-    
-    # Removed CalibratedClassifierCV.
-    # Calibration natively suppresses scale_pos_weight forcing the outputs
-    # back to raw sample distribution percentages. We want raw uncalibrated
-    # outputs to center around 0.5 for asymmetric edge hunting.
-    final_model.fit(X_all, y_all, sample_weight=sample_weights)
-
-    # EDGE EXTRACTION: Anti-Signal Flipping
-    # In highly mean-reverting crypto regimes where the AUC collapses below 0.40,
-    # the model is reliably misclassifying true direction. We set invert_prob to True
-    # to harvest the inverse edge.
-    invert = bool(avg_auc < 0.40)
-    if invert:
-        log.info("⚠️ Severe Anti-Signal Detected (AUC < 0.40). Flipping Probability Pipeline to Harvest Edge.")
-    if args.calibrate:
-        final_cal = CalibratedClassifierCV(final_base, method='sigmoid', cv=5)
-        try: final_cal.fit(X_all, y_all, sample_weight=sample_weights)
-        except: final_cal.fit(X_all, y_all)
-        final_model = final_cal
-    else:
-        final_model.fit(X_all, y_all, sample_weight=sample_weights)
-
-    pipeline = {
-        "classifier": final_model, 
-        "feature_names": feature_names,
-        "training_args": vars(args), 
-        "invert_prob": invert,
-        "model": "xgboost",
-        "wfa_auc": avg_auc,
-        "wfa_brier": avg_brier
-    }
-    
-    joblib.dump(pipeline, args.out)
-    log.info(f"Saved Apex Predator XGBoost Brain to {args.out}")
+            strat_clean = strategy.split('_')[0]
+            out_file = out_dir / f"brain_{strat_clean}_{side}.joblib"
+            joblib.dump(pipeline, out_file)
+            log.info(f"Saved Apex Predator XGBoost Brain to {out_file}\n")
 
 if __name__ == "__main__":
     main()
