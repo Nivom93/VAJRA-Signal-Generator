@@ -22,7 +22,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import accuracy_score, precision_score, roc_auc_score, f1_score
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import RFE
 
@@ -109,11 +109,11 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
     df.dropna(subset=["pnl_r"], inplace=True)
     
     if "meta_label" in df.columns:
-        df["label"] = df["meta_label"].astype(float)
-        log.info("🎯 Meta-Labeling detected. Training exclusively as MFE Regressor.")
+        df["label"] = (df["pnl_r"] > 0).astype(int)
+        log.info("🎯 Meta-Labeling detected. Meta-label preserved, but target mapped to Binary Classification (win/loss).")
     else:
-        log.warning("⚠️ No Meta-Label detected. Falling back to PnL.")
-        df["label"] = df["pnl_r"].astype(float)
+        log.warning("⚠️ No Meta-Label detected. Falling back to PnL for binary label.")
+        df["label"] = (df["pnl_r"] > 0).astype(int)
         
     df["entry_ts"] = pd.to_numeric(df["entry_ts"], errors='coerce')
     df.dropna(subset=["entry_ts"], inplace=True)
@@ -210,7 +210,7 @@ def main(argv=None):
 
             # --- Feature Selection (RFE) ---
             log.info("Running RFE Feature Selection...")
-            estimator = xgb.XGBRegressor(n_estimators=25, max_depth=2, random_state=42)
+            estimator = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss')
             selector = RFE(estimator, n_features_to_select=min(args.max_features, len(base_feature_names)), step=1)
             selector = selector.fit(X_all, y_all)
             selected_features = [f for f, s in zip(base_feature_names, selector.support_) if s]
@@ -224,9 +224,10 @@ def main(argv=None):
             log.info(f"Running Walk-Forward Analysis ({actual_folds} folds)...")
             tscv = TimeSeriesSplit(n_splits=actual_folds, gap=actual_gap)
             
-            mae_scores = []
-            mse_scores = []
-            r2_scores = []
+            acc_scores = []
+            prec_scores = []
+            roc_auc_scores = []
+            f1_scores = []
             
             for i, (train_idx, test_idx) in enumerate(tscv.split(X_all_sel)):
                 X_tr, y_tr = X_all_sel[train_idx], y_all[train_idx]
@@ -236,7 +237,7 @@ def main(argv=None):
                 if w_tr.sum() > 0:
                     w_tr = w_tr * (len(w_tr) / w_tr.sum())
 
-                clf = xgb.XGBRegressor(
+                clf = xgb.XGBClassifier(
                     n_estimators=args.n_estimators,
                     learning_rate=args.learning_rate,
                     max_depth=args.max_depth,
@@ -245,7 +246,8 @@ def main(argv=None):
                     colsample_bytree=0.7,
                     subsample=0.8,
                     random_state=42,
-                    objective='reg:squarederror'
+                    objective='binary:logistic',
+                    eval_metric='logloss'
                 )
 
                 # Hyperparameter Tuning Support
@@ -261,7 +263,7 @@ def main(argv=None):
                         'colsample_bytree': [0.6, 0.8, 1.0]
                     }
                     cv_folds = min(3, max(2, len(X_tr) // 15))
-                    random_search = RandomizedSearchCV(clf, param_distributions=param_dist, n_iter=10, scoring='neg_mean_absolute_error', cv=cv_folds, random_state=42)
+                    random_search = RandomizedSearchCV(clf, param_distributions=param_dist, n_iter=10, scoring='roc_auc', cv=cv_folds, random_state=42)
                     random_search.fit(X_tr, y_tr, sample_weight=w_tr)
                     clf = random_search.best_estimator_
                     log.info(f"    Tuned Params: {random_search.best_params_}")
@@ -269,24 +271,30 @@ def main(argv=None):
                 clf.fit(X_tr, y_tr, sample_weight=w_tr)
 
                 preds = clf.predict(X_te)
+                probs = clf.predict_proba(X_te)[:, 1] if len(np.unique(y_te)) > 1 else np.zeros_like(preds)
 
-                mae = mean_absolute_error(y_te, preds)
-                mse = mean_squared_error(y_te, preds)
-                r2 = r2_score(y_te, preds)
+                acc = accuracy_score(y_te, preds)
+                prec = precision_score(y_te, preds, zero_division=0)
+                roc = roc_auc_score(y_te, probs) if len(np.unique(y_te)) > 1 else 0.5
+                f1 = f1_score(y_te, preds, zero_division=0)
 
-                mae_scores.append(mae)
-                mse_scores.append(mse)
-                r2_scores.append(r2)
-                log.info(f"  Fold {i+1}: MAE={mae:.4f} | MSE={mse:.4f} | R2={r2:.4f}")
+                acc_scores.append(acc)
+                prec_scores.append(prec)
+                roc_auc_scores.append(roc)
+                f1_scores.append(f1)
 
-            avg_mae = np.mean(mae_scores)
-            avg_mse = np.mean(mse_scores)
-            avg_r2 = np.mean(r2_scores)
-            log.info(f"✅ WFA RESULTS: Avg MAE = {avg_mae:.4f} | Avg MSE = {avg_mse:.4f} | Avg R2 = {avg_r2:.4f}")
+                log.info(f"  Fold {i+1}: Acc={acc:.4f} | Prec={prec:.4f} | ROC={roc:.4f} | F1={f1:.4f}")
+
+            avg_acc = np.mean(acc_scores)
+            avg_prec = np.mean(prec_scores)
+            avg_roc = np.mean(roc_auc_scores)
+            avg_f1 = np.mean(f1_scores)
+
+            log.info(f"✅ WFA RESULTS: Avg Acc = {avg_acc:.4f} | Avg Prec = {avg_prec:.4f} | Avg ROC-AUC = {avg_roc:.4f} | Avg F1 = {avg_f1:.4f}")
 
             log.info("Training Final Production Model on FULL DATASET (Weighted)...")
 
-            final_model = xgb.XGBRegressor(
+            final_model = xgb.XGBClassifier(
                 n_estimators=args.n_estimators,
                 learning_rate=args.learning_rate,
                 max_depth=args.max_depth,
@@ -295,7 +303,8 @@ def main(argv=None):
                 colsample_bytree=0.7,
                 subsample=0.8,
                 random_state=42,
-                objective='reg:squarederror'
+                objective='binary:logistic',
+                eval_metric='logloss'
             )
 
             final_model.fit(X_all_sel, y_all, sample_weight=sample_weights)
@@ -305,9 +314,10 @@ def main(argv=None):
                 "feature_names": selected_features,
                 "training_args": vars(args),
                 "model": "xgboost",
-                "wfa_mae": avg_mae,
-                "wfa_mse": avg_mse,
-                "wfa_r2": avg_r2
+                "wfa_acc": avg_acc,
+                "wfa_prec": avg_prec,
+                "wfa_roc_auc": avg_roc,
+                "wfa_f1": avg_f1
             }
 
             out_file = out_dir / f"brain_{strat_clean}_{side}.joblib"
