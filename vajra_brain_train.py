@@ -156,7 +156,7 @@ def main(argv=None):
     ap.add_argument("--min-win-r", type=float, default=0.0)
     ap.add_argument("--n-estimators", type=int, default=100)
     ap.add_argument("--learning-rate", type=float, default=0.05)
-    ap.add_argument("--max-depth", type=int, default=3)
+    ap.add_argument("--max-depth", type=int, default=5)
     ap.add_argument("--reg-alpha", type=float, default=0.1)
     ap.add_argument("--reg-lambda", type=float, default=5.0)
     ap.add_argument("--max-features", type=int, default=20, help="Number of features to keep after RFE")
@@ -168,8 +168,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     # BULLETPROOF TRAINING PARAMS: Forcefully prevent users from extreme overfitting via CLI
-    args.max_depth = min(args.max_depth, 7)
-    args.n_estimators = min(args.n_estimators, 300)
+    args.max_depth = min(args.max_depth, 9)
+    args.n_estimators = min(args.n_estimators, 500)
 
     try:
         # Load all sides, we will filter manually
@@ -248,9 +248,9 @@ def main(argv=None):
                 if getattr(args, 'tune', False):
                     from sklearn.model_selection import RandomizedSearchCV
                     param_dist = {
-                        'learning_rate': [0.01, 0.05, 0.1],
-                        'max_depth': [3, 5, 7],
-                        'n_estimators': [100, 200, 300],
+                        'learning_rate': [0.01, 0.05, 0.1, 0.2],
+                        'max_depth': [3, 5, 7, 9],
+                        'n_estimators': [100, 300, 500],
                         'reg_lambda': [1.0, 5.0, 10.0],
                         'subsample': [0.6, 0.8, 1.0],
                         'colsample_bytree': [0.6, 0.8, 1.0]

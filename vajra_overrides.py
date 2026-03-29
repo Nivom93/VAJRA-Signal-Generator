@@ -36,8 +36,8 @@ def _strategy_overrides(cfg):
     cfg.max_risk_factor = 3.0
     
     # --- FILTERS (LET THE AI DECIDE) ---
-    cfg.filter_htf_trend = True        
-    cfg.filter_btc_regime = True       
+    cfg.filter_htf_trend = False
+    cfg.filter_btc_regime = False
     cfg.filter_funding_check = False    
     cfg.filter_btcd_regime = False      
     cfg.filter_rvol_breakout = False
@@ -63,7 +63,7 @@ def _strategy_overrides(cfg):
     cfg.dca_max_safety_orders = 0
 
     # --- STRUCTURAL SNIPER GEOMETRY ---
-    cfg.min_rr = 1.2
+    cfg.min_rr = 1.0
     cfg.atr_mult_sl = 1.0
     cfg.atr_mult_tp = 1.2
 
@@ -72,8 +72,8 @@ def _strategy_overrides(cfg):
         cfg.min_conf_long = 1.0
         cfg.min_conf_short = 1.0
         # Optimal probability threshold to find ~250+ trades with highest structural confidence
-        cfg.min_prob_long = 0.55
-        cfg.min_prob_short = 0.55
+        cfg.min_prob_long = 0.51
+        cfg.min_prob_short = 0.51
     else:
-        cfg.min_prob_long = 0.55
-        cfg.min_prob_short = 0.55
+        cfg.min_prob_long = 0.51
+        cfg.min_prob_short = 0.51
