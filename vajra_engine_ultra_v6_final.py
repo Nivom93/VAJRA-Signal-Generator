@@ -20,6 +20,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+log = logging.getLogger("vajra.engine")
+if not log.handlers:
+    log.setLevel(logging.INFO)
+    h = logging.StreamHandler()
+    h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s", "%Y-%m-%d %H:%M:%S"))
+    log.addHandler(h)
+
 # --- BULLETPROOF IMPORTS ---
 try:
     import ccxt; import joblib

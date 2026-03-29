@@ -334,6 +334,7 @@ def main():
                         "pnl_r": cl["pnl_r"], 
                         "rr": meta["rr"], 
                         "side": cl.get("side"),
+                        "strategy": meta.get("strategy", "UNKNOWN"),
                         "entry_price": cl.get("entry"),
                         "exit_price": cl.get("exit_price"),
                         "stop_loss": cl.get("sl"),
@@ -383,11 +384,6 @@ def main():
 
     with _open_out(args.out) as f:
         for ev in events:
-            # Ensure strategy propagates for group training
-            meta = next((m for m in open_meta if m["key"] == ev.get("key") or m["entry_ts"] == ev.get("entry_ts")), None)
-            if meta and "strategy" not in ev:
-                ev["strategy"] = meta.get("strategy", "UNKNOWN")
-
             clean_ev = {k: (float(v) if isinstance(v, (float, np.floating)) and np.isfinite(v) else v) for k,v in ev.items()}
             f.write(json.dumps(clean_ev) + "\n")
             
