@@ -195,7 +195,7 @@ def main(argv=None):
             mask = (df["side"] == side_val) | (df["side"] == side) | (df["strategy"].str.endswith(side.upper()))
             subset = df[(df["strategy"].str.startswith(strategy.split('_')[0])) & mask].copy()
 
-            if len(subset) < 20:
+            if len(subset) < 30:
                 log.info(f"Skipping {strategy}_{side} - Not enough samples ({len(subset)})")
                 continue
 
@@ -217,8 +217,11 @@ def main(argv=None):
             X_all_sel = X_all[:, selector.support_]
             log.info(f"RFE selected {len(selected_features)} features.")
 
-            log.info(f"Running Walk-Forward Analysis ({args.wfa_folds} folds)...")
-            tscv = TimeSeriesSplit(n_splits=args.wfa_folds, gap=10)
+            n_samples = len(X_all_sel)
+            actual_folds = min(args.wfa_folds, max(2, n_samples // 15))
+            actual_gap = min(10, n_samples // 10)
+            log.info(f"Running Walk-Forward Analysis ({actual_folds} folds)...")
+            tscv = TimeSeriesSplit(n_splits=actual_folds, gap=actual_gap)
             
             mae_scores = []
             mse_scores = []
@@ -255,7 +258,8 @@ def main(argv=None):
                         'subsample': [0.6, 0.8, 1.0],
                         'colsample_bytree': [0.6, 0.8, 1.0]
                     }
-                    random_search = RandomizedSearchCV(clf, param_distributions=param_dist, n_iter=10, scoring='neg_mean_absolute_error', cv=3, random_state=42)
+                    cv_folds = min(3, max(2, len(X_tr) // 15))
+                    random_search = RandomizedSearchCV(clf, param_distributions=param_dist, n_iter=10, scoring='neg_mean_absolute_error', cv=cv_folds, random_state=42)
                     random_search.fit(X_tr, y_tr, sample_weight=w_tr)
                     clf = random_search.best_estimator_
                     log.info(f"    Tuned Params: {random_search.best_params_}")
