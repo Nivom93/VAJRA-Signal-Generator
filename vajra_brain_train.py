@@ -109,8 +109,8 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
     df.dropna(subset=["pnl_r"], inplace=True)
     
     if "meta_label" in df.columns:
-        df["label"] = (df["pnl_r"] > 0).astype(int)
-        log.info("🎯 Meta-Labeling detected. Meta-label preserved, but target mapped to Binary Classification (win/loss).")
+        df["label"] = (df["meta_label"] >= 1.0).astype(int)
+        log.info("🎯 Meta-Labeling detected. Target mapped to Maximum Favorable Excursion (MFE) >= 1.0R.")
     else:
         log.warning("⚠️ No Meta-Label detected. Falling back to PnL for binary label.")
         df["label"] = (df["pnl_r"] > 0).astype(int)
@@ -208,9 +208,14 @@ def main(argv=None):
             sample_weights = _calculate_recency_and_pnl_weights(subset)
             X_all = _sanitize_data(X_all)
 
+            pos_cases = np.sum(y_all == 1)
+            neg_cases = np.sum(y_all == 0)
+            scale_weight = float(neg_cases) / max(1.0, float(pos_cases))
+            scale_weight = min(scale_weight, 10.0) # Cap extreme weights
+
             # --- Feature Selection (RFE) ---
             log.info("Running RFE Feature Selection...")
-            estimator = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss')
+            estimator = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
             selector = RFE(estimator, n_features_to_select=min(args.max_features, len(base_feature_names)), step=1)
             selector = selector.fit(X_all, y_all)
             selected_features = [f for f, s in zip(base_feature_names, selector.support_) if s]
@@ -247,7 +252,8 @@ def main(argv=None):
                     subsample=0.8,
                     random_state=42,
                     objective='binary:logistic',
-                    eval_metric='logloss'
+                    eval_metric='logloss',
+                    scale_pos_weight=scale_weight
                 )
 
                 # Hyperparameter Tuning Support
@@ -304,7 +310,8 @@ def main(argv=None):
                 subsample=0.8,
                 random_state=42,
                 objective='binary:logistic',
-                eval_metric='logloss'
+                eval_metric='logloss',
+                scale_pos_weight=scale_weight
             )
 
             final_model.fit(X_all_sel, y_all, sample_weight=sample_weights)
