@@ -53,7 +53,7 @@ def _strategy_overrides(cfg):
     cfg.strat_delta_enabled = True 
     cfg.strat_epsilon_enabled = True  
     cfg.strat_omega_enabled = True     # Ranging environments provide the deepest structure limits for massive RR
-    cfg.strat_zeta_enabled = False     
+    cfg.strat_zeta_enabled = True
 
    # ==========================================================
     # 2. COIN-SPECIFIC MATRIX (Max Win Rate)

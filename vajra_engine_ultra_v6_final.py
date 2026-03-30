@@ -1570,10 +1570,11 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # Evaluate Longs
     if can_long:
         side = 'long'
-        is_bull_rejection = (base.get("pin_bull", 0) > 0 or base.get("engulf_bull", 0) > 0)
+        # Relaxed: Lower wick is at least 30% of the candle range
+        is_bull_rejection = base.get("lower_wick_pct", 0.0) > 0.30
 
         # Strat Alpha (Trend Pullbacks) - Prioritize in Trending Regime
-        if is_trending_regime and base.get("trend_align_up_3tf", 0) >= 2.0 and ((fib_786_l <= px <= fib_618_l) or (ob_bull > 0 and is_tapped(ob_bull))) and (is_bull_rejection or brain is None):
+        if is_trending_regime and base.get("sentient_regime_score", 0.0) > 0.2 and ((fib_786_l <= px <= fib_618_l) or (ob_bull > 0 and is_tapped(ob_bull))) and (is_bull_rejection or brain is None):
             setup_type = "ALPHA_LONG"
             entry_target = ob_bull if ob_bull > 0 else px
             logic_desc = "Trend Pullback: 3-TF alignment. Structural bounce confirmed on 0.618-0.786 Fib or active OB."
@@ -1611,10 +1612,11 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # Evaluate Shorts
     if not setup_type and can_short:
         side = 'short'
-        is_bear_rejection = (base.get("pin_bear", 0) > 0 or base.get("engulf_bear", 0) > 0)
+        # Relaxed: Upper wick is at least 30% of the candle range
+        is_bear_rejection = base.get("upper_wick_pct", 0.0) > 0.30
 
         # Strat Alpha (Trend Pullbacks)
-        if is_trending_regime and base.get("trend_align_down_3tf", 0) >= 2.0 and ((fib_618_s <= px <= fib_786_s) or (ob_bear > 0 and is_tapped(ob_bear))) and (is_bear_rejection or brain is None):
+        if is_trending_regime and base.get("sentient_regime_score", 0.0) < -0.2 and ((fib_618_s <= px <= fib_786_s) or (ob_bear > 0 and is_tapped(ob_bear))) and (is_bear_rejection or brain is None):
             setup_type = "ALPHA_SHORT"
             entry_target = ob_bear if ob_bear > 0 else px
             logic_desc = "Trend Pullback: 3-TF alignment. Structural rejection confirmed on 0.618-0.786 Fib or active OB."
