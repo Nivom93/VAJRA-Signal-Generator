@@ -1576,6 +1576,11 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     curr_lower_wick_pct = (body_bottom - pExec.l[iExec]) / total_range_safe
     curr_upper_wick_pct = (pExec.h[iExec] - body_top) / total_range_safe
 
+    # Dynamic Volatility & Momentum Thresholds
+    atr_p_decimal = base.get("atr_percentile_100", 50.0) / 100.0
+    dyn_adx_thresh = 20.0 + (atr_p_decimal * 10.0)
+    dyn_rvol_thresh = 1.0 + (atr_p_decimal * 0.5)
+
     # Evaluate Longs
     if can_long:
         side = 'long'
@@ -1588,17 +1593,17 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             entry_target = ob_bull if ob_bull > 0 else px
             logic_desc = "Trend Pullback: 3-TF alignment. Structural bounce confirmed on 0.618-0.786 Fib or active OB."
         # Strat Beta (Momentum Breakouts) - Prioritize in Trending Regime
-        elif is_trending_regime and base.get("squeeze_fired", 0) > 0 and rvol > 1.5 and base.get("vol_spike", 0) > 0 and base.get("bos_up", 0) > 0:
+        elif is_trending_regime and base.get("squeeze_fired", 0) > 0 and rvol > dyn_rvol_thresh and base.get("vol_spike", 0) > 0 and base.get("bos_up", 0) > 0:
             setup_type = "BETA_LONG"
             entry_target = px
             logic_desc = "Momentum Breakout: Squeeze fired with volume spike and Structural BOS. Entering momentum explosion."
         # Strat Gamma (Liquidity Traps) - Prioritize in Ranging/Reversion
-        elif sweep_bull > 0 and (is_bull_rejection or brain is None) and base.get("cvd_div_bull", 0) > 0:
+        elif (sweep_bull > 0 or base.get("sweep_low", 0) > 0) and (is_bull_rejection or brain is None) and base.get("cvd_div_bull", 0) > 0:
             setup_type = "GAMMA_LONG"
             entry_target = base.get("last_swing_low", px)
             logic_desc = "Liquidity Trap: Retail stops hunted with bullish rejection and CVD absorption divergence."
         # Strat Delta (Fractal Mitigation)
-        elif fvg_bull > 0 and ob_bull > 0 and is_tapped(ob_bull):
+        elif fvg_bull > 0 and ob_bull > 0 and (is_tapped(ob_bull) or px <= ob_bull):
             setup_type = "DELTA_LONG"
             entry_target = ob_bull
             logic_desc = "Fractal Mitigation: Fair Value Gap perfectly aligns with institutional Order Block."
@@ -1613,7 +1618,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             entry_target = px
             logic_desc = "Wyckoff/Judas Spring: HTF/Asian swing swept with immediate volume/CVD reclaim."
         # Strat Omega (Auction Market Theory) - Prioritize in Ranging Regime
-        elif (is_ranging_regime or adx_val < 25) and (is_bull_rejection or brain is None) and is_tapped(val) and base.get("poc", 0) > entry_target:
+        elif (is_ranging_regime or adx_val < dyn_adx_thresh) and (is_bull_rejection or brain is None) and is_tapped(val) and base.get("poc", 0) > entry_target:
             setup_type = "OMEGA_LONG"
             entry_target = val
             logic_desc = "Auction Market Theory: Ranging environment. Bullish rejection confirmed at Value Area Low (VAL)."
@@ -1630,17 +1635,17 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             entry_target = ob_bear if ob_bear > 0 else px
             logic_desc = "Trend Pullback: 3-TF alignment. Structural rejection confirmed on 0.618-0.786 Fib or active OB."
         # Strat Beta (Momentum Breakouts)
-        elif is_trending_regime and base.get("squeeze_fired", 0) > 0 and rvol > 1.5 and base.get("vol_spike", 0) > 0 and base.get("bos_down", 0) > 0:
+        elif is_trending_regime and base.get("squeeze_fired", 0) > 0 and rvol > dyn_rvol_thresh and base.get("vol_spike", 0) > 0 and base.get("bos_down", 0) > 0:
             setup_type = "BETA_SHORT"
             entry_target = px
             logic_desc = "Momentum Breakout: Squeeze fired with volume spike and Structural BOS. Entering momentum explosion."
         # Strat Gamma (Liquidity Traps)
-        elif sweep_bear > 0 and (is_bear_rejection or brain is None) and base.get("cvd_div_bear", 0) > 0:
+        elif (sweep_bear > 0 or base.get("sweep_high", 0) > 0) and (is_bear_rejection or brain is None) and base.get("cvd_div_bear", 0) > 0:
             setup_type = "GAMMA_SHORT"
             entry_target = base.get("last_swing_high", px)
             logic_desc = "Liquidity Trap: Retail stops hunted with bearish rejection and CVD absorption divergence."
         # Strat Delta (Fractal Mitigation)
-        elif fvg_bear > 0 and ob_bear > 0 and is_tapped(ob_bear):
+        elif fvg_bear > 0 and ob_bear > 0 and (is_tapped(ob_bear) or px >= ob_bear):
             setup_type = "DELTA_SHORT"
             entry_target = ob_bear
             logic_desc = "Fractal Mitigation: Fair Value Gap perfectly aligns with institutional Order Block."
@@ -1655,7 +1660,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             entry_target = px
             logic_desc = "Wyckoff/Judas Upthrust: HTF/Asian swing swept with immediate volume/CVD reclaim."
         # Strat Omega (Auction Market Theory)
-        elif (is_ranging_regime or adx_val < 25) and (is_bear_rejection or brain is None) and is_tapped(vah) and base.get("poc", px) < entry_target:
+        elif (is_ranging_regime or adx_val < dyn_adx_thresh) and (is_bear_rejection or brain is None) and is_tapped(vah) and base.get("poc", px) < entry_target:
             setup_type = "OMEGA_SHORT"
             entry_target = vah
             logic_desc = "Auction Market Theory: Ranging environment. Bearish rejection confirmed at Value Area High (VAH)."
@@ -1754,8 +1759,12 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         if ev <= 0.1: return None # Only take trades with a positive mathematical edge
 
         edge = ev
-        base_risk = 1.0 + (edge * 2.0)
-        risk_factor = min(base_risk, getattr(cfg, 'max_risk_factor', 2.0))
+        if getattr(cfg, 'dynamic_risk_scaling', True):
+            # Exponential scaling: higher EV pushes risk towards max_risk_factor
+            base_risk = 1.0 + (edge ** 1.5)
+            risk_factor = min(base_risk, getattr(cfg, 'max_risk_factor', 2.5))
+        else:
+            risk_factor = 1.0
 
     best_plan = {
         "side": side, "entry": entry_target, "sl": sl, "tp": tp, "rr": rr,
