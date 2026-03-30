@@ -207,7 +207,7 @@ def main():
     p.add_argument("--htf", default="1h")
     p.add_argument("--exec-tf", default="15m")
     p.add_argument("--out", required=True)
-    p.add_argument("--min-rr", type=float, default=-1.0)
+    p.add_argument("--min-rr", type=float, default=0.5)
     
     args = p.parse_args()
 
