@@ -1679,9 +1679,6 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
     dynamic_risk = abs(entry_target - sl)
 
-    if dynamic_risk > (current_atr * 2.5) or dynamic_risk < (current_atr * 0.5):
-        return None
-
     # 2. Dynamic TP Escalation (The RR Rescue Loop)
     tp = entry_target
     min_escalation_rr = getattr(cfg, 'min_rr', 1.8)
@@ -1726,7 +1723,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
     if rr < 2.2 and brain is not None:
         return None # Live Bot: Strict asymmetric risk required
-    elif rr < 1.0 and brain is None:
+    elif rr < 0.5 and brain is None:
         return None # Exporter: Allow base hits and failed setups so the AI learns the difference
     elif rr > 3.0:
         tp = entry_target + (dynamic_risk * 3.0) if side == 'long' else entry_target - (dynamic_risk * 3.0)
