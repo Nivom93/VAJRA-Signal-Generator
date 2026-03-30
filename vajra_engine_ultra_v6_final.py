@@ -1557,7 +1557,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     spring = base.get("wyckoff_spring", 0); upthrust = base.get("wyckoff_upthrust", 0)
 
     # Fuzzy Proximity Helper (Phantom Fill Fix)
-    def is_tapped(level, buffer_atr_mult=0.05):
+    def is_tapped(level, buffer_atr_mult=0.50):
         if level <= 0: return False
         buffer = current_atr * buffer_atr_mult
         return (abs(px - level) < buffer) or ((pExec.l[iExec] - buffer) <= level <= (pExec.h[iExec] + buffer))
@@ -1584,16 +1584,16 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # Evaluate Longs
     if can_long:
         side = 'long'
-        # Relaxed: Lower wick is at least 30% of the candle range
-        is_bull_rejection = curr_lower_wick_pct > 0.30
+        # Relaxed: Lower wick is at least 20% of the candle range
+        is_bull_rejection = curr_lower_wick_pct > 0.20
 
         # Strat Alpha (Trend Pullbacks) - Prioritize in Trending Regime
-        if is_trending_regime and base.get("sentient_regime_score", 0.0) > 0.2 and ((fib_786_l <= px <= fib_618_l) or (ob_bull > 0 and is_tapped(ob_bull))) and (is_bull_rejection or brain is None):
+        if base.get("sentient_regime_score", 0.0) > 0.2 and ((fib_786_l <= px <= fib_618_l) or (ob_bull > 0 and is_tapped(ob_bull))) and (is_bull_rejection or brain is None):
             setup_type = "ALPHA_LONG"
             entry_target = ob_bull if ob_bull > 0 else px
             logic_desc = "Trend Pullback: 3-TF alignment. Structural bounce confirmed on 0.618-0.786 Fib or active OB."
         # Strat Beta (Momentum Breakouts) - Prioritize in Trending Regime
-        elif is_trending_regime and base.get("squeeze_fired", 0) > 0 and rvol > dyn_rvol_thresh and base.get("vol_spike", 0) > 0 and base.get("bos_up", 0) > 0:
+        elif base.get("squeeze_fired", 0) > 0 and rvol > dyn_rvol_thresh and base.get("vol_spike", 0) > 0 and base.get("bos_up", 0) > 0:
             setup_type = "BETA_LONG"
             entry_target = px
             logic_desc = "Momentum Breakout: Squeeze fired with volume spike and Structural BOS. Entering momentum explosion."
@@ -1618,7 +1618,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             entry_target = px
             logic_desc = "Wyckoff/Judas Spring: HTF/Asian swing swept with immediate volume/CVD reclaim."
         # Strat Omega (Auction Market Theory) - Prioritize in Ranging Regime
-        elif (is_ranging_regime or adx_val < dyn_adx_thresh) and (is_bull_rejection or brain is None) and is_tapped(val) and base.get("poc", 0) > entry_target:
+        elif adx_val < dyn_adx_thresh and (is_bull_rejection or brain is None) and is_tapped(val) and base.get("poc", 0) > entry_target:
             setup_type = "OMEGA_LONG"
             entry_target = val
             logic_desc = "Auction Market Theory: Ranging environment. Bullish rejection confirmed at Value Area Low (VAL)."
@@ -1626,16 +1626,16 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # Evaluate Shorts
     if not setup_type and can_short:
         side = 'short'
-        # Relaxed: Upper wick is at least 30% of the candle range
-        is_bear_rejection = curr_upper_wick_pct > 0.30
+        # Relaxed: Upper wick is at least 20% of the candle range
+        is_bear_rejection = curr_upper_wick_pct > 0.20
 
         # Strat Alpha (Trend Pullbacks)
-        if is_trending_regime and base.get("sentient_regime_score", 0.0) < -0.2 and ((fib_618_s <= px <= fib_786_s) or (ob_bear > 0 and is_tapped(ob_bear))) and (is_bear_rejection or brain is None):
+        if base.get("sentient_regime_score", 0.0) < -0.2 and ((fib_618_s <= px <= fib_786_s) or (ob_bear > 0 and is_tapped(ob_bear))) and (is_bear_rejection or brain is None):
             setup_type = "ALPHA_SHORT"
             entry_target = ob_bear if ob_bear > 0 else px
             logic_desc = "Trend Pullback: 3-TF alignment. Structural rejection confirmed on 0.618-0.786 Fib or active OB."
         # Strat Beta (Momentum Breakouts)
-        elif is_trending_regime and base.get("squeeze_fired", 0) > 0 and rvol > dyn_rvol_thresh and base.get("vol_spike", 0) > 0 and base.get("bos_down", 0) > 0:
+        elif base.get("squeeze_fired", 0) > 0 and rvol > dyn_rvol_thresh and base.get("vol_spike", 0) > 0 and base.get("bos_down", 0) > 0:
             setup_type = "BETA_SHORT"
             entry_target = px
             logic_desc = "Momentum Breakout: Squeeze fired with volume spike and Structural BOS. Entering momentum explosion."
@@ -1660,7 +1660,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             entry_target = px
             logic_desc = "Wyckoff/Judas Upthrust: HTF/Asian swing swept with immediate volume/CVD reclaim."
         # Strat Omega (Auction Market Theory)
-        elif (is_ranging_regime or adx_val < dyn_adx_thresh) and (is_bear_rejection or brain is None) and is_tapped(vah) and base.get("poc", px) < entry_target:
+        elif adx_val < dyn_adx_thresh and (is_bear_rejection or brain is None) and is_tapped(vah) and base.get("poc", px) < entry_target:
             setup_type = "OMEGA_SHORT"
             entry_target = vah
             logic_desc = "Auction Market Theory: Ranging environment. Bearish rejection confirmed at Value Area High (VAH)."

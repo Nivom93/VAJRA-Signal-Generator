@@ -72,8 +72,8 @@ def _strategy_overrides(cfg):
         cfg.min_conf_long = 1.0
         cfg.min_conf_short = 1.0
         # Optimal probability threshold to find ~250+ trades with highest structural confidence
-        cfg.min_prob_long = 0.51
-        cfg.min_prob_short = 0.51
+        cfg.min_prob_long = 0.40
+        cfg.min_prob_short = 0.40
     else:
-        cfg.min_prob_long = 0.51
-        cfg.min_prob_short = 0.51
+        cfg.min_prob_long = 0.40
+        cfg.min_prob_short = 0.40
