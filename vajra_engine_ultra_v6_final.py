@@ -1567,11 +1567,20 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     is_trending_regime = hurst_val > 0.50
     is_ranging_regime = hurst_val <= 0.50
 
+    # Direct Wick Geometry Calculation (Prevents Dictionary Misses)
+    total_range = pExec.h[iExec] - pExec.l[iExec]
+    total_range_safe = total_range if total_range > 1e-9 else 1e-9
+    body_top = max(pExec.o[iExec], pExec.c[iExec])
+    body_bottom = min(pExec.o[iExec], pExec.c[iExec])
+
+    curr_lower_wick_pct = (body_bottom - pExec.l[iExec]) / total_range_safe
+    curr_upper_wick_pct = (pExec.h[iExec] - body_top) / total_range_safe
+
     # Evaluate Longs
     if can_long:
         side = 'long'
         # Relaxed: Lower wick is at least 30% of the candle range
-        is_bull_rejection = base.get("lower_wick_pct", 0.0) > 0.30
+        is_bull_rejection = curr_lower_wick_pct > 0.30
 
         # Strat Alpha (Trend Pullbacks) - Prioritize in Trending Regime
         if is_trending_regime and base.get("sentient_regime_score", 0.0) > 0.2 and ((fib_786_l <= px <= fib_618_l) or (ob_bull > 0 and is_tapped(ob_bull))) and (is_bull_rejection or brain is None):
@@ -1613,7 +1622,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     if not setup_type and can_short:
         side = 'short'
         # Relaxed: Upper wick is at least 30% of the candle range
-        is_bear_rejection = base.get("upper_wick_pct", 0.0) > 0.30
+        is_bear_rejection = curr_upper_wick_pct > 0.30
 
         # Strat Alpha (Trend Pullbacks)
         if is_trending_regime and base.get("sentient_regime_score", 0.0) < -0.2 and ((fib_618_s <= px <= fib_786_s) or (ob_bear > 0 and is_tapped(ob_bear))) and (is_bear_rejection or brain is None):
