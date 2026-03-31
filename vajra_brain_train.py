@@ -108,9 +108,13 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
     df["pnl_r"] = pd.to_numeric(df["pnl_r"], errors='coerce')
     df.dropna(subset=["pnl_r"], inplace=True)
     
-    if "meta_label" in df.columns:
+    if "meta_label" in df.columns and "rr" in df.columns:
+        # Target is 1 ONLY if the maximum favorable excursion reached the planned RR
+        df["label"] = (df["meta_label"] >= df["rr"]).astype(int)
+        log.info("🎯 Meta-Labeling detected. Target dynamically mapped to structural RR (MFE >= RR).")
+    elif "meta_label" in df.columns:
         df["label"] = (df["meta_label"] >= 1.0).astype(int)
-        log.info("🎯 Meta-Labeling detected. Target mapped to Maximum Favorable Excursion (MFE) >= 1.0R.")
+        log.info("🎯 Meta-Labeling detected. Target dynamically mapped to structural RR (MFE >= RR).")
     else:
         log.warning("⚠️ No Meta-Label detected. Falling back to PnL for binary label.")
         df["label"] = (df["pnl_r"] > 0).astype(int)

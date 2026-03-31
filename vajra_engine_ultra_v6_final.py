@@ -1749,6 +1749,17 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         min_p = getattr(cfg, 'min_prob_long', 0.51) if side == 'long' else getattr(cfg, 'min_prob_short', 0.51)
         if win_prob < min_p: return None
 
+        # --- MACRO ORACLE VETO ---
+        # Sentiment Score: 0 (Extreme Fear) to 100 (Extreme Greed). Default is 50 (Neutral).
+        macro_sentiment = base.get("sentiment_score", base.get("macro_sentiment", 50.0))
+
+        if side == 'long' and macro_sentiment < 40:
+            win_prob *= 0.8  # 20% penalty for longing into Fear
+            logic_desc += " [ORACLE PENALTY: Longing into Bearish Macro]"
+        elif side == 'short' and macro_sentiment > 60:
+            win_prob *= 0.8  # 20% penalty for shorting into Greed
+            logic_desc += " [ORACLE PENALTY: Shorting into Bullish Macro]"
+
         # Calculate true Expected Value (EV) = (Win% * Reward) - (Loss% * Risk)
         ev = (win_prob * rr) - ((1.0 - win_prob) * 1.0)
         if ev <= 0.1: return None # Only take trades with a positive mathematical edge
