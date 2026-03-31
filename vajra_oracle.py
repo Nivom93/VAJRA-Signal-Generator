@@ -142,9 +142,9 @@ def main():
         except Exception as e:
             log.error(f"Oracle loop encountered a critical error: {e}")
 
-        # Sleep for 4 hours (14400 seconds) to conserve API limits
-        log.info("Oracle sleeping for 4 hours...")
-        time.sleep(14400)
+        # Sleep for 30 minutes (1800 seconds) to conserve API limits
+        log.info("Oracle sleeping for 30 minutes...")
+        time.sleep(1800)
 
 if __name__ == "__main__":
     main()

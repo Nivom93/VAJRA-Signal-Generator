@@ -222,11 +222,11 @@ def log_to_csv(filepath, plan):
         with open(filepath, 'a', newline='') as f:
             w = csv.writer(f)
             if not exists:
-                w.writerow(['timestamp', 'side', 'entry', 'sl', 'tp', 'prob', 'rr', 'key', 'risk_factor'])
+                w.writerow(['timestamp', 'side', 'entry', 'sl', 'tp', 'prob', 'rr', 'key', 'risk_factor', 'analysis'])
             w.writerow([
                 datetime.now(timezone.utc).isoformat(),
                 plan['side'], plan['entry'], plan['sl'], plan['tp'], 
-                plan['prob'], plan['rr'], plan['key'], plan.get('risk_factor', 1.0)
+                plan['prob'], plan['rr'], plan.get('key', 'unknown'), plan.get('risk_factor', 1.0), plan.get('analysis', '')
             ])
     except Exception as e: log.error(f"Failed to log CSV: {e}")
 
