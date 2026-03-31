@@ -296,6 +296,10 @@ def _fetch_macro_context(ex, global_cache, cfg):
 def run_bot(args):
     """Main Bot Loop"""
     
+    # Dictionary to track the last time a specific strategy fired
+    strategy_cooldowns = {}
+    COOLDOWN_SECONDS = 7200  # 2 hours
+
     # 1. Init Config
     cfg = EngineConfig()
     try: _strategy_overrides(cfg)
@@ -393,10 +397,14 @@ def run_bot(args):
                 market_cache[symbol]["exec_tf"] = pd.concat([market_cache[symbol]["exec_tf"], new_exec]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True)
                 exec_tf = market_cache[symbol]["exec_tf"]
                 
+                # Drop the currently forming incomplete candle to prevent intra-bar repainting
+                if not exec_tf.empty:
+                    exec_tf = exec_tf.iloc[:-1].copy()
+
                 if exec_tf.empty or len(macro_tf) < 2 or len(swing_tf) < 2 or len(htf) < 2 or len(exec_tf) < 2: continue
                 
                 # FIX 1: THE GHOST CANDLE TIME-DILATION BUG
-                curr_ts = int(exec_tf.timestamp.iloc[-2])
+                curr_ts = int(exec_tf.timestamp.iloc[-1])
                 if curr_ts <= last_processed_ts.get(symbol, 0):
                     continue
                 last_processed_ts[symbol] = curr_ts
@@ -430,7 +438,7 @@ def run_bot(args):
                 if getattr(cfg, 'use_macro_data', False):
                     try: 
                         oi_arr = fetch_delta_oi(ex, symbol, cfg.exec_tf, exec_tf["timestamp"])
-                        oi_val = float(oi_arr[-2]) if len(oi_arr) > 1 else 0.0
+                        oi_val = float(oi_arr[-1]) if len(oi_arr) > 0 else 0.0
                     except: pass
 
                 funding_rate = ex.fetch_funding_rate(symbol)
@@ -446,20 +454,19 @@ def run_bot(args):
                 }
                 
                 # PHASE 1: PREVENT FEATURE REPAINTING (Strict evaluation on fully closed candle)
-                # For Live Bot, [-1] is the open unclosed candle, [-2] is the completely closed one.
-                # So the completely closed timestamp is ts of [-2].
-                ts_closed = int(exec_tf.timestamp.iloc[-2])
+                # The dataframe has already been sliced, so the completely closed timestamp is ts of [-1].
+                ts_closed = int(exec_tf.timestamp.iloc[-1])
 
                 iMacro = np.searchsorted(macro_tf['timestamp'].values, ts_closed, side='right') - 1
                 iSwing = np.searchsorted(swing_tf['timestamp'].values, ts_closed, side='right') - 1
                 iHtf = np.searchsorted(htf['timestamp'].values, ts_closed, side='right') - 1
-                iExec = len(exec_tf)-2
+                iExec = len(exec_tf)-1
 
                 base = confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, max(0, iMacro-1), max(0, iSwing-1), max(0, iHtf-1), iExec, pre_map, extras=extras)
-                base["timestamp"] = exec_tf.timestamp.iloc[-2]
+                base["timestamp"] = exec_tf.timestamp.iloc[-1]
                 base["symbol"] = symbol
                 
-                curr_bar = {"o":exec_tf.open.iloc[-2], "h":exec_tf.high.iloc[-2], "l":exec_tf.low.iloc[-2], "c":exec_tf.close.iloc[-2]}
+                curr_bar = {"o":exec_tf.open.iloc[-1], "h":exec_tf.high.iloc[-1], "l":exec_tf.low.iloc[-1], "c":exec_tf.close.iloc[-1]}
                 
                 # Step 1: Manage Existing
                 # FIX 7: STRUCTURAL TRAILING STOP PARALYSIS (Pass swing_high/swing_low)
@@ -475,6 +482,17 @@ def run_bot(args):
                 plan = plan_trade_with_brain(cfg, brain, base, adv_features, iExec, pExec)
                 
                 if plan:
+                    strat_key = f"{symbol}_{plan['strategy']}_{plan['side']}"
+                    current_ts = int(time.time())
+                    last_fire_ts = strategy_cooldowns.get(strat_key, 0)
+
+                    if current_ts - last_fire_ts < COOLDOWN_SECONDS:
+                        log.info(f"⏳ Cooldown active for {strat_key}. Skipping duplicate signal.")
+                        continue
+
+                    # If we pass the cooldown, update the dictionary and proceed
+                    strategy_cooldowns[strat_key] = current_ts
+
                     # SPOOFING DEFENSE: Block limit orders if facing a massive spoofed wall
                     if plan.get("type", cfg.execution_style) == 'limit':
                         if plan['side'] == 'long' and bid_ask_imbalance < 0.25:
