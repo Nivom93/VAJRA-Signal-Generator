@@ -276,6 +276,28 @@ def run_backtest(args, preloaded: Optional[Preloaded]=None, markets_data=None):
 
     if progress: progress.close()
 
+    # --- EXCEL/CSV DETAILED TRADE REPORT ---
+    if all_closed:
+        try:
+            df_export = pd.DataFrame(all_closed)
+            if 'created_ts' in df_export.columns:
+                df_export['created_date'] = pd.to_datetime(df_export['created_ts'], unit='ms')
+            if 'fill_ts' in df_export.columns:
+                df_export['fill_date'] = pd.to_datetime(df_export['fill_ts'], unit='ms')
+            if 'exit_ts' in df_export.columns:
+                df_export['exit_date'] = pd.to_datetime(df_export['exit_ts'], unit='ms')
+
+            desired_cols = [
+                'fill_date', 'exit_date', 'side', 'strategy', 'prob', 'rr',
+                'entry', 'avg_price', 'exit_price', 'sl', 'tp',
+                'pnl_r', 'exit_reason', 'bars_open', 'initial_risk_unit', 'analysis'
+            ]
+            export_cols = [c for c in desired_cols if c in df_export.columns]
+            df_export[export_cols].to_csv("backtest_trades_report.csv", index=False)
+            log.info("📊 Saved detailed trade report to: backtest_trades_report.csv")
+        except Exception as e:
+            log.error(f"Failed to export CSV trade report: {e}")
+
     wins = sum(1 for t in all_closed if t["pnl_r"] > 0)
     total_r = float(sum(t["pnl_r"] for t in all_closed))
     winrate = (wins / max(1, len(all_closed))) * 100.0

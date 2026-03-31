@@ -1721,8 +1721,8 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
     rr = abs(tp - entry_target) / max(1e-12, dynamic_risk)
 
-    if rr < 2.2 and brain is not None:
-        return None # Live Bot: Strict asymmetric risk required
+    if rr < 1.2 and brain is not None:
+        return None # Live Bot: Require reward to be greater than risk
     elif rr < 0.5 and brain is None:
         return None # Exporter: Allow base hits and failed setups so the AI learns the difference
     elif rr > 3.0:
@@ -1732,10 +1732,8 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # ==========================================================
     # THE COMPREHENSIVE ANALYST RATIONALE
     # ==========================================================
-    analysis_str = f"SETUP: {setup_type}. LOGIC: {logic_desc} ENTRY: Limit @ {entry_target:.2f}. TARGET: Liquidity Extracted @ {tp:.2f} ({rr:.2f} RR). INVALIDATION: Structural failure if 1H closes beyond {sl:.2f}. Risk strictly clamped to {dynamic_risk/current_atr:.2f} ATR."
+    analysis_str = "No AI active."
 
-    # ==========================================================
-    # DYNAMIC EV GATE
     # ==========================================================
     # DYNAMIC EV GATE
     # ==========================================================
@@ -1762,6 +1760,17 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             risk_factor = min(base_risk, getattr(cfg, 'max_risk_factor', 2.5))
         else:
             risk_factor = 1.0
+
+        # Calculate dynamic reversal warning level (Structural failure point before SL)
+        rev_warn = base.get("ema50_L", px)
+
+        prob_desc = "HIGH CONFIDENCE" if win_prob > 0.55 else "EDGE"
+        analysis_str = (
+            f"SETUP: {setup_type}. LOGIC: {logic_desc} "
+            f"AI PROB: {win_prob*100:.1f}% ({prob_desc} - EV: {ev:.2f}R). "
+            f"ENTRY: {entry_target:.2f}. TARGET: {tp:.2f} ({rr:.2f} RR). "
+            f"REVERSAL WARNING: Consider manual trim if 1H trend violates {rev_warn:.2f}."
+        )
 
     best_plan = {
         "side": side, "entry": entry_target, "sl": sl, "tp": tp, "rr": rr,
