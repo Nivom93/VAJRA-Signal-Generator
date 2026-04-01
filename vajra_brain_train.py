@@ -223,20 +223,10 @@ def main(argv=None):
             scale_weight = float(neg_cases) / max(1.0, float(pos_cases))
             scale_weight = min(scale_weight, 10.0) # Cap extreme weights
 
-            # --- Feature Selection (RFE) ---
-            log.info("Running RFE Feature Selection...")
-            estimator = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
-            selector = RFE(estimator, n_features_to_select=min(args.max_features, len(base_feature_names)), step=1)
-            selector = selector.fit(X_all, y_all)
-            selected_features = [f for f, s in zip(base_feature_names, selector.support_) if s]
-
-            X_all_sel = X_all[:, selector.support_]
-            log.info(f"RFE selected {len(selected_features)} features.")
-
-            n_samples = len(X_all_sel)
+            n_samples = len(X_all)
             actual_folds = min(args.wfa_folds, max(2, n_samples // 15))
             actual_gap = min(10, n_samples // 10)
-            log.info(f"Running Walk-Forward Analysis ({actual_folds} folds)...")
+            log.info(f"Running Walk-Forward Analysis ({actual_folds} folds) with dynamic per-fold RFE Feature Selection...")
             tscv = TimeSeriesSplit(n_splits=actual_folds, gap=actual_gap)
             
             acc_scores = []
@@ -244,13 +234,22 @@ def main(argv=None):
             roc_auc_scores = []
             f1_scores = []
             
-            for i, (train_idx, test_idx) in enumerate(tscv.split(X_all_sel)):
-                X_tr, y_tr = X_all_sel[train_idx], y_all[train_idx]
-                X_te, y_te = X_all_sel[test_idx], y_all[test_idx]
+            for i, (train_idx, test_idx) in enumerate(tscv.split(X_all)):
+                X_tr_full, y_tr = X_all[train_idx], y_all[train_idx]
+                X_te_full, y_te = X_all[test_idx], y_all[test_idx]
                 w_tr = sample_weights[train_idx]
 
                 if w_tr.sum() > 0:
                     w_tr = w_tr * (len(w_tr) / w_tr.sum())
+
+                # Dynamically run RFE on this specific fold
+                estimator_rfe = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
+                selector = RFE(estimator_rfe, n_features_to_select=min(args.max_features, len(base_feature_names)), step=1)
+                selector = selector.fit(X_tr_full, y_tr)
+
+                # Slice training and validation sets strictly to selected features
+                X_tr = X_tr_full[:, selector.support_]
+                X_te = X_te_full[:, selector.support_]
 
                 clf = xgb.XGBClassifier(
                     n_estimators=args.n_estimators,
@@ -282,7 +281,7 @@ def main(argv=None):
                     random_search = RandomizedSearchCV(clf, param_distributions=param_dist, n_iter=10, scoring='roc_auc', cv=cv_folds, random_state=42)
                     random_search.fit(X_tr, y_tr, sample_weight=w_tr)
                     clf = random_search.best_estimator_
-                    log.info(f"    Tuned Params: {random_search.best_params_}")
+                    log.info(f"    Fold {i+1} Tuned Params: {random_search.best_params_}")
 
                 clf.fit(X_tr, y_tr, sample_weight=w_tr)
 
@@ -299,7 +298,7 @@ def main(argv=None):
                 roc_auc_scores.append(roc)
                 f1_scores.append(f1)
 
-                log.info(f"  Fold {i+1}: Acc={acc:.4f} | Prec={prec:.4f} | ROC={roc:.4f} | F1={f1:.4f}")
+                log.info(f"  Fold {i+1}: Acc={acc:.4f} | Prec={prec:.4f} | ROC={roc:.4f} | F1={f1:.4f} (Features: {len(X_tr[0])})")
 
             avg_acc = np.mean(acc_scores)
             avg_prec = np.mean(prec_scores)
@@ -308,7 +307,19 @@ def main(argv=None):
 
             log.info(f"✅ WFA RESULTS: Avg Acc = {avg_acc:.4f} | Avg Prec = {avg_prec:.4f} | Avg ROC-AUC = {avg_roc:.4f} | Avg F1 = {avg_f1:.4f}")
 
-            log.info("Calibrating Final Production Model on final fold...")
+            log.info("Running Final RFE Feature Selection on FULL dataset for Production Model...")
+            estimator_rfe_final = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
+            selector_final = RFE(estimator_rfe_final, n_features_to_select=min(args.max_features, len(base_feature_names)), step=1)
+            selector_final = selector_final.fit(X_all, y_all)
+            selected_features = [f for f, s in zip(base_feature_names, selector_final.support_) if s]
+
+            X_all_sel = X_all[:, selector_final.support_]
+            log.info(f"Final RFE selected {len(selected_features)} features.")
+
+            log.info("Training and Calibrating Final Production Model on FULL dataset...")
+            w_all = sample_weights
+            if w_all.sum() > 0:
+                w_all = w_all * (len(w_all) / w_all.sum())
 
             final_model = xgb.XGBClassifier(
                 n_estimators=args.n_estimators,
@@ -324,15 +335,12 @@ def main(argv=None):
                 scale_pos_weight=scale_weight
             )
 
-            # Fit the final model on the training set of the last fold
-            final_model.fit(X_tr, y_tr, sample_weight=w_tr)
+            # Fit the final model on the entire dataset
+            # TimeSeriesSplit for temporal calibration over full dataset
+            calib_tscv = TimeSeriesSplit(n_splits=5)
+            calibrated_model = CalibratedClassifierCV(estimator=final_model, method='sigmoid', cv=calib_tscv)
+            calibrated_model.fit(X_all_sel, y_all, sample_weight=w_all) # Fit calibration internal WFA
 
-            # Calibrate probabilities to fix distortion from class weights
-            if FrozenEstimator is not None:
-                calibrated_model = CalibratedClassifierCV(estimator=FrozenEstimator(final_model), method='sigmoid')
-            else:
-                calibrated_model = CalibratedClassifierCV(estimator=final_model, method='sigmoid', cv='prefit')
-            calibrated_model.fit(X_te, y_te) # Fit on the validation set of the last fold
 
             pipeline = {
                 "classifier": calibrated_model,

@@ -63,13 +63,46 @@ def _ema_loop(x, out, alpha):
     for i in range(1, x.size):
         out[i] = alpha * x[i] + (1.0 - alpha) * out[i-1]
 
+@njit(cache=True)
 def _rolling_mean(arr, window, min_periods=1):
+    n = len(arr)
+    out = np.empty(n, dtype=np.float64)
     if window <= 0: return arr.astype(np.float64)
-    return pd.Series(arr).rolling(window, min_periods=min_periods).mean().to_numpy(dtype=np.float64)
+    for i in range(n):
+        start_idx = max(0, i - window + 1)
+        count = i - start_idx + 1
+        if count < min_periods:
+            out[i] = np.nan
+        else:
+            s = 0.0
+            for j in range(start_idx, i + 1):
+                s += arr[j]
+            out[i] = s / count
+    return out
 
+@njit(cache=True)
 def _rolling_std(arr, window, min_periods=2):
+    n = len(arr)
+    out = np.empty(n, dtype=np.float64)
     if window <= 0: return np.zeros_like(arr, dtype=np.float64)
-    return pd.Series(arr).rolling(window, min_periods=max(min_periods,2)).std(ddof=0).to_numpy(dtype=np.float64)
+    min_p = max(min_periods, 2)
+    for i in range(n):
+        start_idx = max(0, i - window + 1)
+        count = i - start_idx + 1
+        if count < min_p:
+            out[i] = np.nan
+        else:
+            s = 0.0
+            for j in range(start_idx, i + 1):
+                s += arr[j]
+            mean = s / count
+
+            var_sum = 0.0
+            for j in range(start_idx, i + 1):
+                diff = arr[j] - mean
+                var_sum += diff * diff
+            out[i] = np.sqrt(var_sum / count)
+    return out
 
 def _roc(arr, k):
     out = np.zeros_like(arr, dtype=np.float64)
@@ -1672,12 +1705,14 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # SWEEP ENTRIES & ATR-BASED STOP HUNTS PREVENTION
     # ==========================================================
     if side == 'long':
-        entry_target = px - (current_atr * 0.5)
+        if entry_target == px:
+            entry_target = px - (current_atr * 0.5)
         sl = base.get("last_swing_low", px) - (current_atr * 1.0)
         risk_distance = abs(entry_target - sl)
         tp = entry_target + (risk_distance * 2.5)
     else:
-        entry_target = px + (current_atr * 0.5)
+        if entry_target == px:
+            entry_target = px + (current_atr * 0.5)
         sl = base.get("last_swing_high", px) + (current_atr * 1.0)
         risk_distance = abs(entry_target - sl)
         tp = entry_target - (risk_distance * 2.5)
@@ -1686,6 +1721,11 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
     # RR GATES (Live vs Exporter) - Keep this in case risk distance is somehow 0
     if risk_distance < 1e-9:
+        return None
+
+    # Nominal Target Distance Gate
+    price_target_dist_pct = abs(tp - entry_target) / entry_target * 100.0
+    if price_target_dist_pct < 0.30:
         return None
 
     # ==========================================================

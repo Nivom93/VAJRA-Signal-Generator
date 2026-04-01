@@ -171,15 +171,17 @@ class RealExecutionManager:
         curr_px = self.get_best_book_price(symbol, c_side) or price
 
         # QUADRATIC SLIPPAGE (Protocol v34.0)
-        penalty_pct = 0.0001 * (rvol ** 2)
-        if rvol > 5.0 and side == 'short':
-            penalty_pct *= 1.5
+        impact = 0.0
+        if getattr(self.cfg, 'slippage_bps', 0.0) > 0.0:
+            penalty_pct = 0.0001 * (rvol ** 2)
+            if rvol > 5.0 and side == 'short':
+                penalty_pct *= 1.5
 
-        impact = price * penalty_pct
+            impact = price * penalty_pct
 
-        # Worsen the price
-        if side == 'long': curr_px += impact
-        else: curr_px -= impact
+            # Worsen the price
+            if side == 'long': curr_px += impact
+            else: curr_px -= impact
 
         if impact > 0:
             log.warning(f"📉 Quadratic Impact! RVOL {rvol:.1f} caused {impact:.2f} ({penalty_pct*100:.3f}%) slippage.")
@@ -414,20 +416,23 @@ async def bot_loop(cfg, ex, tm, executor, brain, market_cache, global_cache, mac
             for symbol in cfg.symbols:
                 cfg.symbol = symbol 
                 
-                # Fetch incremental update and apply to cache (Protect Rate Limits)
-                new_macro = await asyncio.to_thread(ex.fetch_ohlcv_df, symbol, cfg.macro_tf, limit=5)
+                # Fetch incremental update concurrently and apply to cache (Protect Rate Limits & Latency Drift)
+                new_macro, new_swing, new_htf, new_exec = await asyncio.gather(
+                    asyncio.to_thread(ex.fetch_ohlcv_df, symbol, cfg.macro_tf, limit=5),
+                    asyncio.to_thread(ex.fetch_ohlcv_df, symbol, cfg.swing_tf, limit=5),
+                    asyncio.to_thread(ex.fetch_ohlcv_df, symbol, cfg.htf, limit=5),
+                    asyncio.to_thread(ex.fetch_ohlcv_df, symbol, cfg.exec_tf, limit=5)
+                )
+
                 market_cache[symbol]["macro_tf"] = pd.concat([market_cache[symbol]["macro_tf"], new_macro]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
                 macro_tf = market_cache[symbol]["macro_tf"]
 
-                new_swing = await asyncio.to_thread(ex.fetch_ohlcv_df, symbol, cfg.swing_tf, limit=5)
                 market_cache[symbol]["swing_tf"] = pd.concat([market_cache[symbol]["swing_tf"], new_swing]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
                 swing_tf = market_cache[symbol]["swing_tf"]
 
-                new_htf = await asyncio.to_thread(ex.fetch_ohlcv_df, symbol, cfg.htf, limit=5)
                 market_cache[symbol]["htf"] = pd.concat([market_cache[symbol]["htf"], new_htf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
                 htf = market_cache[symbol]["htf"]
 
-                new_exec = await asyncio.to_thread(ex.fetch_ohlcv_df, symbol, cfg.exec_tf, limit=5)
                 market_cache[symbol]["exec_tf"] = pd.concat([market_cache[symbol]["exec_tf"], new_exec]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True)
                 exec_tf = market_cache[symbol]["exec_tf"]
                 
