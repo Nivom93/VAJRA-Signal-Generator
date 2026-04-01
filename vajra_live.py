@@ -308,6 +308,21 @@ def _fetch_macro_context(ex, global_cache, cfg):
 
     return btc_bullish, btcd_trend, 0.0, 0.0, oracle_sentiment_val
 
+def drop_forming_candle(df, timeframe_str):
+    if df is None or df.empty:
+        return df
+    # Parse timeframe to milliseconds (e.g., '1h' -> 3600000)
+    tf_seconds = ccxt.Exchange.parse_timeframe(timeframe_str)
+    tf_ms = tf_seconds * 1000
+    current_time_ms = int(time.time() * 1000)
+
+    # CCXT OHLCV index/timestamp is the open time of the candle
+    last_candle_open_ms = df.index[-1] if isinstance(df.index[-1], (int, np.integer)) else df['timestamp'].iloc[-1]
+
+    if current_time_ms < (last_candle_open_ms + tf_ms):
+        return df.iloc[:-1].copy()
+    return df
+
 async def run_bot(args):
     """Main Bot Loop"""
     
@@ -387,8 +402,8 @@ async def bot_loop(cfg, ex, tm, executor, brain, market_cache, global_cache, mac
         try:
             now_sec = time.time()
             sleep_sec = 60 - (now_sec % 60)
-            log.info(f"Waiting {sleep_sec:.1f}s for next candle...")
-            await asyncio.sleep(sleep_sec + 1)
+            log.info(f"Waiting {sleep_sec:.1f}s for next minute boundary...")
+            await asyncio.sleep(sleep_sec + 5) # +5 seconds padding for exchange API sync
 
             btc_bullish, btcd_trend, _, _, oracle_sentiment_val = await asyncio.to_thread(_fetch_macro_context, ex, global_cache, cfg)
             dxy_val = macro_fetcher.state["dxy_val"]
@@ -416,9 +431,11 @@ async def bot_loop(cfg, ex, tm, executor, brain, market_cache, global_cache, mac
                 market_cache[symbol]["exec_tf"] = pd.concat([market_cache[symbol]["exec_tf"], new_exec]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True)
                 exec_tf = market_cache[symbol]["exec_tf"]
                 
-                # Drop the currently forming incomplete candle to prevent intra-bar repainting
-                if not exec_tf.empty:
-                    exec_tf = exec_tf.iloc[:-1].copy()
+                # Smart Slicing: Dynamically drop the forming candle based on its timeframe
+                macro_tf = drop_forming_candle(macro_tf, cfg.macro_tf)
+                swing_tf = drop_forming_candle(swing_tf, cfg.swing_tf)
+                htf = drop_forming_candle(htf, cfg.htf)
+                exec_tf = drop_forming_candle(exec_tf, cfg.exec_tf)
 
                 if exec_tf.empty or len(macro_tf) < 2 or len(swing_tf) < 2 or len(htf) < 2 or len(exec_tf) < 2: continue
                 
