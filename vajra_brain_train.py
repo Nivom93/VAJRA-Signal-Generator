@@ -114,16 +114,13 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
     df["pnl_r"] = pd.to_numeric(df["pnl_r"], errors='coerce')
     df.dropna(subset=["pnl_r"], inplace=True)
     
-    if "meta_label" in df.columns and "rr" in df.columns:
-        # Target is 1 ONLY if the maximum favorable excursion reached the planned RR
-        df["label"] = (df["meta_label"] >= df["rr"]).astype(int)
-        log.info("🎯 Meta-Labeling detected. Target dynamically mapped to structural RR (MFE >= RR).")
-    elif "meta_label" in df.columns:
-        df["label"] = (df["meta_label"] >= 1.0).astype(int)
-        log.info("🎯 Meta-Labeling detected. Target dynamically mapped to structural RR (MFE >= RR).")
-    else:
-        log.warning("⚠️ No Meta-Label detected. Falling back to PnL for binary label.")
+    # Pure Target Binary (Signal Vacuum)
+    if "pnl_r" in df.columns:
+        # PnL logic: 1 if hit TP before SL (i.e. pnl_r >= 0), 0 otherwise. No early exits allowed in exporter so this is safe.
         df["label"] = (df["pnl_r"] > 0).astype(int)
+        log.info("🎯 Pure Target Binary (Signal Vacuum) detected. Target mapped to hit +2R before SL.")
+    else:
+        df["label"] = 0
         
     df["entry_ts"] = pd.to_numeric(df["entry_ts"], errors='coerce')
     df.dropna(subset=["entry_ts"], inplace=True)
@@ -242,9 +239,14 @@ def main(argv=None):
                 if w_tr.sum() > 0:
                     w_tr = w_tr * (len(w_tr) / w_tr.sum())
 
+                # Dynamically calculate features to prevent overfitting based on pos_cases
+                pos_cases_fold = np.sum(y_tr == 1)
+                dyn_max_features = max(1, pos_cases_fold // 20)
+                rfe_features = min(args.max_features, len(base_feature_names), dyn_max_features)
+
                 # Dynamically run RFE on this specific fold
                 estimator_rfe = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
-                selector = RFE(estimator_rfe, n_features_to_select=min(args.max_features, len(base_feature_names)), step=1)
+                selector = RFE(estimator_rfe, n_features_to_select=rfe_features, step=1)
                 selector = selector.fit(X_tr_full, y_tr)
 
                 # Slice training and validation sets strictly to selected features
@@ -308,8 +310,12 @@ def main(argv=None):
             log.info(f"✅ WFA RESULTS: Avg Acc = {avg_acc:.4f} | Avg Prec = {avg_prec:.4f} | Avg ROC-AUC = {avg_roc:.4f} | Avg F1 = {avg_f1:.4f}")
 
             log.info("Running Final RFE Feature Selection on FULL dataset for Production Model...")
+
+            dyn_max_features_final = max(1, pos_cases // 20)
+            rfe_features_final = min(args.max_features, len(base_feature_names), dyn_max_features_final)
+
             estimator_rfe_final = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
-            selector_final = RFE(estimator_rfe_final, n_features_to_select=min(args.max_features, len(base_feature_names)), step=1)
+            selector_final = RFE(estimator_rfe_final, n_features_to_select=rfe_features_final, step=1)
             selector_final = selector_final.fit(X_all, y_all)
             selected_features = [f for f, s in zip(base_feature_names, selector_final.support_) if s]
 
@@ -342,6 +348,8 @@ def main(argv=None):
             calibrated_model.fit(X_all_sel, y_all, sample_weight=w_all) # Fit calibration internal WFA
 
 
+            valid_edge = bool(avg_roc >= 0.53 and avg_prec >= 0.45)
+
             pipeline = {
                 "classifier": calibrated_model,
                 "feature_names": selected_features,
@@ -350,7 +358,8 @@ def main(argv=None):
                 "wfa_acc": avg_acc,
                 "wfa_prec": avg_prec,
                 "wfa_roc_auc": avg_roc,
-                "wfa_f1": avg_f1
+                "wfa_f1": avg_f1,
+                "valid_edge": valid_edge
             }
 
             out_file = out_dir / f"brain_{strat_clean}_{side}.joblib"

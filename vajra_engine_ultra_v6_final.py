@@ -1252,7 +1252,14 @@ class BrainLearningManager:
                 if len(parts) >= 3:
                     strat = parts[1]
                     side = parts[2]
-                    self.brains[(strat, side)] = joblib.load(str(model_file))
+                    brain_data = joblib.load(str(model_file))
+
+                    # AUTO-KILL SWITCH: Reject toxic models
+                    if brain_data.get('valid_edge') is False:
+                        log.warning(f"Rejected toxic model {model_file.name} (failed validation: ROC-AUC={brain_data.get('wfa_roc_auc', 0):.4f}, Prec={brain_data.get('wfa_prec', 0):.4f})")
+                        continue
+
+                    self.brains[(strat, side)] = brain_data
                     loaded += 1
             except Exception as e:
                 log.error(f"Load error {model_file.name}: {e}")

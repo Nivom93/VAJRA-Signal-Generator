@@ -28,6 +28,8 @@ def _strategy_overrides(cfg):
     cfg.trailing_dist_r = 0.0
     cfg.dynamic_tp_enabled = False
     cfg.time_in_force_decay = 0
+    cfg.maker_fee_bps = 0.0
+    cfg.taker_fee_bps = 0.0
 
     # --- GLOBAL RISK DEFAULTS ---
     cfg.risk_per_trade = 0.01          
