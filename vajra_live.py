@@ -10,7 +10,7 @@ LEVEL 30 UPGRADE (SPOOFING DEFENSE INTEGRATION):
 """
 from __future__ import annotations
 
-import argparse, time, logging, traceback, os, requests, json, csv, sqlite3, threading, subprocess
+import asyncio, argparse, time, logging, traceback, os, requests, json, csv, sqlite3, threading, subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 import pandas as pd
@@ -43,50 +43,55 @@ if not log.handlers:
 
 # --- AUTO RETRAINER ---
 
-class MacroFetcher(threading.Thread):
+class MacroFetcher:
     """
     Background daemon that asynchronously fetches slow macro data (yfinance)
     to prevent main execution loop freezing.
     """
     def __init__(self, cfg):
-        super().__init__(daemon=True)
         self.cfg = cfg
         self.state = {"dxy_val": 0.0, "spx_val": 0.0}
 
-    def run(self):
+    async def run(self):
         log.info("🌐 Macro Fetcher Daemon Active.")
         while True:
             if getattr(self.cfg, 'use_macro_data', False):
                 try:
-                    import yfinance as yf
-                    for t in ["DX-Y.NYB", "UUP", "DX=F"]:
-                        try:
-                            dxy_c = yf.Ticker(t).history(period="5d")['Close']
-                            if not dxy_c.empty:
-                                self.state["dxy_val"] = float(dxy_c.iloc[-2]) if len(dxy_c) > 1 else 0.0
-                                break
-                        except Exception:
-                            continue
-
-                    for t in ["^GSPC", "SPY", "ES=F"]:
-                        try:
-                            spx_c = yf.Ticker(t).history(period="5d")['Close']
-                            if not spx_c.empty:
-                                self.state["spx_val"] = float(spx_c.iloc[-2]) if len(spx_c) > 1 else 0.0
-                                break
-                        except Exception:
-                            continue
+                    # Offload blocking yfinance calls to a thread
+                    await asyncio.to_thread(self._fetch_data)
                 except Exception as e:
                     log.debug(f"Macro Fetcher silent fail: {e}")
-            time.sleep(300) # Update every 5 minutes
+            await asyncio.sleep(300) # Update every 5 minutes
 
-class AutoRetrainer(threading.Thread):
+    def _fetch_data(self):
+        try:
+            import yfinance as yf
+            for t in ["DX-Y.NYB", "UUP", "DX=F"]:
+                try:
+                    dxy_c = yf.Ticker(t).history(period="5d")['Close']
+                    if not dxy_c.empty:
+                        self.state["dxy_val"] = float(dxy_c.iloc[-2]) if len(dxy_c) > 1 else 0.0
+                        break
+                except Exception:
+                    continue
+
+            for t in ["^GSPC", "SPY", "ES=F"]:
+                try:
+                    spx_c = yf.Ticker(t).history(period="5d")['Close']
+                    if not spx_c.empty:
+                        self.state["spx_val"] = float(spx_c.iloc[-2]) if len(spx_c) > 1 else 0.0
+                        break
+                except Exception:
+                    continue
+        except ImportError:
+            log.warning("yfinance not installed. Macro data fetch skipped.")
+
+class AutoRetrainer:
     """
     Background sentinel that monitors model files for updates and 
     periodically triggers retraining if data is stale.
     """
     def __init__(self, brain_manager, brains_dir, interval_hours=12):
-        super().__init__(daemon=True)
         self.brain_manager = brain_manager
         self.brains_dir = brains_dir
         self.interval = interval_hours * 3600
@@ -100,10 +105,10 @@ class AutoRetrainer(threading.Thread):
             for f in p.glob("brain_*.joblib"):
                 self.last_mtimes[str(f)] = os.path.getmtime(f)
 
-    def run(self):
+    async def run(self):
         log.info("🛡️ Auto-Retrainer Sentinel Active.")
         while True:
-            time.sleep(60) # Check every minute for file changes, trigger retrain logic every interval
+            await asyncio.sleep(60) # Check every minute for file changes, trigger retrain logic every interval
             
             if not self.brains_dir: continue
 
@@ -119,7 +124,8 @@ class AutoRetrainer(threading.Thread):
                         needs_reload = True
 
             if needs_reload:
-                self.brain_manager.load_brains(self.brains_dir)
+                # Offload blocking joblib.load inside brain_manager to a thread
+                await asyncio.to_thread(self.brain_manager.load_brains, self.brains_dir)
                 log.info("✅ Brain Hot Reload Complete.")
 
 # --- EXECUTION MANAGER ---
@@ -152,6 +158,15 @@ class RealExecutionManager:
         c_side = 'buy' if side == 'long' else 'sell'
         
         log.info(f"📝 SIMULATION: Signal @ {price:.2f}. Mode: {plan_type.upper()} | RVOL: {rvol:.2f}")
+
+        # Offload ticker fetch to a thread
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # This is tricky if called from a thread, but executor.execute_entry
+            # is now called via asyncio.to_thread, so it's in a worker thread.
+            # We don't need to do anything special here as it's already in a thread.
+            pass
 
         curr_px = self.get_best_book_price(symbol, c_side) or price
 
@@ -293,7 +308,7 @@ def _fetch_macro_context(ex, global_cache, cfg):
 
     return btc_bullish, btcd_trend, 0.0, 0.0, oracle_sentiment_val
 
-def run_bot(args):
+async def run_bot(args):
     """Main Bot Loop"""
     
     # Dictionary to track the last time a specific strategy fired
@@ -319,37 +334,33 @@ def run_bot(args):
         try: ex = ExchangeWrapper(cfg)
         except Exception as e:
             log.error(f"Exchange init failed: {e}. Retrying in 10s...")
-            time.sleep(10)
+            await asyncio.sleep(10)
 
     executor = RealExecutionManager(ex.client, cfg)
     brain = BrainLearningManager(cfg, args.brains_dir)
     tm = TradeManager(cfg, ex, mem, brain)
     
-    # 3. Start Auto-Retrainer Sentinel
+    # 3. Init Background Tasks
     retrainer = AutoRetrainer(brain, args.brains_dir)
-    retrainer.start()
-
-    # 4. Start Macro Fetcher Daemon
     macro_fetcher = MacroFetcher(cfg)
-    macro_fetcher.start()
 
     # PHASE 2: IN-MEMORY OHLCV CACHING SYSTEM (Prevents API ratelimits)
     log.info("Building In-Memory OHLCV Cache to prevent IP Bans...")
     market_cache = {}
     for sym in cfg.symbols:
         market_cache[sym] = {
-            "macro_tf": ex.fetch_ohlcv_df(sym, cfg.macro_tf, limit=250),
-            "swing_tf": ex.fetch_ohlcv_df(sym, cfg.swing_tf, limit=250),
-            "htf": ex.fetch_ohlcv_df(sym, cfg.htf, limit=250),
-            "exec_tf": ex.fetch_ohlcv_df(sym, cfg.exec_tf, limit=500)
+            "macro_tf": await asyncio.to_thread(ex.fetch_ohlcv_df, sym, cfg.macro_tf, limit=250),
+            "swing_tf": await asyncio.to_thread(ex.fetch_ohlcv_df, sym, cfg.swing_tf, limit=250),
+            "htf": await asyncio.to_thread(ex.fetch_ohlcv_df, sym, cfg.htf, limit=250),
+            "exec_tf": await asyncio.to_thread(ex.fetch_ohlcv_df, sym, cfg.exec_tf, limit=500)
         }
     
     global_cache = {
-        "btc_4h": ex.fetch_ohlcv_df("BTC/USDT", "4h", limit=1000),
-        "btc_exec_tf": ex.fetch_ohlcv_df("BTC/USDT", cfg.exec_tf, limit=500)
+        "btc_4h": await asyncio.to_thread(ex.fetch_ohlcv_df, "BTC/USDT", "4h", limit=1000),
+        "btc_exec_tf": await asyncio.to_thread(ex.fetch_ohlcv_df, "BTC/USDT", cfg.exec_tf, limit=500)
     }
     try:
-        global_cache["btcd_4h"] = ex.fetch_ohlcv_df("BTCDOM/USDT", "4h", limit=50)
+        global_cache["btcd_4h"] = await asyncio.to_thread(ex.fetch_ohlcv_df, "BTCDOM/USDT", "4h", limit=50)
     except:
         global_cache["btcd_4h"] = pd.DataFrame()
         
@@ -359,6 +370,14 @@ def run_bot(args):
     mode_str = "PAPER (Simulation)" if cfg.paper_mode else "REAL MONEY"
     log.info(f"EXECUTION MODE: {mode_str} | ENTRY STYLE: {cfg.execution_style}")
 
+    # Start the event loop for background tasks and main bot loop
+    await asyncio.gather(
+        retrainer.run(),
+        macro_fetcher.run(),
+        bot_loop(cfg, ex, tm, executor, brain, market_cache, global_cache, macro_fetcher, strategy_cooldowns, COOLDOWN_SECONDS, args)
+    )
+
+async def bot_loop(cfg, ex, tm, executor, brain, market_cache, global_cache, macro_fetcher, strategy_cooldowns, COOLDOWN_SECONDS, args):
     btc_bullish = 1.0
     btcd_trend = 0.0 # Default Neutral
     
@@ -369,9 +388,9 @@ def run_bot(args):
             now_sec = time.time()
             sleep_sec = 60 - (now_sec % 60)
             log.info(f"Waiting {sleep_sec:.1f}s for next candle...")
-            time.sleep(sleep_sec + 1)
+            await asyncio.sleep(sleep_sec + 1)
 
-            btc_bullish, btcd_trend, _, _, oracle_sentiment_val = _fetch_macro_context(ex, global_cache, cfg)
+            btc_bullish, btcd_trend, _, _, oracle_sentiment_val = await asyncio.to_thread(_fetch_macro_context, ex, global_cache, cfg)
             dxy_val = macro_fetcher.state["dxy_val"]
             spx_val = macro_fetcher.state["spx_val"]
             btc_exec_tf = global_cache.get("btc_exec_tf", pd.DataFrame())
@@ -381,19 +400,19 @@ def run_bot(args):
                 cfg.symbol = symbol 
                 
                 # Fetch incremental update and apply to cache (Protect Rate Limits)
-                new_macro = ex.fetch_ohlcv_df(symbol, cfg.macro_tf, limit=5)
+                new_macro = await asyncio.to_thread(ex.fetch_ohlcv_df, symbol, cfg.macro_tf, limit=5)
                 market_cache[symbol]["macro_tf"] = pd.concat([market_cache[symbol]["macro_tf"], new_macro]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
                 macro_tf = market_cache[symbol]["macro_tf"]
 
-                new_swing = ex.fetch_ohlcv_df(symbol, cfg.swing_tf, limit=5)
+                new_swing = await asyncio.to_thread(ex.fetch_ohlcv_df, symbol, cfg.swing_tf, limit=5)
                 market_cache[symbol]["swing_tf"] = pd.concat([market_cache[symbol]["swing_tf"], new_swing]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
                 swing_tf = market_cache[symbol]["swing_tf"]
 
-                new_htf = ex.fetch_ohlcv_df(symbol, cfg.htf, limit=5)
+                new_htf = await asyncio.to_thread(ex.fetch_ohlcv_df, symbol, cfg.htf, limit=5)
                 market_cache[symbol]["htf"] = pd.concat([market_cache[symbol]["htf"], new_htf]).drop_duplicates(subset=["timestamp"], keep="last").tail(250).reset_index(drop=True)
                 htf = market_cache[symbol]["htf"]
 
-                new_exec = ex.fetch_ohlcv_df(symbol, cfg.exec_tf, limit=5)
+                new_exec = await asyncio.to_thread(ex.fetch_ohlcv_df, symbol, cfg.exec_tf, limit=5)
                 market_cache[symbol]["exec_tf"] = pd.concat([market_cache[symbol]["exec_tf"], new_exec]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True)
                 exec_tf = market_cache[symbol]["exec_tf"]
                 
@@ -412,7 +431,7 @@ def run_bot(args):
                 # LEVEL 30 SPOOFING DEFENSE (L2 ORDERBOOK FETCH)
                 bid_ask_imbalance = 0.5
                 try:
-                    ob = ex.client.fetch_order_book(symbol, limit=20)
+                    ob = await asyncio.to_thread(ex.client.fetch_order_book, symbol, limit=20)
                     if ob and 'bids' in ob and 'asks' in ob:
                         total_bids = sum((v for p, v in ob['bids']))
                         total_asks = sum((v for p, v in ob['asks']))
@@ -441,7 +460,7 @@ def run_bot(args):
                         oi_val = float(oi_arr[-1]) if len(oi_arr) > 0 else 0.0
                     except: pass
 
-                funding_rate = ex.fetch_funding_rate(symbol)
+                funding_rate = await asyncio.to_thread(ex.fetch_funding_rate, symbol)
                 extras = {
                     "btc_bullish": btc_bullish,
                     "funding_rate": funding_rate,
@@ -522,7 +541,7 @@ def run_bot(args):
                             rvol = plan['features'].get('rvol', 1.0)
                             plan_type = plan.get('type', cfg.execution_style)
                             
-                            fill_price = executor.execute_entry(symbol, plan['side'], qty, plan['entry'], is_paper=cfg.paper_mode, rvol=rvol, plan_type=plan_type)
+                            fill_price = await asyncio.to_thread(executor.execute_entry, symbol, plan['side'], qty, plan['entry'], is_paper=cfg.paper_mode, rvol=rvol, plan_type=plan_type)
                             
                             if fill_price:
                                 plan['entry'] = fill_price 
@@ -543,16 +562,13 @@ def run_bot(args):
                          if adx < 20 and bbw < 5.0:
                              log.debug(f"[{symbol}] ⚠️  CHOP FILTER ACTIVE (ADX={adx:.1f}, BBW={bbw:.1f}). Sleeping.")
 
-        except KeyboardInterrupt:
-            log.info("Manual Stop triggered.")
-            return 
         except (ccxt.NetworkError, ccxt.RequestTimeout) as e:
             log.warning(f"⚠️ Network glitch: {e}. Sleeping 5s...")
-            time.sleep(5)
+            await asyncio.sleep(5)
         except Exception as e:
             log.error(f"CRITICAL LOOP ERROR: {e}")
             traceback.print_exc()
-            time.sleep(30) 
+            await asyncio.sleep(30)
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
@@ -568,7 +584,11 @@ if __name__ == "__main__":
     args = p.parse_args()
     while True:
         try:
-            run_bot(args); break 
+            asyncio.run(run_bot(args))
+            break
+        except KeyboardInterrupt:
+            log.info("Manual Stop triggered.")
+            break
         except Exception as e:
             log.critical(f"FATAL CRASH: {e}. Restarting...")
             time.sleep(10)
