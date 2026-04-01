@@ -25,6 +25,7 @@ import xgboost as xgb
 from sklearn.metrics import accuracy_score, precision_score, roc_auc_score, f1_score
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import RFE
+from sklearn.calibration import CalibratedClassifierCV
 
 log = logging.getLogger("vajra.train.v8")
 if not log.handlers:
@@ -302,7 +303,7 @@ def main(argv=None):
 
             log.info(f"✅ WFA RESULTS: Avg Acc = {avg_acc:.4f} | Avg Prec = {avg_prec:.4f} | Avg ROC-AUC = {avg_roc:.4f} | Avg F1 = {avg_f1:.4f}")
 
-            log.info("Training Final Production Model on FULL DATASET (Weighted)...")
+            log.info("Calibrating Final Production Model on final fold...")
 
             final_model = xgb.XGBClassifier(
                 n_estimators=args.n_estimators,
@@ -318,13 +319,18 @@ def main(argv=None):
                 scale_pos_weight=scale_weight
             )
 
-            final_model.fit(X_all_sel, y_all, sample_weight=sample_weights)
+            # Fit the final model on the training set of the last fold
+            final_model.fit(X_tr, y_tr, sample_weight=w_tr)
+
+            # Calibrate probabilities to fix distortion from class weights
+            calibrated_model = CalibratedClassifierCV(estimator=final_model, method='sigmoid', cv='prefit')
+            calibrated_model.fit(X_te, y_te) # Fit on the validation set of the last fold
 
             pipeline = {
-                "classifier": final_model,
+                "classifier": calibrated_model,
                 "feature_names": selected_features,
                 "training_args": vars(args),
-                "model": "xgboost",
+                "model": "xgboost_calibrated",
                 "wfa_acc": avg_acc,
                 "wfa_prec": avg_prec,
                 "wfa_roc_auc": avg_roc,
