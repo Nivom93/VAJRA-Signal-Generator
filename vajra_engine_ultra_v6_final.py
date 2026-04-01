@@ -1671,63 +1671,45 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # ==========================================================
     # RELAX THE MATHEMATICAL STRAITJACKET & DYNAMIC ESCALATION
     # ==========================================================
-    # 1. Smart Stop Loss (Reject if > 2.5 ATR or < 0.5 ATR)
+    # 1. STRICT SNIPER TP & SL LOGIC
     if side == 'long':
         sl = base.get("last_swing_low", entry_target - current_atr) - (current_atr * 0.2)
+
+        # Find the CLOSEST valid resistance for TP
+        bear_ob = base.get("ob_bear_bot", float('inf'))
+        vah = base.get("vah", float('inf'))
+
+        valid_targets = [t for t in (bear_ob, vah) if t > entry_target]
+        tp = min(valid_targets) if valid_targets else entry_target + (current_atr * 2.0)
+
     else:
         sl = base.get("last_swing_high", entry_target + current_atr) + (current_atr * 0.2)
 
+        # Find the CLOSEST valid support for TP
+        bull_ob = base.get("ob_bull_top", 0.0)
+        val = base.get("val", 0.0)
+
+        valid_targets = [t for t in (bull_ob, val) if t > 0 and t < entry_target]
+        tp = max(valid_targets) if valid_targets else entry_target - (current_atr * 2.0)
+
+    # 2. RISK, REWARD, AND RR CALCULATION
     dynamic_risk = abs(entry_target - sl)
+    dynamic_reward = abs(tp - entry_target)
+    rr = dynamic_reward / max(1e-12, dynamic_risk)
 
-    # 2. Dynamic TP Escalation (The RR Rescue Loop)
-    tp = entry_target
-    min_escalation_rr = getattr(cfg, 'min_rr', 1.8)
+    # 3. THE EV HACK PREVENTION (RR CAP)
+    if rr > 4.0:
+        rr = 4.0
+        if side == 'long':
+            tp = entry_target + (dynamic_risk * 4.0)
+        else:
+            tp = entry_target - (dynamic_risk * 4.0)
 
-    if side == 'long':
-        raw_targets = [
-            base.get("ob_bear_bot", 0),
-            base.get("last_swing_high", 0),
-            base.get("vah", 0),
-            htf_sh,
-            base.get("asian_high", 0)
-        ]
-        valid_targets = sorted([t for t in raw_targets if t > entry_target])
-
-        tp_found = False
-        for t in valid_targets:
-            if abs(t - entry_target) / max(1e-12, dynamic_risk) >= min_escalation_rr:
-                tp = t
-                tp_found = True
-                break
-
-
-    else:
-        raw_targets = [
-            base.get("ob_bull_top", 0),
-            base.get("last_swing_low", 0),
-            base.get("val", 0),
-            htf_sl,
-            base.get("asian_low", 0)
-        ]
-        valid_targets = sorted([t for t in raw_targets if t > 0 and t < entry_target], reverse=True)
-
-        tp_found = False
-        for t in valid_targets:
-            if abs(entry_target - t) / max(1e-12, dynamic_risk) >= min_escalation_rr:
-                tp = t
-                tp_found = True
-                break
-
-
-    rr = abs(tp - entry_target) / max(1e-12, dynamic_risk)
-
+    # 4. RR GATES (Live vs Exporter)
     if rr < 1.2 and brain is not None:
         return None # Live Bot: Require reward to be greater than risk
     elif rr < 0.5 and brain is None:
-        return None # Exporter: Allow base hits and failed setups so the AI learns the difference
-    elif rr > 3.0:
-        tp = entry_target + (dynamic_risk * 3.0) if side == 'long' else entry_target - (dynamic_risk * 3.0)
-        rr = 3.0
+        return None # Exporter: Allow base hits and failed setups
 
     # ==========================================================
     # THE COMPREHENSIVE ANALYST RATIONALE
