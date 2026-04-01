@@ -1675,12 +1675,12 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     if side == 'long':
         sl = base.get("last_swing_low", entry_target - current_atr) - (current_atr * 0.2)
 
-        # Find the CLOSEST valid resistance for TP
+        # Find the CLOSEST valid resistance for TP (Excluding Infinity)
         bear_ob = base.get("ob_bear_bot", float('inf'))
         vah = base.get("vah", float('inf'))
 
-        valid_targets = [t for t in (bear_ob, vah) if t > entry_target]
-        tp = min(valid_targets) if valid_targets else entry_target + (current_atr * 2.0)
+        valid_targets = [t for t in (bear_ob, vah) if t > entry_target and t != float('inf')]
+        tp = min(valid_targets) if valid_targets else entry_target + (current_atr * 1.5)
 
     else:
         sl = base.get("last_swing_high", entry_target + current_atr) + (current_atr * 0.2)
@@ -1689,8 +1689,8 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         bull_ob = base.get("ob_bull_top", 0.0)
         val = base.get("val", 0.0)
 
-        valid_targets = [t for t in (bull_ob, val) if t > 0 and t < entry_target]
-        tp = max(valid_targets) if valid_targets else entry_target - (current_atr * 2.0)
+        valid_targets = [t for t in (bull_ob, val) if t > 0 and t < entry_target and t != float('inf')]
+        tp = max(valid_targets) if valid_targets else entry_target - (current_atr * 1.5)
 
     # 2. RISK, REWARD, AND RR CALCULATION
     dynamic_risk = abs(entry_target - sl)
@@ -1698,12 +1698,12 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     rr = dynamic_reward / max(1e-12, dynamic_risk)
 
     # 3. THE EV HACK PREVENTION (RR CAP)
-    if rr > 4.0:
-        rr = 4.0
+    if rr > 2.5:
+        rr = 2.5
         if side == 'long':
-            tp = entry_target + (dynamic_risk * 4.0)
+            tp = entry_target + (dynamic_risk * 2.5)
         else:
-            tp = entry_target - (dynamic_risk * 4.0)
+            tp = entry_target - (dynamic_risk * 2.5)
 
     # 4. RR GATES (Live vs Exporter)
     if rr < 1.2 and brain is not None:
