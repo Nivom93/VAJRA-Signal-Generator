@@ -27,6 +27,11 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import RFE
 from sklearn.calibration import CalibratedClassifierCV
 
+try:
+    from sklearn.frozen import FrozenEstimator
+except ImportError:
+    FrozenEstimator = None
+
 log = logging.getLogger("vajra.train.v8")
 if not log.handlers:
     log.setLevel(logging.INFO)
@@ -323,7 +328,10 @@ def main(argv=None):
             final_model.fit(X_tr, y_tr, sample_weight=w_tr)
 
             # Calibrate probabilities to fix distortion from class weights
-            calibrated_model = CalibratedClassifierCV(estimator=final_model, method='sigmoid', cv='prefit')
+            if FrozenEstimator is not None:
+                calibrated_model = CalibratedClassifierCV(estimator=FrozenEstimator(final_model), method='sigmoid')
+            else:
+                calibrated_model = CalibratedClassifierCV(estimator=final_model, method='sigmoid', cv='prefit')
             calibrated_model.fit(X_te, y_te) # Fit on the validation set of the last fold
 
             pipeline = {
