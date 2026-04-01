@@ -487,7 +487,7 @@ class AadhiraayanEngineConfig:
     time_in_force_decay: int = 8
     
     min_prob: float = 0.65; min_conf_long: float = 3.0; min_conf_short: float = 3.0
-    min_prob_long: float = 0.65; min_prob_short: float = 0.65
+    min_prob_long: float = 0.51; min_prob_short: float = 0.55
     max_concurrent: int = 3; max_concurrent_buy: int = 0; max_concurrent_sell: int = 0
     maker_fee_bps: float = 0.0; taker_fee_bps: float = 0.0; slippage_bps: float = 0.0
     account_notional: float = 1000.0; db_path: str = "vajra.sqlite"
@@ -1669,47 +1669,24 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         return None
 
     # ==========================================================
-    # RELAX THE MATHEMATICAL STRAITJACKET & DYNAMIC ESCALATION
+    # SWEEP ENTRIES & ATR-BASED STOP HUNTS PREVENTION
     # ==========================================================
-    # 1. STRICT SNIPER TP & SL LOGIC
     if side == 'long':
-        sl = base.get("last_swing_low", entry_target - current_atr) - (current_atr * 0.2)
-
-        # Find the CLOSEST valid resistance for TP (Excluding Infinity)
-        bear_ob = base.get("ob_bear_bot", float('inf'))
-        vah = base.get("vah", float('inf'))
-
-        valid_targets = [t for t in (bear_ob, vah) if t > entry_target and t != float('inf')]
-        tp = min(valid_targets) if valid_targets else entry_target + (current_atr * 1.5)
-
+        entry_target = px - (current_atr * 0.5)
+        sl = base.get("last_swing_low", px) - (current_atr * 1.0)
+        risk_distance = abs(entry_target - sl)
+        tp = entry_target + (risk_distance * 2.5)
     else:
-        sl = base.get("last_swing_high", entry_target + current_atr) + (current_atr * 0.2)
+        entry_target = px + (current_atr * 0.5)
+        sl = base.get("last_swing_high", px) + (current_atr * 1.0)
+        risk_distance = abs(entry_target - sl)
+        tp = entry_target - (risk_distance * 2.5)
 
-        # Find the CLOSEST valid support for TP
-        bull_ob = base.get("ob_bull_top", 0.0)
-        val = base.get("val", 0.0)
+    rr = 2.5
 
-        valid_targets = [t for t in (bull_ob, val) if t > 0 and t < entry_target and t != float('inf')]
-        tp = max(valid_targets) if valid_targets else entry_target - (current_atr * 1.5)
-
-    # 2. RISK, REWARD, AND RR CALCULATION
-    dynamic_risk = abs(entry_target - sl)
-    dynamic_reward = abs(tp - entry_target)
-    rr = dynamic_reward / max(1e-12, dynamic_risk)
-
-    # 3. THE EV HACK PREVENTION (RR CAP)
-    if rr > 2.5:
-        rr = 2.5
-        if side == 'long':
-            tp = entry_target + (dynamic_risk * 2.5)
-        else:
-            tp = entry_target - (dynamic_risk * 2.5)
-
-    # 4. RR GATES (Live vs Exporter)
-    if rr < 1.2 and brain is not None:
-        return None # Live Bot: Require reward to be greater than risk
-    elif rr < 0.5 and brain is None:
-        return None # Exporter: Allow base hits and failed setups
+    # RR GATES (Live vs Exporter) - Keep this in case risk distance is somehow 0
+    if risk_distance < 1e-9:
+        return None
 
     # ==========================================================
     # THE COMPREHENSIVE ANALYST RATIONALE
@@ -1728,7 +1705,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         win_prob = brain.predict_probability(strat, side, base, adv, iExec, px, pExec)
         if win_prob is None: return None # Strict Fallback block! Needs model
 
-        min_p = getattr(cfg, 'min_prob_long', 0.51) if side == 'long' else getattr(cfg, 'min_prob_short', 0.51)
+        min_p = getattr(cfg, 'min_prob_long', 0.51) if side == 'long' else getattr(cfg, 'min_prob_short', 0.55)
         if win_prob < min_p: return None
 
         # --- MACRO ORACLE VETO ---
