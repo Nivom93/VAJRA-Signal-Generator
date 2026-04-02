@@ -1318,9 +1318,9 @@ class TradeManager:
         signal_key = f"{symbol}_{plan.get('strat', plan.get('strategy', 'unknown'))}_{plan['side']}"
         last_signal = self.last_signal_time.get(signal_key, -999)
 
-        # Reject identical signals for the next 10 bars
+        # Reject identical signals for the next 3 bars
         curr_idx = self.current_bar_index.get(symbol, 0)
-        if curr_idx - last_signal < 10:
+        if curr_idx - last_signal < 3:
             return None
 
         self.last_signal_time[signal_key] = curr_idx
@@ -1733,7 +1733,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         selected_tp = None
         for t in valid_tps:
             curr_rr = (t - entry_target) / risk_distance
-            if curr_rr >= 2.2:
+            if curr_rr >= getattr(cfg, 'min_rr', 1.5):
                 if curr_rr > 3.0:
                     selected_tp = entry_target + (risk_distance * 3.0)
                 else:
@@ -1771,7 +1771,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         selected_tp = None
         for t in valid_tps:
             curr_rr = (entry_target - t) / risk_distance
-            if curr_rr >= 2.2:
+            if curr_rr >= getattr(cfg, 'min_rr', 1.5):
                 if curr_rr > 3.0:
                     selected_tp = entry_target - (risk_distance * 3.0)
                 else:
@@ -1786,7 +1786,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
     # Nominal Target Distance Gate
     price_target_dist_pct = abs(tp - entry_target) / entry_target * 100.0
-    if price_target_dist_pct < 0.30:
+    if price_target_dist_pct < getattr(cfg, 'min_target_dist_pct', 0.15):
         return None
 
     # ==========================================================
@@ -1814,15 +1814,15 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         macro_sentiment = float(base.get("macro_sentiment", 0.0))
 
         if side == 'long' and macro_sentiment < -0.40:
-            win_prob *= 0.8  # 20% penalty for longing into Fear
+            win_prob *= 0.9  # 10% penalty for longing into Fear
             logic_desc += " [ORACLE PENALTY: Longing into Bearish Macro]"
         elif side == 'short' and macro_sentiment > 0.40:
-            win_prob *= 0.8  # 20% penalty for shorting into Greed
+            win_prob *= 0.9  # 10% penalty for shorting into Greed
             logic_desc += " [ORACLE PENALTY: Shorting into Bullish Macro]"
 
         # Calculate true Expected Value (EV) = (Win% * Reward) - (Loss% * Risk)
         ev = (win_prob * rr) - ((1.0 - win_prob) * 1.0)
-        if ev <= 0.1: return None # Only take trades with a positive mathematical edge
+        if ev <= getattr(cfg, 'min_ev', 0.05): return None # Only take trades with a positive mathematical edge
 
         edge = ev
         if getattr(cfg, 'dynamic_risk_scaling', True):

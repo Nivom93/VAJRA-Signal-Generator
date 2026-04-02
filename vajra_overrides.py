@@ -33,9 +33,11 @@ def _strategy_overrides(cfg):
 
     # --- GLOBAL RISK DEFAULTS ---
     cfg.risk_per_trade = 0.01          
-    cfg.max_concurrent = 3             
+    cfg.max_concurrent = 6
     cfg.dynamic_risk_scaling = True
     cfg.max_risk_factor = 2.5
+    cfg.min_ev = 0.05
+    cfg.min_target_dist_pct = 0.15
     
     # --- FILTERS (LET THE AI DECIDE) ---
     cfg.filter_htf_trend = False
@@ -65,7 +67,7 @@ def _strategy_overrides(cfg):
     cfg.dca_max_safety_orders = 0
 
     # --- STRUCTURAL SNIPER GEOMETRY ---
-    cfg.min_rr = 2.2
+    cfg.min_rr = 1.5
     cfg.atr_mult_sl = 1.0
     cfg.atr_mult_tp = 1.2
 
