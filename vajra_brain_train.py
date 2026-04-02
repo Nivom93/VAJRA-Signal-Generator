@@ -83,16 +83,6 @@ def _enforce_causality_drop(df: pd.DataFrame, lookahead: int = 5) -> pd.DataFram
     if len(df) > lookahead: return df.iloc[:-lookahead]
     return df
 
-def _calculate_recency_and_pnl_weights(df: pd.DataFrame) -> np.ndarray:
-    n = len(df)
-    pnl_weights = np.clip(np.abs(df['pnl_r'].values), 0.1, 5.0)
-    weights = pnl_weights
-    if weights.sum() > 0:
-        weights = weights * (n / weights.sum())
-    else:
-        weights = np.ones(n)
-    return weights
-
 def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_exclude: Set[str]) -> Tuple[pd.DataFrame, List[str]]:
     log.info(f"Loading events from {len(paths)} file(s)...")
     rows = []
@@ -212,13 +202,9 @@ def main(argv=None):
             X_all = subset[base_feature_names].values
             y_all = subset["label"].values
 
-            sample_weights = _calculate_recency_and_pnl_weights(subset)
             X_all = _sanitize_data(X_all)
 
             pos_cases = np.sum(y_all == 1)
-            neg_cases = np.sum(y_all == 0)
-            scale_weight = float(neg_cases) / max(1.0, float(pos_cases))
-            scale_weight = min(scale_weight, 10.0) # Cap extreme weights
 
             n_samples = len(X_all)
             actual_folds = min(args.wfa_folds, max(2, n_samples // 15))
@@ -234,17 +220,13 @@ def main(argv=None):
             for i, (train_idx, test_idx) in enumerate(tscv.split(X_all)):
                 X_tr_full, y_tr = X_all[train_idx], y_all[train_idx]
                 X_te_full, y_te = X_all[test_idx], y_all[test_idx]
-                w_tr = sample_weights[train_idx]
-
-                if w_tr.sum() > 0:
-                    w_tr = w_tr * (len(w_tr) / w_tr.sum())
 
                 # Dynamically calculate features to prevent overfitting based on pos_cases
                 pos_cases_fold = np.sum(y_tr == 1)
                 rfe_features = min(args.max_features, len(base_feature_names))
 
                 # Dynamically run RFE on this specific fold
-                estimator_rfe = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
+                estimator_rfe = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss')
                 selector = RFE(estimator_rfe, n_features_to_select=rfe_features, step=1)
                 selector = selector.fit(X_tr_full, y_tr)
 
@@ -262,8 +244,7 @@ def main(argv=None):
                     subsample=0.8,
                     random_state=42,
                     objective='binary:logistic',
-                    eval_metric='logloss',
-                    scale_pos_weight=scale_weight
+                    eval_metric='logloss'
                 )
 
                 # Hyperparameter Tuning Support
@@ -281,13 +262,13 @@ def main(argv=None):
                         }
                         cv_folds = min(3, max(2, len(X_tr) // 15))
                         random_search = RandomizedSearchCV(clf, param_distributions=param_dist, n_iter=10, scoring='roc_auc', cv=cv_folds, random_state=42)
-                        random_search.fit(X_tr, y_tr, sample_weight=w_tr)
+                        random_search.fit(X_tr, y_tr)
                         clf = random_search.best_estimator_
                         log.info(f"    Fold {i+1} Tuned Params: {random_search.best_params_}")
                     else:
                         log.info(f"    Fold {i+1}: Skipped Tuning (Insufficient Positive Cases: {pos_cases_fold} < 15)")
 
-                clf.fit(X_tr, y_tr, sample_weight=w_tr)
+                clf.fit(X_tr, y_tr)
 
                 preds = clf.predict(X_te)
                 probs = clf.predict_proba(X_te)[:, 1] if len(np.unique(y_te)) > 1 else np.zeros_like(preds)
@@ -315,7 +296,7 @@ def main(argv=None):
 
             rfe_features_final = min(args.max_features, len(base_feature_names))
 
-            estimator_rfe_final = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
+            estimator_rfe_final = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss')
             selector_final = RFE(estimator_rfe_final, n_features_to_select=rfe_features_final, step=1)
             selector_final = selector_final.fit(X_all, y_all)
             selected_features = [f for f, s in zip(base_feature_names, selector_final.support_) if s]
@@ -324,9 +305,6 @@ def main(argv=None):
             log.info(f"Final RFE selected {len(selected_features)} features.")
 
             log.info("Training and Calibrating Final Production Model on FULL dataset...")
-            w_all = sample_weights
-            if w_all.sum() > 0:
-                w_all = w_all * (len(w_all) / w_all.sum())
 
             final_model = xgb.XGBClassifier(
                 n_estimators=args.n_estimators,
@@ -338,15 +316,19 @@ def main(argv=None):
                 subsample=0.8,
                 random_state=42,
                 objective='binary:logistic',
-                eval_metric='logloss',
-                scale_pos_weight=scale_weight
+                eval_metric='logloss'
             )
 
             # Fit the final model on the entire dataset
             # TimeSeriesSplit for temporal calibration over full dataset
             calib_tscv = TimeSeriesSplit(n_splits=5)
-            calibrated_model = CalibratedClassifierCV(estimator=final_model, method='sigmoid', cv=calib_tscv)
-            calibrated_model.fit(X_all_sel, y_all, sample_weight=w_all) # Fit calibration internal WFA
+            try:
+                calibrated_model = CalibratedClassifierCV(estimator=final_model, method='isotonic', cv=calib_tscv)
+                calibrated_model.fit(X_all_sel, y_all)
+            except Exception as e:
+                log.warning(f"Isotonic calibration failed ({e}). Falling back to sigmoid.")
+                calibrated_model = CalibratedClassifierCV(estimator=final_model, method='sigmoid', cv=calib_tscv)
+                calibrated_model.fit(X_all_sel, y_all)
 
 
             valid_edge = bool(avg_roc > 0.50 and avg_prec > 0.20)

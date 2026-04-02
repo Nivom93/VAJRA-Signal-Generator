@@ -327,7 +327,7 @@ def build_arg_parser():
     p.add_argument("--brains-dir", default=None, help="Directory containing localized strategy brains")
     p.add_argument("--account-notional", type=float, default=1000.0)
     p.add_argument("--min-rr", type=float, default=2.5)
-    p.add_argument("--rr", type=float, default=3.0)
+    p.add_argument("--rr", type=float, default=2.0)
     p.add_argument("--atr-mult-sl", type=float, default=1.0)
     p.add_argument("--atr-mult-tp", type=float, default=2.0)
     p.add_argument("--scalper-rr", type=float, default=2.0)

@@ -1708,6 +1708,15 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # ==========================================================
     # SWEEP ENTRIES & ATR-BASED STOP HUNTS PREVENTION
     # ==========================================================
+    base_rr = getattr(cfg, 'rr', 2.0)
+    if getattr(cfg, 'dynamic_tp_enabled', True):
+        # Scale R:R dynamically between base_rr and (base_rr + 1.0) using ADX trend strength
+        # ADX < 20 = 0.0 scale. ADX >= 40 = 1.0 scale.
+        momentum_scale = min(max((adx_val - 20.0) / 20.0, 0.0), 1.0)
+        target_rr = base_rr + momentum_scale
+    else:
+        target_rr = base_rr
+
     if side == 'long':
         if entry_target == px:
             entry_target = px - (current_atr * 0.5)

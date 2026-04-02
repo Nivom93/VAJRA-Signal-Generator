@@ -336,6 +336,7 @@ async def run_bot(args):
     cfg = EngineConfig()
     try: _strategy_overrides(cfg)
     except Exception as e: log.error(f"Override error: {e}")
+    if hasattr(args, 'rr'): cfg.rr = args.rr
     cfg.symbol = args.symbol 
     cfg.db_path = args.db_path
     
@@ -603,6 +604,7 @@ if __name__ == "__main__":
     p.add_argument("--htf", default="1h")
     p.add_argument("--exec-tf", default="15m")
     p.add_argument("--discord-webhook", default=os.getenv("DISCORD_WEBHOOK_URL"))
+    p.add_argument("--rr", type=float, default=2.0)
     args = p.parse_args()
     while True:
         try:
