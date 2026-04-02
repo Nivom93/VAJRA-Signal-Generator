@@ -104,11 +104,13 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
     df["pnl_r"] = pd.to_numeric(df["pnl_r"], errors='coerce')
     df.dropna(subset=["pnl_r"], inplace=True)
     
-    # Pure Target Binary (Signal Vacuum)
-    if "pnl_r" in df.columns:
-        # PnL logic: 1 if hit TP before SL (i.e. pnl_r >= 0), 0 otherwise. No early exits allowed in exporter so this is safe.
+    # Pure Target Binary (Signal Vacuum) with Time-in-Market Constraint
+    if "meta_label" in df.columns:
+        df["label"] = pd.to_numeric(df["meta_label"], errors='coerce').fillna(0).astype(int)
+        log.info("🎯 Dynamic Target & Time-in-Market Constraint mapped via meta_label.")
+    elif "pnl_r" in df.columns:
         df["label"] = (df["pnl_r"] > 0).astype(int)
-        log.info("🎯 Pure Target Binary (Signal Vacuum) detected. Target mapped to hit +2R before SL.")
+        log.info("🎯 Pure Target Binary (Fallback) detected. Target mapped to hit dynamic TP before SL.")
     else:
         df["label"] = 0
         
@@ -237,6 +239,12 @@ def main(argv=None):
                 X_tr = X_tr_full[:, selector.support_]
                 X_te = X_te_full[:, selector.support_]
 
+                # Dynamically calculate and cap fold-specific class weighting
+                neg_cases_fold = np.sum(y_tr == 0)
+                pos_cases_fold = np.sum(y_tr == 1)
+                fold_scale_weight = float(neg_cases_fold) / max(1.0, float(pos_cases_fold))
+                fold_scale_weight = min(fold_scale_weight, 10.0)
+
                 clf = xgb.XGBClassifier(
                     n_estimators=args.n_estimators,
                     learning_rate=args.learning_rate,
@@ -248,7 +256,7 @@ def main(argv=None):
                     random_state=42,
                     objective='binary:logistic',
                     eval_metric='logloss',
-                    scale_pos_weight=scale_weight
+                    scale_pos_weight=fold_scale_weight
                 )
 
                 # Hyperparameter Tuning Support
