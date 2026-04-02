@@ -40,6 +40,11 @@ from vajra_engine_ultra_v6_final import (
     _ema_np
 )
 
+try:
+    from vajra_overrides import _strategy_overrides
+except ImportError:
+    def _strategy_overrides(cfg): pass
+
 log = logging.getLogger("vajra.bt")
 if not log.handlers:
     log.setLevel(logging.INFO)
@@ -189,6 +194,14 @@ def run_backtest(args, preloaded: Optional[Preloaded]=None, markets_data=None):
 
     cfg = args_to_cfg(args)
     exw = ExchangeWrapper(cfg, markets_data=markets_data)
+
+    try:
+        _strategy_overrides(cfg)
+        log.info("Applied strategy overrides to Backtester.")
+    except Exception as e:
+        log.warning(f"Failed to apply overrides: {e}")
+    if hasattr(args, 'rr') and args.rr is not None:
+        cfg.rr = args.rr
 
     if preloaded is None:
         pre = _preload_or_fetch(args)
