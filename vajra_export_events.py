@@ -208,10 +208,12 @@ def main():
     p.add_argument("--exec-tf", default="15m")
     p.add_argument("--out", required=True)
     p.add_argument("--min-rr", type=float, default=0.5)
+    p.add_argument("--rr", type=float, default=2.0)
     
     args = p.parse_args()
 
     cfg = EngineConfig()
+    if hasattr(args, 'rr'): cfg.rr = args.rr
     try: _strategy_overrides(cfg); log.info("Applied strategy overrides.")
     except Exception as e: log.warning(f"Could not apply overrides: {e}")
 
