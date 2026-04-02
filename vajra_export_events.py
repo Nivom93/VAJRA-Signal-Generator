@@ -226,7 +226,6 @@ def main():
     # Disable all early-exit or time-decay logic during meta-labeling phase
     cfg.be_trigger_r = 0.0
     cfg.trailing_stop_trigger_r = 0.0
-    cfg.dynamic_tp_enabled = False
     cfg.time_in_force_decay = 0
 
     cfg.exchange_id = args.exchange_id; cfg.market_type = args.market_type

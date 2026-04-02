@@ -26,7 +26,7 @@ def _strategy_overrides(cfg):
     cfg.be_trigger_r = 0.0
     cfg.trailing_stop_trigger_r = 0.0
     cfg.trailing_dist_r = 0.0
-    cfg.dynamic_tp_enabled = False
+    cfg.dynamic_tp_enabled = True  # <--- MUST BE TRUE
     cfg.time_in_force_decay = 0
     cfg.maker_fee_bps = 0.0
     cfg.taker_fee_bps = 0.0
@@ -73,9 +73,8 @@ def _strategy_overrides(cfg):
     if "BTC" in symbol or "ETH" in symbol:
         cfg.min_conf_long = 1.0
         cfg.min_conf_short = 1.0
-        # Optimal probability threshold to find ~250+ trades with highest structural confidence
-        cfg.min_prob_long = 0.40
-        cfg.min_prob_short = 0.40
+        cfg.min_prob_long = 0.35   # <--- CHANGE TO 0.35
+        cfg.min_prob_short = 0.35  # <--- CHANGE TO 0.35
     else:
-        cfg.min_prob_long = 0.40
-        cfg.min_prob_short = 0.40
+        cfg.min_prob_long = 0.35   # <--- CHANGE TO 0.35
+        cfg.min_prob_short = 0.35  # <--- CHANGE TO 0.35

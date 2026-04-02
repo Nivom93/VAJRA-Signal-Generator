@@ -205,6 +205,9 @@ def main(argv=None):
             X_all = _sanitize_data(X_all)
 
             pos_cases = np.sum(y_all == 1)
+            neg_cases = np.sum(y_all == 0)
+            scale_weight = float(neg_cases) / max(1.0, float(pos_cases))
+            scale_weight = min(scale_weight, 10.0) # Cap extreme weights
 
             n_samples = len(X_all)
             actual_folds = min(args.wfa_folds, max(2, n_samples // 15))
@@ -226,7 +229,7 @@ def main(argv=None):
                 rfe_features = min(args.max_features, len(base_feature_names))
 
                 # Dynamically run RFE on this specific fold
-                estimator_rfe = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss')
+                estimator_rfe = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
                 selector = RFE(estimator_rfe, n_features_to_select=rfe_features, step=1)
                 selector = selector.fit(X_tr_full, y_tr)
 
@@ -244,7 +247,8 @@ def main(argv=None):
                     subsample=0.8,
                     random_state=42,
                     objective='binary:logistic',
-                    eval_metric='logloss'
+                    eval_metric='logloss',
+                    scale_pos_weight=scale_weight
                 )
 
                 # Hyperparameter Tuning Support
@@ -296,7 +300,7 @@ def main(argv=None):
 
             rfe_features_final = min(args.max_features, len(base_feature_names))
 
-            estimator_rfe_final = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss')
+            estimator_rfe_final = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
             selector_final = RFE(estimator_rfe_final, n_features_to_select=rfe_features_final, step=1)
             selector_final = selector_final.fit(X_all, y_all)
             selected_features = [f for f, s in zip(base_feature_names, selector_final.support_) if s]
@@ -316,19 +320,15 @@ def main(argv=None):
                 subsample=0.8,
                 random_state=42,
                 objective='binary:logistic',
-                eval_metric='logloss'
+                eval_metric='logloss',
+                scale_pos_weight=scale_weight
             )
 
             # Fit the final model on the entire dataset
             # TimeSeriesSplit for temporal calibration over full dataset
             calib_tscv = TimeSeriesSplit(n_splits=5)
-            try:
-                calibrated_model = CalibratedClassifierCV(estimator=final_model, method='isotonic', cv=calib_tscv)
-                calibrated_model.fit(X_all_sel, y_all)
-            except Exception as e:
-                log.warning(f"Isotonic calibration failed ({e}). Falling back to sigmoid.")
-                calibrated_model = CalibratedClassifierCV(estimator=final_model, method='sigmoid', cv=calib_tscv)
-                calibrated_model.fit(X_all_sel, y_all)
+            calibrated_model = CalibratedClassifierCV(estimator=final_model, method='sigmoid', cv=calib_tscv)
+            calibrated_model.fit(X_all_sel, y_all)
 
 
             valid_edge = bool(avg_roc > 0.50 and avg_prec > 0.20)
