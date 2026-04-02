@@ -1254,11 +1254,6 @@ class BrainLearningManager:
                     side = parts[2]
                     brain_data = joblib.load(str(model_file))
 
-                    # AUTO-KILL SWITCH: Reject toxic models
-                    if brain_data.get('valid_edge') is False:
-                        log.warning(f"Rejected toxic model {model_file.name} (failed validation: ROC-AUC={brain_data.get('wfa_roc_auc', 0):.4f}, Prec={brain_data.get('wfa_prec', 0):.4f})")
-                        continue
-
                     self.brains[(strat, side)] = brain_data
                     loaded += 1
             except Exception as e:
@@ -1708,6 +1703,8 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     if not setup_type:
         return None
 
+    target_rr = getattr(cfg, 'rr', 2.0)
+
     # ==========================================================
     # SWEEP ENTRIES & ATR-BASED STOP HUNTS PREVENTION
     # ==========================================================
@@ -1716,15 +1713,15 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             entry_target = px - (current_atr * 0.5)
         sl = base.get("last_swing_low", px) - (current_atr * 1.0)
         risk_distance = abs(entry_target - sl)
-        tp = entry_target + (risk_distance * 2.5)
+        tp = entry_target + (risk_distance * target_rr)
     else:
         if entry_target == px:
             entry_target = px + (current_atr * 0.5)
         sl = base.get("last_swing_high", px) + (current_atr * 1.0)
         risk_distance = abs(entry_target - sl)
-        tp = entry_target - (risk_distance * 2.5)
+        tp = entry_target - (risk_distance * target_rr)
 
-    rr = 2.5
+    rr = target_rr
 
     # RR GATES (Live vs Exporter) - Keep this in case risk distance is somehow 0
     if risk_distance < 1e-9:
@@ -1757,12 +1754,12 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
         # --- MACRO ORACLE VETO ---
         # Sentiment Score: 0 (Extreme Fear) to 100 (Extreme Greed). Default is 50 (Neutral).
-        macro_sentiment = base.get("sentiment_score", base.get("macro_sentiment", 50.0))
+        macro_sentiment = float(base.get("macro_sentiment", 0.0))
 
-        if side == 'long' and macro_sentiment < 40:
+        if side == 'long' and macro_sentiment < -0.40:
             win_prob *= 0.8  # 20% penalty for longing into Fear
             logic_desc += " [ORACLE PENALTY: Longing into Bearish Macro]"
-        elif side == 'short' and macro_sentiment > 60:
+        elif side == 'short' and macro_sentiment > 0.40:
             win_prob *= 0.8  # 20% penalty for shorting into Greed
             logic_desc += " [ORACLE PENALTY: Shorting into Bullish Macro]"
 
