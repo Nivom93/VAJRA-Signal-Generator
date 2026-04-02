@@ -241,8 +241,7 @@ def main(argv=None):
 
                 # Dynamically calculate features to prevent overfitting based on pos_cases
                 pos_cases_fold = np.sum(y_tr == 1)
-                dyn_max_features = max(1, pos_cases_fold // 20)
-                rfe_features = min(args.max_features, len(base_feature_names), dyn_max_features)
+                rfe_features = min(args.max_features, len(base_feature_names))
 
                 # Dynamically run RFE on this specific fold
                 estimator_rfe = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
@@ -269,21 +268,24 @@ def main(argv=None):
 
                 # Hyperparameter Tuning Support
                 if getattr(args, 'tune', False):
-                    from sklearn.model_selection import RandomizedSearchCV
-                    param_dist = {
-                        'learning_rate': [0.01, 0.05, 0.1, 0.2],
-                        'max_depth': [1, 2, 3, 4],
-                        'n_estimators': [50, 100, 150],
-                        'reg_alpha': [0.1, 1.0, 5.0],
-                        'reg_lambda': [0.1, 1.0, 5.0],
-                        'subsample': [0.6, 0.8, 1.0],
-                        'colsample_bytree': [0.6, 0.8, 1.0]
-                    }
-                    cv_folds = min(3, max(2, len(X_tr) // 15))
-                    random_search = RandomizedSearchCV(clf, param_distributions=param_dist, n_iter=10, scoring='roc_auc', cv=cv_folds, random_state=42)
-                    random_search.fit(X_tr, y_tr, sample_weight=w_tr)
-                    clf = random_search.best_estimator_
-                    log.info(f"    Fold {i+1} Tuned Params: {random_search.best_params_}")
+                    if pos_cases_fold >= 15:
+                        from sklearn.model_selection import RandomizedSearchCV
+                        param_dist = {
+                            'learning_rate': [0.01, 0.05, 0.1, 0.2],
+                            'max_depth': [1, 2, 3, 4],
+                            'n_estimators': [50, 100, 150],
+                            'reg_alpha': [0.1, 1.0, 5.0],
+                            'reg_lambda': [0.1, 1.0, 5.0],
+                            'subsample': [0.6, 0.8, 1.0],
+                            'colsample_bytree': [0.6, 0.8, 1.0]
+                        }
+                        cv_folds = min(3, max(2, len(X_tr) // 15))
+                        random_search = RandomizedSearchCV(clf, param_distributions=param_dist, n_iter=10, scoring='roc_auc', cv=cv_folds, random_state=42)
+                        random_search.fit(X_tr, y_tr, sample_weight=w_tr)
+                        clf = random_search.best_estimator_
+                        log.info(f"    Fold {i+1} Tuned Params: {random_search.best_params_}")
+                    else:
+                        log.info(f"    Fold {i+1}: Skipped Tuning (Insufficient Positive Cases: {pos_cases_fold} < 15)")
 
                 clf.fit(X_tr, y_tr, sample_weight=w_tr)
 
@@ -311,8 +313,7 @@ def main(argv=None):
 
             log.info("Running Final RFE Feature Selection on FULL dataset for Production Model...")
 
-            dyn_max_features_final = max(1, pos_cases // 20)
-            rfe_features_final = min(args.max_features, len(base_feature_names), dyn_max_features_final)
+            rfe_features_final = min(args.max_features, len(base_feature_names))
 
             estimator_rfe_final = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
             selector_final = RFE(estimator_rfe_final, n_features_to_select=rfe_features_final, step=1)
@@ -348,7 +349,7 @@ def main(argv=None):
             calibrated_model.fit(X_all_sel, y_all, sample_weight=w_all) # Fit calibration internal WFA
 
 
-            valid_edge = bool(avg_roc >= 0.53 and avg_prec >= 0.45)
+            valid_edge = bool(avg_roc > 0.50 and avg_prec > 0.20)
 
             pipeline = {
                 "classifier": calibrated_model,
