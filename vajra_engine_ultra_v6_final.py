@@ -1706,35 +1706,83 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     target_rr = getattr(cfg, 'rr', 2.0)
 
     # ==========================================================
-    # SWEEP ENTRIES & ATR-BASED STOP HUNTS PREVENTION
+    # SWEEP ENTRIES & ATR-BASED STOP HUNTS PREVENTION (DYNAMIC TARGETS)
     # ==========================================================
-    base_rr = getattr(cfg, 'rr', 2.0)
-    if getattr(cfg, 'dynamic_tp_enabled', True):
-        # Scale R:R dynamically between base_rr and (base_rr + 1.0) using ADX trend strength
-        # ADX < 20 = 0.0 scale. ADX >= 40 = 1.0 scale.
-        momentum_scale = min(max((adx_val - 20.0) / 20.0, 0.0), 1.0)
-        target_rr = base_rr + momentum_scale
-    else:
-        target_rr = base_rr
-
     if side == 'long':
         if entry_target == px:
             entry_target = px - (current_atr * 0.5)
         sl = base.get("last_swing_low", px) - (current_atr * 1.0)
         risk_distance = abs(entry_target - sl)
-        tp = entry_target + (risk_distance * target_rr)
+        if risk_distance < 1e-9:
+            return None
+
+        possible_tps = [
+            base.get("ob_bear_bot", 0),
+            base.get("last_swing_high", 0),
+            base.get("vah", 0),
+            htf_sh,
+            mtf_sh
+        ]
+
+        valid_tps = [t for t in possible_tps if t > entry_target and t < float('inf')]
+        if not valid_tps:
+            return None # No logical market structure target
+
+        valid_tps.sort() # Closest first
+
+        selected_tp = None
+        for t in valid_tps:
+            curr_rr = (t - entry_target) / risk_distance
+            if curr_rr >= 2.2:
+                if curr_rr > 3.0:
+                    selected_tp = entry_target + (risk_distance * 3.0)
+                else:
+                    selected_tp = t
+                break
+
+        if selected_tp is None:
+            return None
+
+        tp = selected_tp
+        rr = (tp - entry_target) / risk_distance
+
     else:
         if entry_target == px:
             entry_target = px + (current_atr * 0.5)
         sl = base.get("last_swing_high", px) + (current_atr * 1.0)
         risk_distance = abs(entry_target - sl)
-        tp = entry_target - (risk_distance * target_rr)
+        if risk_distance < 1e-9:
+            return None
 
-    rr = target_rr
+        possible_tps = [
+            base.get("ob_bull_top", 0),
+            base.get("last_swing_low", 0),
+            base.get("val", 0),
+            htf_sl,
+            mtf_sl
+        ]
 
-    # RR GATES (Live vs Exporter) - Keep this in case risk distance is somehow 0
-    if risk_distance < 1e-9:
-        return None
+        valid_tps = [t for t in possible_tps if t > 0 and t < entry_target and t < float('inf')]
+        if not valid_tps:
+            return None # No logical market structure target
+
+        valid_tps.sort(reverse=True) # Closest first
+
+        selected_tp = None
+        for t in valid_tps:
+            curr_rr = (entry_target - t) / risk_distance
+            if curr_rr >= 2.2:
+                if curr_rr > 3.0:
+                    selected_tp = entry_target - (risk_distance * 3.0)
+                else:
+                    selected_tp = t
+                break
+
+        if selected_tp is None:
+            return None
+
+        tp = selected_tp
+        rr = (entry_target - tp) / risk_distance
 
     # Nominal Target Distance Gate
     price_target_dist_pct = abs(tp - entry_target) / entry_target * 100.0

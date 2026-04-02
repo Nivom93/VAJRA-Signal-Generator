@@ -208,12 +208,10 @@ def main():
     p.add_argument("--exec-tf", default="15m")
     p.add_argument("--out", required=True)
     p.add_argument("--min-rr", type=float, default=0.5)
-    p.add_argument("--rr", type=float, default=2.0)
     
     args = p.parse_args()
 
     cfg = EngineConfig()
-    if hasattr(args, 'rr'): cfg.rr = args.rr
     try: _strategy_overrides(cfg); log.info("Applied strategy overrides.")
     except Exception as e: log.warning(f"Could not apply overrides: {e}")
 
@@ -344,6 +342,14 @@ def main():
                     # STRICT BINARY SIGNAL LABELING
 
                     if -50 < cl["pnl_r"] < 50:
+                        # Time-in-Market constraint: 192 bars = 48 hours on 15m timeframe
+                        bars_open = cl.get("bars_open", 0)
+
+                        if cl["pnl_r"] > 0 and bars_open <= 192:
+                            meta_label = 1.0
+                        else:
+                            meta_label = 0.0
+
                         events.append({
                             "symbol": cfg.symbol,
                             "entry_ts": meta["entry_ts"],
@@ -357,7 +363,8 @@ def main():
                             "stop_loss": cl.get("sl"),
                             "tp": cl.get("tp"),
                             "reason": cl.get("exit_reason"),
-                            "meta_label": 1.0 if cl["pnl_r"] > 0 else 0.0,
+                            "bars_open": bars_open,
+                            "meta_label": meta_label,
                             **meta["features"]
                         })
 
