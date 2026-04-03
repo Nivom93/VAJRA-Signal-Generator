@@ -341,13 +341,17 @@ def main():
                     open_meta.remove(meta)
                     # STRICT BINARY SIGNAL LABELING
 
+                    # STRICT ASYMMETRIC TARGET LABELING (2.2R to 3.0R HUNTING)
                     if -50 < cl["pnl_r"] < 50:
                         # Time-in-Market constraint: 192 bars = 48 hours on 15m timeframe
                         bars_open = cl.get("bars_open", 0)
 
-                        if cl["pnl_r"] > 0 and bars_open <= 192:
+                        # ONLY label as a WIN (1.0) if the trade actually hit a 2.2R+ move structurally.
+                        # We use 2.15 to safely account for minor slippage/fees in the simulation.
+                        if cl["pnl_r"] >= 2.15 and bars_open <= 192:
                             meta_label = 1.0
                         else:
+                            # Scalps and weak wins (< 2.15R) are treated as a LOSS (0.0) to force the AI to seek explosive momentum
                             meta_label = 0.0
 
                         events.append({

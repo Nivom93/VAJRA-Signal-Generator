@@ -568,9 +568,12 @@ async def bot_loop(cfg, ex, tm, executor, brain, market_cache, global_cache, mac
                             
                             if fill_price:
                                 plan['entry'] = fill_price 
-
-                                # Force Open instantly using the updated TradeManager args
-                                tm.submit_plan(plan, curr_bar, force_open=True, fill_price=fill_price, sl_order_id=None)
+                                if plan.get('type', cfg.execution_style) == 'limit':
+                                    # Add to pending queue, DO NOT force open for phantom limit prices.
+                                    tm.submit_plan(plan, curr_bar, force_open=False)
+                                else:
+                                    # Market/Breakout orders can be forced open instantly
+                                    tm.submit_plan(plan, curr_bar, force_open=True, fill_price=fill_price, sl_order_id=None)
                         else:
                             log.warning(f"[{symbol}] Risk Distance is 0. Skipping.")
                     else:

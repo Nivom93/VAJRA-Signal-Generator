@@ -1709,12 +1709,13 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # SWEEP ENTRIES & ATR-BASED STOP HUNTS PREVENTION (DYNAMIC TARGETS)
     # ==========================================================
     if side == 'long':
-        if entry_target == px:
+        # Don't pull back momentum/sweep entries
+        if entry_target == px and setup_type not in ["BETA_LONG", "ZETA_LONG"]:
             entry_target = px - (current_atr * 0.5)
-        sl = base.get("last_swing_low", px) - (current_atr * 1.0)
-        risk_distance = abs(entry_target - sl)
-        if risk_distance < 1e-9:
-            return None
+
+        sl = base.get("last_swing_low", px) - (current_atr * getattr(cfg, 'atr_mult_sl', 1.2))
+        if sl >= entry_target: return None  # PREVENTS INVERTED SL CORRUPTION
+        risk_distance = entry_target - sl
 
         possible_tps = [
             base.get("ob_bear_bot", 0),
@@ -1725,34 +1726,31 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         ]
 
         valid_tps = [t for t in possible_tps if t > entry_target and t < float('inf')]
-        if not valid_tps:
-            return None # No logical market structure target
-
-        valid_tps.sort() # Closest first
+        if not valid_tps: return None
+        valid_tps.sort()
 
         selected_tp = None
         for t in valid_tps:
             curr_rr = (t - entry_target) / risk_distance
-            if curr_rr >= getattr(cfg, 'min_rr', 1.5):
-                if curr_rr > 3.0:
-                    selected_tp = entry_target + (risk_distance * 3.0)
+            if curr_rr >= getattr(cfg, 'min_rr', 2.2):
+                if curr_rr > getattr(cfg, 'atr_mult_tp', 3.0):
+                    selected_tp = entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 3.0))
                 else:
                     selected_tp = t
                 break
 
-        if selected_tp is None:
-            return None
-
+        if selected_tp is None: return None
         tp = selected_tp
         rr = (tp - entry_target) / risk_distance
 
     else:
-        if entry_target == px:
+        # Don't pull back momentum/sweep entries
+        if entry_target == px and setup_type not in ["BETA_SHORT", "ZETA_SHORT"]:
             entry_target = px + (current_atr * 0.5)
-        sl = base.get("last_swing_high", px) + (current_atr * 1.0)
-        risk_distance = abs(entry_target - sl)
-        if risk_distance < 1e-9:
-            return None
+
+        sl = base.get("last_swing_high", px) + (current_atr * getattr(cfg, 'atr_mult_sl', 1.2))
+        if sl <= entry_target: return None  # PREVENTS INVERTED SL CORRUPTION
+        risk_distance = sl - entry_target
 
         possible_tps = [
             base.get("ob_bull_top", 0),
@@ -1763,24 +1761,20 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         ]
 
         valid_tps = [t for t in possible_tps if t > 0 and t < entry_target and t < float('inf')]
-        if not valid_tps:
-            return None # No logical market structure target
-
-        valid_tps.sort(reverse=True) # Closest first
+        if not valid_tps: return None
+        valid_tps.sort(reverse=True)
 
         selected_tp = None
         for t in valid_tps:
             curr_rr = (entry_target - t) / risk_distance
-            if curr_rr >= getattr(cfg, 'min_rr', 1.5):
-                if curr_rr > 3.0:
-                    selected_tp = entry_target - (risk_distance * 3.0)
+            if curr_rr >= getattr(cfg, 'min_rr', 2.2):
+                if curr_rr > getattr(cfg, 'atr_mult_tp', 3.0):
+                    selected_tp = entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 3.0))
                 else:
                     selected_tp = t
                 break
 
-        if selected_tp is None:
-            return None
-
+        if selected_tp is None: return None
         tp = selected_tp
         rr = (entry_target - tp) / risk_distance
 
@@ -1790,57 +1784,48 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         return None
 
     # ==========================================================
-    # THE COMPREHENSIVE ANALYST RATIONALE
-    # ==========================================================
-    analysis_str = "No AI active."
-
-    # ==========================================================
-    # DYNAMIC EV GATE
+    # DYNAMIC EV GATE & ANALYSIS
     # ==========================================================
     ev = rr
     risk_factor = 1.0
     parts = setup_type.split("_")
     strat = parts[0]
 
+    # True Structural Reversal Warning
+    rev_warn = base.get("last_swing_low", px) if side == 'long' else base.get("last_swing_high", px)
+    analysis_str = "No AI active."
+
     if brain:
         win_prob = brain.predict_probability(strat, side, base, adv, iExec, px, pExec)
-        if win_prob is None: return None # Strict Fallback block! Needs model
+        if win_prob is None: return None
 
-        min_p = getattr(cfg, 'min_prob_long', 0.51) if side == 'long' else getattr(cfg, 'min_prob_short', 0.55)
+        min_p = getattr(cfg, 'min_prob_long', 0.55) if side == 'long' else getattr(cfg, 'min_prob_short', 0.55)
         if win_prob < min_p: return None
 
-        # --- MACRO ORACLE VETO ---
-        # Sentiment Score: 0 (Extreme Fear) to 100 (Extreme Greed). Default is 50 (Neutral).
         macro_sentiment = float(base.get("macro_sentiment", 0.0))
-
         if side == 'long' and macro_sentiment < -0.40:
-            win_prob *= 0.9  # 10% penalty for longing into Fear
+            win_prob *= 0.9
             logic_desc += " [ORACLE PENALTY: Longing into Bearish Macro]"
         elif side == 'short' and macro_sentiment > 0.40:
-            win_prob *= 0.9  # 10% penalty for shorting into Greed
+            win_prob *= 0.9
             logic_desc += " [ORACLE PENALTY: Shorting into Bullish Macro]"
 
-        # Calculate true Expected Value (EV) = (Win% * Reward) - (Loss% * Risk)
         ev = (win_prob * rr) - ((1.0 - win_prob) * 1.0)
-        if ev <= getattr(cfg, 'min_ev', 0.05): return None # Only take trades with a positive mathematical edge
+        if ev <= getattr(cfg, 'min_ev', 0.05): return None
 
         edge = ev
         if getattr(cfg, 'dynamic_risk_scaling', True):
-            # Exponential scaling: higher EV pushes risk towards max_risk_factor
             base_risk = 1.0 + (edge ** 1.5)
             risk_factor = min(base_risk, getattr(cfg, 'max_risk_factor', 2.5))
         else:
             risk_factor = 1.0
 
-        # Calculate dynamic reversal warning level (Structural failure point before SL)
-        rev_warn = base.get("ema50_L", px)
-
-        prob_desc = "HIGH CONFIDENCE" if win_prob > 0.55 else "EDGE"
+        prob_desc = "HIGH CONFIDENCE" if win_prob > 0.60 else "EDGE"
         analysis_str = (
-            f"SETUP: {setup_type}. LOGIC: {logic_desc} "
+            f"🚨 SETUP: {setup_type}. LOGIC: {logic_desc} "
             f"AI PROB: {win_prob*100:.1f}% ({prob_desc} - EV: {ev:.2f}R). "
             f"ENTRY: {entry_target:.2f}. TARGET: {tp:.2f} ({rr:.2f} RR). "
-            f"REVERSAL WARNING: Consider manual trim if 1H trend violates {rev_warn:.2f}."
+            f"⚠️ REVERSAL WARNING: Close manually if market structure violates {rev_warn:.2f}."
         )
 
     best_plan = {
