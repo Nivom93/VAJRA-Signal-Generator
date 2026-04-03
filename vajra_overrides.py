@@ -67,8 +67,8 @@ def _strategy_overrides(cfg):
     cfg.dca_max_safety_orders = 0
 
     # --- STRUCTURAL SNIPER GEOMETRY ---
-    cfg.min_rr = 2.2          # Engine will reject ANY structural target below 2.2R
-    cfg.atr_mult_sl = 1.2     # Anchors risk exactly 1.2 ATR beyond the structural swing
+    cfg.min_rr = 2.0          # Engine will reject ANY structural target below 2.0R to align with market structure
+    cfg.atr_mult_sl = 1.0     # Anchors risk exactly 1.0 ATR beyond the structural swing
     cfg.atr_mult_tp = 3.0     # Hard cap greed at exactly 3.0R to protect win-rate
 
     # --- STRICT AI GATES ---

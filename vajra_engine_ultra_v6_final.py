@@ -1211,6 +1211,35 @@ def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, b
     pExec.velocity_atr_3 = velocity_atr_3_arr
 
     # ---------------------------------------------------------
+    # GOD TIER KNOWLEDGE: RSI DIVERGENCE & KELTNER EXTREMES
+    # ---------------------------------------------------------
+    # Track RSI bullish divergence (Price makes lower low, RSI makes higher low)
+    rsi = pExec.rsi14
+    n = len(cl)
+    bull_div_rsi = np.zeros(n)
+    bear_div_rsi = np.zeros(n)
+    for i in range(15, n):
+        # Lookback window of 15 bars
+        window_cl = cl[i-15:i]
+        window_rsi = rsi[i-15:i]
+
+        # Bullish Divergence check
+        min_idx = np.argmin(window_cl)
+        if cl[i] < window_cl[min_idx] and rsi[i] > window_rsi[min_idx]:
+            bull_div_rsi[i] = 1.0
+
+        # Bearish Divergence check
+        max_idx = np.argmax(window_cl)
+        if cl[i] > window_cl[max_idx] and rsi[i] < window_rsi[max_idx]:
+            bear_div_rsi[i] = 1.0
+
+    f['bull_div_rsi'] = bull_div_rsi
+    f['bear_div_rsi'] = bear_div_rsi
+
+    f['dist_to_kc_upper_pct'] = np.where(kc_upper_arr > 0, (cl - kc_upper_arr) / kc_upper_arr * 100.0, 0.0)
+    f['dist_to_kc_lower_pct'] = np.where(kc_lower_arr > 0, (cl - kc_lower_arr) / kc_lower_arr * 100.0, 0.0)
+
+    # ---------------------------------------------------------
     # DIRECTIVE 4: STRIP COLLINEAR NOISE
     # ---------------------------------------------------------
     keys_to_drop = [
@@ -1594,49 +1623,71 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     qm_bull = base.get("qm_bull", 0); qm_bear = base.get("qm_bear", 0)
     spring = base.get("wyckoff_spring", 0); upthrust = base.get("wyckoff_upthrust", 0)
 
-    # Fuzzy Proximity Helper (Phantom Fill Fix)
-    def is_tapped(level, buffer_atr_mult=0.50):
+    # Fuzzy Proximity Helper (Phantom Fill Fix) - Increased Buffer for God Tier Anticipation
+    def is_tapped(level, buffer_atr_mult=1.0):
         if level <= 0: return False
         buffer = current_atr * buffer_atr_mult
-        return (abs(px - level) < buffer) or ((pExec.l[iExec] - buffer) <= level <= (pExec.h[iExec] + buffer))
+
+        # Check current and previous 2 candles to allow recent valid taps
+        for idx_offset in [0, 1, 2]:
+            idx = iExec - idx_offset
+            if idx >= 0:
+                if (abs(pExec.c[idx] - level) < buffer) or ((pExec.l[idx] - buffer) <= level <= (pExec.h[idx] + buffer)):
+                    return True
+        return False
 
     # Regime Filtering (Hurst Exponent)
     hurst_val = base.get("hurst", 0.5)
     is_trending_regime = hurst_val > 0.50
     is_ranging_regime = hurst_val <= 0.50
 
-    # Direct Wick Geometry Calculation (Prevents Dictionary Misses)
-    total_range = pExec.h[iExec] - pExec.l[iExec]
-    total_range_safe = total_range if total_range > 1e-9 else 1e-9
-    body_top = max(pExec.o[iExec], pExec.c[iExec])
-    body_bottom = min(pExec.o[iExec], pExec.c[iExec])
+    # Direct Wick Geometry & Rejection Lookback Calculation
+    is_bull_rejection = False
+    is_bear_rejection = False
 
-    curr_lower_wick_pct = (body_bottom - pExec.l[iExec]) / total_range_safe
-    curr_upper_wick_pct = (pExec.h[iExec] - body_top) / total_range_safe
+    # Check current and previous 2 candles for valid structural rejection
+    for idx_offset in [0, 1, 2]:
+        idx = iExec - idx_offset
+        if idx >= 0:
+            total_range = pExec.h[idx] - pExec.l[idx]
+            total_range_safe = total_range if total_range > 1e-9 else 1e-9
+            body_top = max(pExec.o[idx], pExec.c[idx])
+            body_bottom = min(pExec.o[idx], pExec.c[idx])
 
-    # Dynamic Volatility & Momentum Thresholds
-    atr_p_decimal = base.get("atr_percentile_100", 50.0) / 100.0
-    dyn_adx_thresh = 20.0 + (atr_p_decimal * 10.0)
-    dyn_rvol_thresh = 1.0 + (atr_p_decimal * 0.5)
+            lower_wick_pct = (body_bottom - pExec.l[idx]) / total_range_safe
+            upper_wick_pct = (pExec.h[idx] - body_top) / total_range_safe
+
+            if lower_wick_pct > 0.20: is_bull_rejection = True
+            if upper_wick_pct > 0.20: is_bear_rejection = True
+
+    # God Tier Additions from adv features - Safely retrieve from precomputed array
+    bull_div_arr = adv.get('bull_div_rsi', None)
+    bull_div_rsi = bull_div_arr[iExec] > 0 if bull_div_arr is not None and isinstance(bull_div_arr, np.ndarray) and iExec < len(bull_div_arr) else False
+
+    bear_div_arr = adv.get('bear_div_rsi', None)
+    bear_div_rsi = bear_div_arr[iExec] > 0 if bear_div_arr is not None and isinstance(bear_div_arr, np.ndarray) and iExec < len(bear_div_arr) else False
+
+    kc_upper_dist = adv.get('dist_to_kc_upper_pct', None)
+    kc_lower_dist = adv.get('dist_to_kc_lower_pct', None)
+    at_kc_upper = kc_upper_dist[iExec] > -0.5 if kc_upper_dist is not None and isinstance(kc_upper_dist, np.ndarray) and iExec < len(kc_upper_dist) else False
+    at_kc_lower = kc_lower_dist[iExec] < 0.5 if kc_lower_dist is not None and isinstance(kc_lower_dist, np.ndarray) and iExec < len(kc_lower_dist) else False
 
     # Evaluate Longs
     if can_long:
         side = 'long'
-        # Relaxed: Lower wick is at least 20% of the candle range
-        is_bull_rejection = curr_lower_wick_pct > 0.20
 
-        # Strat Alpha (Trend Pullbacks) - Prioritize in Trending Regime
-        if ((fib_786_l <= px <= fib_618_l) or (ob_bull > 0 and is_tapped(ob_bull))) and (is_bull_rejection or brain is None):
+        # Strat Alpha (Trend Pullbacks)
+        if ((fib_786_l <= px <= fib_618_l) or (ob_bull > 0 and is_tapped(ob_bull))) and (is_bull_rejection or bull_div_rsi or brain is None):
             setup_type = "ALPHA_LONG"
             entry_target = ob_bull if ob_bull > 0 else px
-            logic_desc = "Trend Pullback: 3-TF alignment. Structural bounce confirmed on 0.618-0.786 Fib or active OB."
-        # Strat Beta (Momentum Breakouts) - Prioritize in Trending Regime
+            logic_desc = "Trend Pullback: Structural bounce confirmed on 0.618 Fib or active OB with rejection/divergence."
+        # Strat Beta (Momentum Breakouts)
         elif base.get("squeeze_fired", 0) > 0 and base.get("vol_spike", 0) > 0 and base.get("bos_up", 0) > 0:
             setup_type = "BETA_LONG"
             entry_target = px
-            logic_desc = "Momentum Breakout: Squeeze fired with volume spike and Structural BOS. Entering momentum explosion."
-        # Strat Gamma (Liquidity Traps) - Prioritize in Ranging/Reversion
-        elif (sweep_bull > 0 or base.get("sweep_low", 0) > 0) and (is_bull_rejection or brain is None) and base.get("cvd_div_bull", 0) > 0:
+            logic_desc = "Momentum Breakout: Squeeze fired with volume spike and Structural BOS."
+        # Strat Gamma (Liquidity Traps)
+        elif (sweep_bull > 0 or base.get("sweep_low", 0) > 0) and (is_bull_rejection or bull_div_rsi or brain is None):
             setup_type = "GAMMA_LONG"
             entry_target = base.get("last_swing_low", px)
             logic_desc = "Liquidity Trap: Retail stops hunted with bullish rejection and CVD absorption divergence."
@@ -1646,17 +1697,17 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             entry_target = ob_bull
             logic_desc = "Fractal Mitigation: Fair Value Gap perfectly aligns with institutional Order Block."
         # Strat Epsilon (Quasimodo)
-        elif qm_bull > 0 and is_tapped(qm_bull) and (is_bull_rejection or brain is None):
+        elif qm_bull > 0 and is_tapped(qm_bull) and (is_bull_rejection or bull_div_rsi or brain is None):
             setup_type = "EPSILON_LONG"
             entry_target = qm_bull
             logic_desc = "Quasimodo Structure: Structural bounce confirmed on the QM left shoulder retest."
         # Strat Zeta (Wyckoff Spring / Judas Swing)
-        elif spring > 0 or (base.get("asian_range_swept_dn", 0) > 0 and (is_bull_rejection or brain is None)):
+        elif spring > 0 or (base.get("asian_range_swept_dn", 0) > 0 and (is_bull_rejection or bull_div_rsi or brain is None)):
             setup_type = "ZETA_LONG"
             entry_target = px
             logic_desc = "Wyckoff/Judas Spring: HTF/Asian swing swept with immediate volume/CVD reclaim."
-        # Strat Omega (Auction Market Theory) - Prioritize in Ranging Regime
-        elif (is_bull_rejection or brain is None) and is_tapped(val) and base.get("poc", 0) > entry_target:
+        # Strat Omega (Auction Market Theory)
+        elif (is_bull_rejection or bull_div_rsi or at_kc_lower or brain is None) and is_tapped(val) and base.get("poc", 0) > entry_target:
             setup_type = "OMEGA_LONG"
             entry_target = val
             logic_desc = "Auction Market Theory: Ranging environment. Bullish rejection confirmed at Value Area Low (VAL)."
@@ -1664,21 +1715,19 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # Evaluate Shorts
     if not setup_type and can_short:
         side = 'short'
-        # Relaxed: Upper wick is at least 20% of the candle range
-        is_bear_rejection = curr_upper_wick_pct > 0.20
 
         # Strat Alpha (Trend Pullbacks)
-        if ((fib_618_s <= px <= fib_786_s) or (ob_bear > 0 and is_tapped(ob_bear))) and (is_bear_rejection or brain is None):
+        if ((fib_618_s <= px <= fib_786_s) or (ob_bear > 0 and is_tapped(ob_bear))) and (is_bear_rejection or bear_div_rsi or brain is None):
             setup_type = "ALPHA_SHORT"
             entry_target = ob_bear if ob_bear > 0 else px
-            logic_desc = "Trend Pullback: 3-TF alignment. Structural rejection confirmed on 0.618-0.786 Fib or active OB."
+            logic_desc = "Trend Pullback: Structural rejection confirmed on 0.618 Fib or active OB with rejection/divergence."
         # Strat Beta (Momentum Breakouts)
         elif base.get("squeeze_fired", 0) > 0 and base.get("vol_spike", 0) > 0 and base.get("bos_down", 0) > 0:
             setup_type = "BETA_SHORT"
             entry_target = px
-            logic_desc = "Momentum Breakout: Squeeze fired with volume spike and Structural BOS. Entering momentum explosion."
+            logic_desc = "Momentum Breakout: Squeeze fired with volume spike and Structural BOS."
         # Strat Gamma (Liquidity Traps)
-        elif (sweep_bear > 0 or base.get("sweep_high", 0) > 0) and (is_bear_rejection or brain is None) and base.get("cvd_div_bear", 0) > 0:
+        elif (sweep_bear > 0 or base.get("sweep_high", 0) > 0) and (is_bear_rejection or bear_div_rsi or brain is None):
             setup_type = "GAMMA_SHORT"
             entry_target = base.get("last_swing_high", px)
             logic_desc = "Liquidity Trap: Retail stops hunted with bearish rejection and CVD absorption divergence."
@@ -1688,17 +1737,17 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             entry_target = ob_bear
             logic_desc = "Fractal Mitigation: Fair Value Gap perfectly aligns with institutional Order Block."
         # Strat Epsilon (Quasimodo)
-        elif qm_bear > 0 and is_tapped(qm_bear) and (is_bear_rejection or brain is None):
+        elif qm_bear > 0 and is_tapped(qm_bear) and (is_bear_rejection or bear_div_rsi or brain is None):
             setup_type = "EPSILON_SHORT"
             entry_target = qm_bear
             logic_desc = "Quasimodo Structure: Structural rejection confirmed on the QM left shoulder retest."
         # Strat Zeta (Wyckoff Upthrust / Judas Swing)
-        elif upthrust > 0 or (base.get("asian_range_swept_up", 0) > 0 and (is_bear_rejection or brain is None)):
+        elif upthrust > 0 or (base.get("asian_range_swept_up", 0) > 0 and (is_bear_rejection or bear_div_rsi or brain is None)):
             setup_type = "ZETA_SHORT"
             entry_target = px
             logic_desc = "Wyckoff/Judas Upthrust: HTF/Asian swing swept with immediate volume/CVD reclaim."
         # Strat Omega (Auction Market Theory)
-        elif (is_bear_rejection or brain is None) and is_tapped(vah) and base.get("poc", px) < entry_target:
+        elif (is_bear_rejection or bear_div_rsi or at_kc_upper or brain is None) and is_tapped(vah) and base.get("poc", px) < entry_target:
             setup_type = "OMEGA_SHORT"
             entry_target = vah
             logic_desc = "Auction Market Theory: Ranging environment. Bearish rejection confirmed at Value Area High (VAH)."
