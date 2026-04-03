@@ -75,8 +75,8 @@ def _strategy_overrides(cfg):
     if "BTC" in symbol or "ETH" in symbol:
         cfg.min_conf_long = 1.0
         cfg.min_conf_short = 1.0
-        cfg.min_prob_long = 0.55
-        cfg.min_prob_short = 0.55
+        cfg.min_prob_long = 0.51
+        cfg.min_prob_short = 0.51
     else:
-        cfg.min_prob_long = 0.55
-        cfg.min_prob_short = 0.55
+        cfg.min_prob_long = 0.51
+        cfg.min_prob_short = 0.51
