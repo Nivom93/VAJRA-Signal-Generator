@@ -1677,7 +1677,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         side = 'long'
 
         # Strat Alpha (Trend Pullbacks)
-        if ((fib_786_l <= px <= fib_618_l) or (ob_bull > 0 and is_tapped(ob_bull))) and (is_bull_rejection or bull_div_rsi or brain is None):
+        if ((fib_786_l <= px <= fib_618_l) or (ob_bull > 0 and is_tapped(ob_bull))) and (is_bull_rejection or bull_div_rsi):
             setup_type = "ALPHA_LONG"
             entry_target = ob_bull if ob_bull > 0 else px
             logic_desc = "Trend Pullback: Structural bounce confirmed on 0.618 Fib or active OB with rejection/divergence."
@@ -1687,7 +1687,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             entry_target = px
             logic_desc = "Momentum Breakout: Squeeze fired with volume spike and Structural BOS."
         # Strat Gamma (Liquidity Traps)
-        elif (sweep_bull > 0 or base.get("sweep_low", 0) > 0) and (is_bull_rejection or bull_div_rsi or brain is None):
+        elif (sweep_bull > 0 or base.get("sweep_low", 0) > 0) and (is_bull_rejection or bull_div_rsi):
             setup_type = "GAMMA_LONG"
             entry_target = base.get("last_swing_low", px)
             logic_desc = "Liquidity Trap: Retail stops hunted with bullish rejection and CVD absorption divergence."
@@ -1697,17 +1697,17 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             entry_target = ob_bull
             logic_desc = "Fractal Mitigation: Fair Value Gap perfectly aligns with institutional Order Block."
         # Strat Epsilon (Quasimodo)
-        elif qm_bull > 0 and is_tapped(qm_bull) and (is_bull_rejection or bull_div_rsi or brain is None):
+        elif qm_bull > 0 and is_tapped(qm_bull) and (is_bull_rejection or bull_div_rsi):
             setup_type = "EPSILON_LONG"
             entry_target = qm_bull
             logic_desc = "Quasimodo Structure: Structural bounce confirmed on the QM left shoulder retest."
         # Strat Zeta (Wyckoff Spring / Judas Swing)
-        elif spring > 0 or (base.get("asian_range_swept_dn", 0) > 0 and (is_bull_rejection or bull_div_rsi or brain is None)):
+        elif spring > 0 or (base.get("asian_range_swept_dn", 0) > 0 and (is_bull_rejection or bull_div_rsi)):
             setup_type = "ZETA_LONG"
             entry_target = px
             logic_desc = "Wyckoff/Judas Spring: HTF/Asian swing swept with immediate volume/CVD reclaim."
         # Strat Omega (Auction Market Theory)
-        elif (is_bull_rejection or bull_div_rsi or at_kc_lower or brain is None) and is_tapped(val) and base.get("poc", 0) > entry_target:
+        elif (is_bull_rejection or bull_div_rsi or at_kc_lower) and is_tapped(val) and base.get("poc", 0) > entry_target:
             setup_type = "OMEGA_LONG"
             entry_target = val
             logic_desc = "Auction Market Theory: Ranging environment. Bullish rejection confirmed at Value Area Low (VAL)."
@@ -1717,7 +1717,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         side = 'short'
 
         # Strat Alpha (Trend Pullbacks)
-        if ((fib_618_s <= px <= fib_786_s) or (ob_bear > 0 and is_tapped(ob_bear))) and (is_bear_rejection or bear_div_rsi or brain is None):
+        if ((fib_618_s <= px <= fib_786_s) or (ob_bear > 0 and is_tapped(ob_bear))) and (is_bear_rejection or bear_div_rsi):
             setup_type = "ALPHA_SHORT"
             entry_target = ob_bear if ob_bear > 0 else px
             logic_desc = "Trend Pullback: Structural rejection confirmed on 0.618 Fib or active OB with rejection/divergence."
@@ -1727,7 +1727,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             entry_target = px
             logic_desc = "Momentum Breakout: Squeeze fired with volume spike and Structural BOS."
         # Strat Gamma (Liquidity Traps)
-        elif (sweep_bear > 0 or base.get("sweep_high", 0) > 0) and (is_bear_rejection or bear_div_rsi or brain is None):
+        elif (sweep_bear > 0 or base.get("sweep_high", 0) > 0) and (is_bear_rejection or bear_div_rsi):
             setup_type = "GAMMA_SHORT"
             entry_target = base.get("last_swing_high", px)
             logic_desc = "Liquidity Trap: Retail stops hunted with bearish rejection and CVD absorption divergence."
@@ -1737,17 +1737,17 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             entry_target = ob_bear
             logic_desc = "Fractal Mitigation: Fair Value Gap perfectly aligns with institutional Order Block."
         # Strat Epsilon (Quasimodo)
-        elif qm_bear > 0 and is_tapped(qm_bear) and (is_bear_rejection or bear_div_rsi or brain is None):
+        elif qm_bear > 0 and is_tapped(qm_bear) and (is_bear_rejection or bear_div_rsi):
             setup_type = "EPSILON_SHORT"
             entry_target = qm_bear
             logic_desc = "Quasimodo Structure: Structural rejection confirmed on the QM left shoulder retest."
         # Strat Zeta (Wyckoff Upthrust / Judas Swing)
-        elif upthrust > 0 or (base.get("asian_range_swept_up", 0) > 0 and (is_bear_rejection or bear_div_rsi or brain is None)):
+        elif upthrust > 0 or (base.get("asian_range_swept_up", 0) > 0 and (is_bear_rejection or bear_div_rsi)):
             setup_type = "ZETA_SHORT"
             entry_target = px
             logic_desc = "Wyckoff/Judas Upthrust: HTF/Asian swing swept with immediate volume/CVD reclaim."
         # Strat Omega (Auction Market Theory)
-        elif (is_bear_rejection or bear_div_rsi or at_kc_upper or brain is None) and is_tapped(vah) and base.get("poc", px) < entry_target:
+        elif (is_bear_rejection or bear_div_rsi or at_kc_upper) and is_tapped(vah) and base.get("poc", px) < entry_target:
             setup_type = "OMEGA_SHORT"
             entry_target = vah
             logic_desc = "Auction Market Theory: Ranging environment. Bearish rejection confirmed at Value Area High (VAH)."

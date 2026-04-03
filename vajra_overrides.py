@@ -16,7 +16,7 @@ def _strategy_overrides(cfg):
     cfg.dca_max_safety_orders = 0
     
     # --- EXECUTION DEFAULTS (PURE LIMIT MODE) ---
-    cfg.execution_style = 'limit'     
+    cfg.execution_style = 'market'
     cfg.pullback_atr_mult = 0.05        
     cfg.slippage_bps = 0.0
     cfg.maker_fee_bps = 0.0
