@@ -67,16 +67,16 @@ def _strategy_overrides(cfg):
     cfg.dca_max_safety_orders = 0
 
     # --- STRUCTURAL SNIPER GEOMETRY ---
-    cfg.min_rr = 1.5
-    cfg.atr_mult_sl = 1.0
-    cfg.atr_mult_tp = 1.2
+    cfg.min_rr = 2.2          # Engine will reject ANY structural target below 2.2R
+    cfg.atr_mult_sl = 1.2     # Anchors risk exactly 1.2 ATR beyond the structural swing
+    cfg.atr_mult_tp = 3.0     # Hard cap greed at exactly 3.0R to protect win-rate
 
     # --- STRICT AI GATES ---
     if "BTC" in symbol or "ETH" in symbol:
         cfg.min_conf_long = 1.0
         cfg.min_conf_short = 1.0
-        cfg.min_prob_long = 0.35   # <--- CHANGE TO 0.35
-        cfg.min_prob_short = 0.35  # <--- CHANGE TO 0.35
+        cfg.min_prob_long = 0.55
+        cfg.min_prob_short = 0.55
     else:
-        cfg.min_prob_long = 0.35   # <--- CHANGE TO 0.35
-        cfg.min_prob_short = 0.35  # <--- CHANGE TO 0.35
+        cfg.min_prob_long = 0.55
+        cfg.min_prob_short = 0.55
