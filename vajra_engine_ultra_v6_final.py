@@ -1326,7 +1326,10 @@ class TradeManager:
         self.last_signal_time[signal_key] = curr_idx
 
         adx = plan.get('features', {}).get('adx', 25.0)
-        ttl = 4
+
+        # USE DYNAMIC TIME-IN-FORCE (Defaults to 24 bars / 6 hours to allow pullbacks)
+        ttl = getattr(self.cfg, 'time_in_force_decay', 24)
+        if ttl <= 0: ttl = 24
         
         order = {
             **plan,
@@ -1726,20 +1729,23 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         ]
 
         valid_tps = [t for t in possible_tps if t > entry_target and t < float('inf')]
-        if not valid_tps: return None
-        valid_tps.sort()
 
         selected_tp = None
-        for t in valid_tps:
-            curr_rr = (t - entry_target) / risk_distance
-            if curr_rr >= getattr(cfg, 'min_rr', 2.2):
-                if curr_rr > getattr(cfg, 'atr_mult_tp', 3.0):
-                    selected_tp = entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 3.0))
-                else:
-                    selected_tp = t
-                break
+        if valid_tps:
+            valid_tps.sort()
+            for t in valid_tps:
+                curr_rr = (t - entry_target) / risk_distance
+                if curr_rr >= getattr(cfg, 'min_rr', 2.2):
+                    if curr_rr > getattr(cfg, 'atr_mult_tp', 3.0):
+                        selected_tp = entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 3.0))
+                    else:
+                        selected_tp = t
+                    break
 
-        if selected_tp is None: return None
+        # THE FIX: If no resistance exists (open air) or structure is too close, default to a 3.0R runner
+        if selected_tp is None:
+            selected_tp = entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 3.0))
+
         tp = selected_tp
         rr = (tp - entry_target) / risk_distance
 
@@ -1761,20 +1767,23 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         ]
 
         valid_tps = [t for t in possible_tps if t > 0 and t < entry_target and t < float('inf')]
-        if not valid_tps: return None
-        valid_tps.sort(reverse=True)
 
         selected_tp = None
-        for t in valid_tps:
-            curr_rr = (entry_target - t) / risk_distance
-            if curr_rr >= getattr(cfg, 'min_rr', 2.2):
-                if curr_rr > getattr(cfg, 'atr_mult_tp', 3.0):
-                    selected_tp = entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 3.0))
-                else:
-                    selected_tp = t
-                break
+        if valid_tps:
+            valid_tps.sort(reverse=True)
+            for t in valid_tps:
+                curr_rr = (entry_target - t) / risk_distance
+                if curr_rr >= getattr(cfg, 'min_rr', 2.2):
+                    if curr_rr > getattr(cfg, 'atr_mult_tp', 3.0):
+                        selected_tp = entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 3.0))
+                    else:
+                        selected_tp = t
+                    break
 
-        if selected_tp is None: return None
+        # THE FIX: If no support exists (open air) or structure is too close, default to a 3.0R runner
+        if selected_tp is None:
+            selected_tp = entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 3.0))
+
         tp = selected_tp
         rr = (entry_target - tp) / risk_distance
 

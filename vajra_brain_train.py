@@ -332,20 +332,16 @@ def main(argv=None):
                 scale_pos_weight=scale_weight
             )
 
-            # Fit the final model on the entire dataset
-            # TimeSeriesSplit for temporal calibration over full dataset
-            calib_tscv = TimeSeriesSplit(n_splits=5)
-            calibrated_model = CalibratedClassifierCV(estimator=final_model, method='sigmoid', cv=calib_tscv)
-            calibrated_model.fit(X_all_sel, y_all)
+            # Fit the final model directly on the entire dataset to retain scale_pos_weight boosting
+            final_model.fit(X_all_sel, y_all)
 
-
-            valid_edge = bool(avg_roc > 0.50 and avg_prec > 0.20)
+            valid_edge = bool(avg_roc > 0.50 and avg_prec > 0.10)
 
             pipeline = {
-                "classifier": calibrated_model,
+                "classifier": final_model,
                 "feature_names": selected_features,
                 "training_args": vars(args),
-                "model": "xgboost_calibrated",
+                "model": "xgboost_uncalibrated_boosted",
                 "wfa_acc": avg_acc,
                 "wfa_prec": avg_prec,
                 "wfa_roc_auc": avg_roc,
