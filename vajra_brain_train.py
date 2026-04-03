@@ -209,7 +209,7 @@ def main(argv=None):
             pos_cases = np.sum(y_all == 1)
             neg_cases = np.sum(y_all == 0)
             scale_weight = float(neg_cases) / max(1.0, float(pos_cases))
-            scale_weight = min(scale_weight, 10.0) # Cap extreme weights
+            scale_weight = min(scale_weight, 100.0) # Cap extreme weights
 
             n_samples = len(X_all)
             actual_folds = min(args.wfa_folds, max(2, n_samples // 15))
@@ -217,6 +217,7 @@ def main(argv=None):
             log.info(f"Running Walk-Forward Analysis ({actual_folds} folds) with dynamic per-fold RFE Feature Selection...")
             tscv = TimeSeriesSplit(n_splits=actual_folds, gap=actual_gap)
             
+            best_tuned_params = {}
             acc_scores = []
             prec_scores = []
             roc_auc_scores = []
@@ -243,7 +244,7 @@ def main(argv=None):
                 neg_cases_fold = np.sum(y_tr == 0)
                 pos_cases_fold = np.sum(y_tr == 1)
                 fold_scale_weight = float(neg_cases_fold) / max(1.0, float(pos_cases_fold))
-                fold_scale_weight = min(fold_scale_weight, 10.0)
+                fold_scale_weight = min(fold_scale_weight, 100.0)
 
                 clf = xgb.XGBClassifier(
                     n_estimators=args.n_estimators,
@@ -276,6 +277,7 @@ def main(argv=None):
                         random_search = RandomizedSearchCV(clf, param_distributions=param_dist, n_iter=10, scoring='roc_auc', cv=cv_folds, random_state=42)
                         random_search.fit(X_tr, y_tr)
                         clf = random_search.best_estimator_
+                        best_tuned_params = random_search.best_params_
                         log.info(f"    Fold {i+1} Tuned Params: {random_search.best_params_}")
                     else:
                         log.info(f"    Fold {i+1}: Skipped Tuning (Insufficient Positive Cases: {pos_cases_fold} < 15)")
@@ -318,19 +320,28 @@ def main(argv=None):
 
             log.info("Training and Calibrating Final Production Model on FULL dataset...")
 
-            final_model = xgb.XGBClassifier(
-                n_estimators=args.n_estimators,
-                learning_rate=args.learning_rate,
-                max_depth=args.max_depth,
-                reg_alpha=args.reg_alpha,
-                reg_lambda=args.reg_lambda,
-                colsample_bytree=0.7,
-                subsample=0.8,
-                random_state=42,
-                objective='binary:logistic',
-                eval_metric='logloss',
-                scale_pos_weight=scale_weight
-            )
+            if best_tuned_params:
+                final_model = xgb.XGBClassifier(
+                    **best_tuned_params,
+                    random_state=42,
+                    objective='binary:logistic',
+                    eval_metric='logloss',
+                    scale_pos_weight=scale_weight
+                )
+            else:
+                final_model = xgb.XGBClassifier(
+                    n_estimators=args.n_estimators,
+                    learning_rate=args.learning_rate,
+                    max_depth=args.max_depth,
+                    reg_alpha=args.reg_alpha,
+                    reg_lambda=args.reg_lambda,
+                    colsample_bytree=0.7,
+                    subsample=0.8,
+                    random_state=42,
+                    objective='binary:logistic',
+                    eval_metric='logloss',
+                    scale_pos_weight=scale_weight
+                )
 
             # Fit the final model directly on the entire dataset to retain scale_pos_weight boosting
             final_model.fit(X_all_sel, y_all)

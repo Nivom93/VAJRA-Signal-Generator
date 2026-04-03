@@ -236,6 +236,12 @@ def run_backtest(args, preloaded: Optional[Preloaded]=None, markets_data=None):
     until_ms = parse_time(args.until)
     exec_iter = exec_tf[(exec_tf["timestamp"] >= since_ms) & (exec_tf["timestamp"] < until_ms)]
 
+    log.info("Downloading Macro Context for Backtester...")
+    from vajra_export_events import fetch_macro_trend, fetch_delta_oi
+    dxy_aligned = fetch_macro_trend("DX=F", exec_tf["timestamp"])
+    spx_aligned = fetch_macro_trend("^GSPC", exec_tf["timestamp"])
+    oi_aligned = fetch_delta_oi(exw, cfg.symbol, cfg.exec_tf, exec_tf["timestamp"])
+
     log.info("Generating Engine V7 Precomputed features for base engine parity...")
     pMacro = Precomp(macro_tf)
     pSwing = Precomp(swing_tf)
@@ -273,6 +279,9 @@ def run_backtest(args, preloaded: Optional[Preloaded]=None, markets_data=None):
             "btc_bullish": btc_bull_val, 
             "funding_rate": 0.0,
             "btcd_trend": 0.0,
+            "dxy_trend": float(dxy_aligned[iExec]) if iExec < len(dxy_aligned) else 0.0,
+            "spx_trend": float(spx_aligned[iExec]) if iExec < len(spx_aligned) else 0.0,
+            "delta_oi": float(oi_aligned[iExec]) if iExec < len(oi_aligned) else 0.0,
             "bid_ask_imbalance": 0.5,
             "macro_sentiment": 0.0
         }
