@@ -27,7 +27,7 @@ def _strategy_overrides(cfg):
     cfg.trailing_stop_trigger_r = 0.0
     cfg.trailing_dist_r = 0.0
     cfg.dynamic_tp_enabled = True  # <--- MUST BE TRUE
-    cfg.time_in_force_decay = 24
+    cfg.time_in_force_decay = 0
     cfg.maker_fee_bps = 0.0
     cfg.taker_fee_bps = 0.0
 
@@ -36,7 +36,7 @@ def _strategy_overrides(cfg):
     cfg.max_concurrent = 6
     cfg.dynamic_risk_scaling = True
     cfg.max_risk_factor = 2.5
-    cfg.min_ev = 0.05
+    cfg.min_ev = 0.08
     cfg.min_target_dist_pct = 0.15
     
     # --- FILTERS (LET THE AI DECIDE) ---
@@ -69,14 +69,7 @@ def _strategy_overrides(cfg):
     # --- STRUCTURAL SNIPER GEOMETRY ---
     cfg.min_rr = 2.0          # Engine will reject ANY structural target below 2.0R to align with market structure
     cfg.atr_mult_sl = 1.0     # Anchors risk exactly 1.0 ATR beyond the structural swing
-    cfg.atr_mult_tp = 3.0     # Hard cap greed at exactly 3.0R to protect win-rate
+    cfg.atr_mult_tp = 2.5     # Hard cap greed at exactly 3.0R to protect win-rate
 
     # --- STRICT AI GATES ---
-    if "BTC" in symbol or "ETH" in symbol:
-        cfg.min_conf_long = 1.0
-        cfg.min_conf_short = 1.0
-        cfg.min_prob_long = 0.51
-        cfg.min_prob_short = 0.51
-    else:
-        cfg.min_prob_long = 0.51
-        cfg.min_prob_short = 0.51
+    pass

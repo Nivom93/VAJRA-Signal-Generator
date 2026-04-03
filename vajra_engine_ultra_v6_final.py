@@ -1857,17 +1857,6 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         win_prob = brain.predict_probability(strat, side, base, adv, iExec, px, pExec)
         if win_prob is None: return None
 
-        min_p = getattr(cfg, 'min_prob_long', 0.55) if side == 'long' else getattr(cfg, 'min_prob_short', 0.55)
-        if win_prob < min_p: return None
-
-        macro_sentiment = float(base.get("macro_sentiment", 0.0))
-        if side == 'long' and macro_sentiment < -0.40:
-            win_prob *= 0.9
-            logic_desc += " [ORACLE PENALTY: Longing into Bearish Macro]"
-        elif side == 'short' and macro_sentiment > 0.40:
-            win_prob *= 0.9
-            logic_desc += " [ORACLE PENALTY: Shorting into Bullish Macro]"
-
         ev = (win_prob * rr) - ((1.0 - win_prob) * 1.0)
         if ev <= getattr(cfg, 'min_ev', 0.05): return None
 

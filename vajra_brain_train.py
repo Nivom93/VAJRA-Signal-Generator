@@ -346,13 +346,16 @@ def main(argv=None):
             # Fit the final model directly on the entire dataset to retain scale_pos_weight boosting
             final_model.fit(X_all_sel, y_all)
 
+            calibrated_model = CalibratedClassifierCV(estimator=final_model, method='sigmoid', cv='prefit')
+            calibrated_model.fit(X_all_sel, y_all)
+
             valid_edge = bool(avg_roc > 0.50 and avg_prec > 0.10)
 
             pipeline = {
-                "classifier": final_model,
+                "classifier": calibrated_model,
                 "feature_names": selected_features,
                 "training_args": vars(args),
-                "model": "xgboost_uncalibrated_boosted",
+                "model": "xgboost_calibrated",
                 "wfa_acc": avg_acc,
                 "wfa_prec": avg_prec,
                 "wfa_roc_auc": avg_roc,
