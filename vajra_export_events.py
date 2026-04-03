@@ -207,7 +207,7 @@ def main():
     p.add_argument("--htf", default="1h")
     p.add_argument("--exec-tf", default="15m")
     p.add_argument("--out", required=True)
-    p.add_argument("--min-rr", type=float, default=0.5)
+    p.add_argument("--min-rr", type=float, default=2.2)
     
     args = p.parse_args()
 
@@ -346,12 +346,11 @@ def main():
                         # Time-in-Market constraint: 192 bars = 48 hours on 15m timeframe
                         bars_open = cl.get("bars_open", 0)
 
-                        # ONLY label as a WIN (1.0) if the trade actually hit a 2.2R+ move structurally.
-                        # We use 2.15 to safely account for minor slippage/fees in the simulation.
-                        if cl["pnl_r"] >= 2.15 and bars_open <= 192:
+                        # ONLY label as a WIN (1.0) if the trade actually hit its planned Take Profit structurally.
+                        if cl.get("exit_reason") == "tp" and bars_open <= 192:
                             meta_label = 1.0
                         else:
-                            # Scalps and weak wins (< 2.15R) are treated as a LOSS (0.0) to force the AI to seek explosive momentum
+                            # Scalps, weak wins, and losses are treated as a LOSS (0.0) to force the AI to seek explosive momentum
                             meta_label = 0.0
 
                         events.append({

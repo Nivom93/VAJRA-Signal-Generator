@@ -63,7 +63,7 @@ def is_feature_column(df: pd.DataFrame, col: str, extra_exclude: Set[str]) -> bo
         "last_swing_high", "last_swing_low", "ob_bull_price", "ob_bear_price",
         "ob_bull_top", "ob_bull_bot", "ob_bear_top", "ob_bear_bot",
         "avwap_bull", "avwap_bear", "poc", "vah", "val", "asian_high", "asian_low",
-        "dc_high_20", "dc_low_20", "htf_ema50",
+        "dc_high_20", "dc_low_20", "htf_ema50", "macro_ema50", "swing_ema50",
         "htf_swing_high", "htf_swing_low", "mtf_swing_high", "mtf_swing_low",
         "ema20_L", "ema50_L", "ema100_L", "mtf_ema200_arr", "bb_upper", "bb_lower",
         "kc_upper", "kc_lower", "kalman_price", 
