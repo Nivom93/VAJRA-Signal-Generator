@@ -343,10 +343,9 @@ def main(argv=None):
                     scale_pos_weight=scale_weight
                 )
 
-            # Fit the final model directly on the entire dataset to retain scale_pos_weight boosting
-            final_model.fit(X_all_sel, y_all)
-
-            calibrated_model = CalibratedClassifierCV(estimator=final_model, method='sigmoid', cv='prefit')
+            # Fit and calibrate via TimeSeriesSplit to bypass the 'prefit' conflict
+            calib_tscv = TimeSeriesSplit(n_splits=5)
+            calibrated_model = CalibratedClassifierCV(estimator=final_model, method='sigmoid', cv=calib_tscv)
             calibrated_model.fit(X_all_sel, y_all)
 
             valid_edge = bool(avg_roc > 0.50 and avg_prec > 0.10)
