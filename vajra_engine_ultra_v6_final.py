@@ -1699,7 +1699,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             setup_type = "DELTA_LONG"
             logic_desc = "Strict FVG Mitigation."
 
-    elif not setup_type and can_short:
+    if not setup_type and can_short:
         side = 'short'
         # 1. Exact ICT OB Mean Threshold Mitigation (Strict Intersection)
         if ob_bear_ce > 0 and high >= ob_bear_ce and px < ob_bear_top and base.get("sweep_high", 0) > 0:
@@ -1726,16 +1726,17 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     entry_target = px  # Pure Market Execution at signal generation
 
     if side == 'long':
-        # STRICT STRUCTURE SL
-        sl = base.get("last_swing_low", px) * 0.9995 # Micro 0.05% offset to survive exact tick sweeps
+        # STRICT STRUCTURE SL (Safeguard against lagging fractals using current wick)
+        sl = min(base.get("last_swing_low", px), low) * 0.9995
         if sl >= entry_target: return None
         risk_distance = entry_target - sl
 
-        # STRICT STRUCTURE TP (Nearest Opposing Liquidity)
+        # STRICT STRUCTURE TP (Nearest Opposing Liquidity + Open Air Fallback)
         possible_tps = [base.get("ob_bear_bot", 0), base.get("vah", 0), htf_sh, mtf_sh]
         valid_tps = sorted([t for t in possible_tps if t > entry_target])
 
-        if not valid_tps: return None
+        if not valid_tps:
+            valid_tps = [entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 3.0))]
 
         selected_tp = None
         for t in valid_tps:
@@ -1753,16 +1754,17 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         rr = (tp - entry_target) / risk_distance
 
     else:
-        # STRICT STRUCTURE SL
-        sl = base.get("last_swing_high", px) * 1.0005 # Micro 0.05% offset to survive exact tick sweeps
+        # STRICT STRUCTURE SL (Safeguard against lagging fractals using current wick)
+        sl = max(base.get("last_swing_high", px), high) * 1.0005
         if sl <= entry_target: return None
         risk_distance = sl - entry_target
 
-        # STRICT STRUCTURE TP (Nearest Opposing Liquidity)
+        # STRICT STRUCTURE TP (Nearest Opposing Liquidity + Open Air Fallback)
         possible_tps = [base.get("ob_bull_top", 0), base.get("val", 0), htf_sl, mtf_sl]
         valid_tps = sorted([t for t in possible_tps if t > 0 and t < entry_target], reverse=True)
 
-        if not valid_tps: return None
+        if not valid_tps:
+            valid_tps = [entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 3.0))]
 
         selected_tp = None
         for t in valid_tps:
