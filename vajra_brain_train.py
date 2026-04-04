@@ -227,13 +227,14 @@ def main(argv=None):
                 X_tr_full, y_tr = X_all[train_idx], y_all[train_idx]
                 X_te_full, y_te = X_all[test_idx], y_all[test_idx]
 
-                # Dynamically calculate features to prevent overfitting based on pos_cases
+                # Calculate dynamic cap based on the fold's training size
                 pos_cases_fold = np.sum(y_tr == 1)
-                rfe_features = max(15, min(args.max_features, len(base_feature_names)))
+                n_samples_fold = len(X_tr_full)
+                dynamic_n_features_fold = max(3, min(20, int(n_samples_fold / 20)))
 
                 # Dynamically run RFE on this specific fold
                 estimator_rfe = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
-                selector = RFE(estimator_rfe, n_features_to_select=rfe_features, step=1)
+                selector = RFE(estimator_rfe, n_features_to_select=dynamic_n_features_fold, step=1)
                 selector = selector.fit(X_tr_full, y_tr)
 
                 # Slice training and validation sets strictly to selected features
@@ -308,10 +309,14 @@ def main(argv=None):
 
             log.info("Running Final RFE Feature Selection on FULL dataset for Production Model...")
 
-            rfe_features_final = max(15, min(args.max_features, len(base_feature_names)))
+            # Calculate dynamic cap based on the entire dataset size
+            n_samples_all = len(X_all)
+            dynamic_n_features_final = max(3, min(20, int(n_samples_all / 20)))
+
+            log.info(f"Dynamic RFE: Limiting to {dynamic_n_features_final} features for {n_samples_all} samples.")
 
             estimator_rfe_final = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
-            selector_final = RFE(estimator_rfe_final, n_features_to_select=rfe_features_final, step=1)
+            selector_final = RFE(estimator_rfe_final, n_features_to_select=dynamic_n_features_final, step=1)
             selector_final = selector_final.fit(X_all, y_all)
             selected_features = [f for f, s in zip(base_feature_names, selector_final.support_) if s]
 
