@@ -522,7 +522,8 @@ class AadhiraayanEngineConfig:
     exchange_id: str = "bybit"; market_type: str = "swap"; symbol: str = "BTC/USDT"
     macro_tf: str = "1d"; swing_tf: str = "4h"; htf: str = "1h"; exec_tf: str = "15m"
     risk_per_trade: float = 0.01; min_rr: float = 1.0; rr: float = 2.0
-    atr_mult_sl: float = 1.0; atr_mult_tp: float = 2.0; scalper_rr: float = 2.0
+    atr_mult_sl: float = 0.0; atr_mult_tp: float = 2.0; scalper_rr: float = 2.0
+    pullback_atr_mult: float = 0.0
     use_dca: bool = False; dca_max_safety_orders: int = 1
     dca_step_scale: float = 1.0; dca_volume_scale: float = 2.0; dca_tp_scale: float = 1.5
     be_trigger_r: float = 0.0; trailing_stop_trigger_r: float = 0.0; trailing_dist_r: float = 0.0
@@ -1769,10 +1770,15 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # ==========================================================
     # STRICT R:R GEOMETRY
     # ==========================================================
-    entry_target = px
+    # Dynamic Retracement Bidding
+    pullback_dist = current_atr * getattr(cfg, 'pullback_atr_mult', 0.0)
+    if side == 'long':
+        entry_target = px - pullback_dist
+    else:
+        entry_target = px + pullback_dist
 
     if side == 'long':
-        sl = min(base.get("last_swing_low", px), low) - (current_atr * 0.2)
+        sl = min(base.get("last_swing_low", px), low) - (current_atr * getattr(cfg, 'atr_mult_sl', 0.0))
         if sl >= entry_target: return None
         risk_distance = entry_target - sl
 
@@ -1798,7 +1804,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         rr = (tp - entry_target) / risk_distance
 
     else:
-        sl = max(base.get("last_swing_high", px), high) + (current_atr * 0.2)
+        sl = max(base.get("last_swing_high", px), high) + (current_atr * getattr(cfg, 'atr_mult_sl', 0.0))
         if sl <= entry_target: return None
         risk_distance = sl - entry_target
 
