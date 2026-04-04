@@ -31,6 +31,6 @@ def _strategy_overrides(cfg):
     cfg.use_meta_labeling = True
 
     # AI Gates
-    cfg.min_ev = 0.02
-    cfg.min_prob_long = 0.35
-    cfg.min_prob_short = 0.35
+    cfg.min_ev = 0.00
+    cfg.min_prob_long = 0.20
+    cfg.min_prob_short = 0.20
