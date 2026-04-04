@@ -1639,7 +1639,6 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     if bid_ask_imbalance < 0.20: can_short = False
     
     w_pattern = base.get("w_pattern", 0.0); m_pattern = base.get("m_pattern", 0.0)
-    fvg_bull = base.get("fvg_bull", 0.0); fvg_bear = base.get("fvg_bear", 0.0)
     sweep_bull = base.get("sweep_bull_p", 0.0); sweep_bear = base.get("sweep_bear_p", 0.0)
     
     swing_high = pExec.last_sh[iExec] if pExec else 0.0
@@ -1670,53 +1669,132 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     fvg_bull = base.get("fvg_bull", 0)
     fvg_bear = base.get("fvg_bear", 0)
 
-    obv_div_bull = pExec.obv_div_bull[iExec] > 0 if hasattr(pExec, 'obv_div_bull') else False
-    obv_div_bear = pExec.obv_div_bear[iExec] > 0 if hasattr(pExec, 'obv_div_bear') else False
-    ewo_div_bull = pExec.ewo_div_bull[iExec] > 0 if hasattr(pExec, 'ewo_div_bull') else False
-    ewo_div_bear = pExec.ewo_div_bear[iExec] > 0 if hasattr(pExec, 'ewo_div_bear') else False
+    # ==========================================================
+    # STRUCTURAL WICK GEOMETRY & REJECTION GATING (Anti-Falling Knife)
+    # ==========================================================
+    is_bull_rejection = False
+    is_bear_rejection = False
+
+    if pExec:
+        # Check the current bar and the last 2 bars (offsets 0, 1, 2)
+        start_idx = max(0, iExec - 2)
+        for idx in range(start_idx, iExec + 1):
+            if idx >= len(pExec.h): continue
+            c_h = pExec.h[idx]
+            c_l = pExec.l[idx]
+            c_o = pExec.o[idx]
+            c_c = pExec.c[idx]
+            c_range = c_h - c_l
+
+            if c_range > 1e-9:
+                body_top = max(c_o, c_c)
+                body_bot = min(c_o, c_c)
+                upper_wick = (c_h - body_top) / c_range
+                lower_wick = (body_bot - c_l) / c_range
+
+                if lower_wick > 0.20:
+                    is_bull_rejection = True
+                if upper_wick > 0.20:
+                    is_bear_rejection = True
+
+    # Market Maker Trap Exploitation
+    bull_trap_exploited = False
+    bear_trap_exploited = False
+    if pExec and hasattr(pExec, 'rolling_vwap_20') and iExec < len(pExec.rolling_vwap_20):
+        bull_trap_exploited = base.get("sweep_high", 0) > 0 and px < pExec.rolling_vwap_20[iExec]
+        bear_trap_exploited = base.get("sweep_low", 0) > 0 and px > pExec.rolling_vwap_20[iExec]
+
+    # Extract strict divergences from pExec
+    obv_div_bull = False
+    obv_div_bear = False
+    ewo_div_bull = False
+    ewo_div_bear = False
+    if pExec:
+        obv_div_bull = pExec.obv_div_bull[iExec] > 0 if hasattr(pExec, 'obv_div_bull') and iExec < len(pExec.obv_div_bull) else False
+        obv_div_bear = pExec.obv_div_bear[iExec] > 0 if hasattr(pExec, 'obv_div_bear') and iExec < len(pExec.obv_div_bear) else False
+        ewo_div_bull = pExec.ewo_div_bull[iExec] > 0 if hasattr(pExec, 'ewo_div_bull') and iExec < len(pExec.ewo_div_bull) else False
+        ewo_div_bear = pExec.ewo_div_bear[iExec] > 0 if hasattr(pExec, 'ewo_div_bear') and iExec < len(pExec.ewo_div_bear) else False
 
     # STRICT EVALUATION
     setup_type = None
     logic_desc = ""
     side = None
 
-    if can_long:
+    if can_long and is_bull_rejection:
         side = 'long'
-        # 1. Exact ICT OB Mean Threshold Mitigation (Strict Intersection)
-        if ob_bull_ce > 0 and low <= ob_bull_ce and px > ob_bull_bot and base.get("sweep_low", 0) > 0:
+        # 1. ALPHA: Exact ICT OB Mean Threshold Mitigation (Broadened 3-bar window check for low tap)
+        tap_low = min([pExec.l[idx] for idx in range(max(0, iExec-2), iExec+1)]) if pExec else low
+        if ob_bull_ce > 0 and tap_low <= ob_bull_ce and px > ob_bull_bot and base.get("sweep_low", 0) > 0:
             setup_type = "ALPHA_LONG"
-            logic_desc = "Strict OB Mean Threshold Mitigation with Liquidity Sweep."
-        # 2. Elliott Wave 5 Exhaustion + OBV Divergence
+            logic_desc = "OB Mean Threshold Mitigation with Liquidity Sweep."
+
+        # 2. BETA: Elliott Wave 5 Exhaustion + OBV Divergence
         elif ewo_div_bull and obv_div_bull and base.get("bos_up", 0) > 0:
             setup_type = "BETA_LONG"
             logic_desc = "Elliott Wave 5 Exhaustion with OBV Divergence & Structural Shift."
-        # 3. Quasimodo (Strict Left Shoulder Tap)
-        elif base.get("qm_bull", 0) > 0 and low <= base.get("qm_bull", 0) and px > base.get("qm_bull", 0):
-            setup_type = "GAMMA_LONG"
-            logic_desc = "Strict Quasimodo Structural Retest."
-        # 4. Strict FVG Intersection
-        elif fvg_bull > 0 and low <= fvg_bull <= high and px > fvg_bull:
-            setup_type = "DELTA_LONG"
-            logic_desc = "Strict FVG Mitigation."
 
-    if not setup_type and can_short:
+        # 3. GAMMA: Quasimodo (Strict Left Shoulder Tap within 3-bar window)
+        elif base.get("qm_bull", 0) > 0 and tap_low <= base.get("qm_bull", 0) and px > base.get("qm_bull", 0):
+            setup_type = "GAMMA_LONG"
+            logic_desc = "Quasimodo Structural Retest."
+
+        # 4. DELTA: Strict FVG Intersection
+        elif fvg_bull > 0 and tap_low <= fvg_bull and px > fvg_bull:
+            setup_type = "DELTA_LONG"
+            logic_desc = "FVG Mitigation."
+
+        # 5. EPSILON: Fractal/Fibonacci Confluence
+        elif base.get("trend_align_up_3tf", 0) >= 2.0 and (tap_low <= base.get("fib_786_long", 0) or tap_low <= base.get("fib_886_long", 0)) and px > base.get("fib_886_long", 0):
+            setup_type = "EPSILON_LONG"
+            logic_desc = "Fractal Fibonacci Deep Retracement (786/886) with Trend Confluence."
+
+        # 6. ZETA: Auction Market Theory (VWAP/VP + CVD Divergence)
+        elif base.get("cvd_div_bull", 0) > 0 and (tap_low <= base.get("val", 0) or tap_low <= base.get("poc", 0) or tap_low <= base.get("avwap_bull", 0)) and px > tap_low:
+            setup_type = "ZETA_LONG"
+            logic_desc = "Auction Market Liquidity Sweep (VAL/POC/VWAP) with CVD Divergence."
+
+        # 7. OMEGA: Market Maker Trap Exploitation
+        elif bear_trap_exploited and base.get("trend_align_up_3tf", 0) >= 1.0:
+            setup_type = "OMEGA_LONG"
+            logic_desc = "Market Maker Bear Trap Exploited."
+
+    if not setup_type and can_short and is_bear_rejection:
         side = 'short'
-        # 1. Exact ICT OB Mean Threshold Mitigation (Strict Intersection)
-        if ob_bear_ce > 0 and high >= ob_bear_ce and px < ob_bear_top and base.get("sweep_high", 0) > 0:
+        tap_high = max([pExec.h[idx] for idx in range(max(0, iExec-2), iExec+1)]) if pExec else high
+        # 1. ALPHA: Exact ICT OB Mean Threshold Mitigation
+        if ob_bear_ce > 0 and tap_high >= ob_bear_ce and px < ob_bear_top and base.get("sweep_high", 0) > 0:
             setup_type = "ALPHA_SHORT"
-            logic_desc = "Strict OB Mean Threshold Mitigation with Liquidity Sweep."
-        # 2. Elliott Wave 5 Exhaustion + OBV Divergence
+            logic_desc = "OB Mean Threshold Mitigation with Liquidity Sweep."
+
+        # 2. BETA: Elliott Wave 5 Exhaustion + OBV Divergence
         elif ewo_div_bear and obv_div_bear and base.get("bos_down", 0) > 0:
             setup_type = "BETA_SHORT"
             logic_desc = "Elliott Wave 5 Exhaustion with OBV Divergence & Structural Shift."
-        # 3. Quasimodo (Strict Left Shoulder Tap)
-        elif base.get("qm_bear", 0) > 0 and high >= base.get("qm_bear", 0) and px < base.get("qm_bear", 0):
+
+        # 3. GAMMA: Quasimodo (Strict Left Shoulder Tap)
+        elif base.get("qm_bear", 0) > 0 and tap_high >= base.get("qm_bear", 0) and px < base.get("qm_bear", 0):
             setup_type = "GAMMA_SHORT"
-            logic_desc = "Strict Quasimodo Structural Retest."
-        # 4. Strict FVG Intersection
-        elif fvg_bear > 0 and low <= fvg_bear <= high and px < fvg_bear:
+            logic_desc = "Quasimodo Structural Retest."
+
+        # 4. DELTA: Strict FVG Intersection
+        elif fvg_bear > 0 and tap_high >= fvg_bear and px < fvg_bear:
             setup_type = "DELTA_SHORT"
-            logic_desc = "Strict FVG Mitigation."
+            logic_desc = "FVG Mitigation."
+
+        # 5. EPSILON: Fractal/Fibonacci Confluence
+        elif base.get("trend_align_down_3tf", 0) >= 2.0 and (tap_high >= base.get("fib_786_short", 0) or tap_high >= base.get("fib_886_short", 0)) and px < base.get("fib_886_short", 0):
+            setup_type = "EPSILON_SHORT"
+            logic_desc = "Fractal Fibonacci Deep Retracement (786/886) with Trend Confluence."
+
+        # 6. ZETA: Auction Market Theory (VWAP/VP + CVD Divergence)
+        elif base.get("cvd_div_bear", 0) > 0 and (tap_high >= base.get("vah", 0) or tap_high >= base.get("poc", 0) or tap_high >= base.get("avwap_bear", 0)) and px < tap_high:
+            setup_type = "ZETA_SHORT"
+            logic_desc = "Auction Market Liquidity Sweep (VAH/POC/VWAP) with CVD Divergence."
+
+        # 7. OMEGA: Market Maker Trap Exploitation
+        elif bull_trap_exploited and base.get("trend_align_down_3tf", 0) >= 1.0:
+            setup_type = "OMEGA_SHORT"
+            logic_desc = "Market Maker Bull Trap Exploited."
 
     if not setup_type: return None
 

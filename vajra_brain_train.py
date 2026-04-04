@@ -158,7 +158,7 @@ def main(argv=None):
     ap.add_argument("--max-depth", type=int, default=5)
     ap.add_argument("--reg-alpha", type=float, default=0.1)
     ap.add_argument("--reg-lambda", type=float, default=5.0)
-    ap.add_argument("--max-features", type=int, default=20, help="Number of features to keep after RFE")
+    ap.add_argument("--max-features", type=int, default=130, help="Number of features to keep after RFE")
     ap.add_argument("--exclude-cols", type=str, default="")
     ap.add_argument("--weight-decay", type=float, default=0.999)
     ap.add_argument("--wfa-folds", type=int, default=5)
@@ -229,7 +229,8 @@ def main(argv=None):
 
                 # Dynamically calculate features to prevent overfitting based on pos_cases
                 pos_cases_fold = np.sum(y_tr == 1)
-                rfe_features = min(args.max_features, len(base_feature_names))
+                rfe_features = min(args.max_features, max(1, pos_cases_fold // 20))
+                rfe_features = min(rfe_features, len(base_feature_names))
 
                 # Dynamically run RFE on this specific fold
                 estimator_rfe = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
@@ -308,7 +309,8 @@ def main(argv=None):
 
             log.info("Running Final RFE Feature Selection on FULL dataset for Production Model...")
 
-            rfe_features_final = min(args.max_features, len(base_feature_names))
+            rfe_features_final = min(args.max_features, max(1, pos_cases // 20))
+            rfe_features_final = min(rfe_features_final, len(base_feature_names))
 
             estimator_rfe_final = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
             selector_final = RFE(estimator_rfe_final, n_features_to_select=rfe_features_final, step=1)
