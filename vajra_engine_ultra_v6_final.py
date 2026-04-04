@@ -1844,6 +1844,11 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         win_prob = brain.predict_probability(strat, side, base, adv, iExec, px, pExec)
         if win_prob is None: return None
 
+        if side == 'long' and win_prob < getattr(cfg, 'min_prob_long', 0.50):
+            return None
+        if side == 'short' and win_prob < getattr(cfg, 'min_prob_short', 0.50):
+            return None
+
         ev = (win_prob * rr) - ((1.0 - win_prob) * 1.0)
         if ev <= getattr(cfg, 'min_ev', 0.05): return None
 
