@@ -56,12 +56,12 @@ def run_backtest_with_brain(args, preloaded=None):
     # Load Data (Including BTC Context)
     if preloaded is None: pre = bt_helpers._preload_or_fetch(args)
     else: pre = preloaded
-    htf, mtf, ltf = pre.htf, pre.mtf, pre.ltf
+    macro_tf, swing_tf, htf, exec_tf = pre.macro_tf, pre.swing_tf, pre.htf, pre.exec_tf
 
-    for df in (htf, mtf, ltf):
+    for df in (macro_tf, swing_tf, htf, exec_tf):
         df.sort_values("timestamp", inplace=True, ignore_index=True)
 
-    btc = pre.btc if pre.btc is not None else htf.copy()
+    btc = pre.btc if pre.btc is not None else macro_tf.copy()
 
     # --- CALC BTC TREND (Aligned) ---
     # Safe check in case btc is empty or incorrectly shaped
@@ -69,74 +69,99 @@ def run_backtest_with_brain(args, preloaded=None):
         btc.sort_values("timestamp", inplace=True, ignore_index=True)
         btc_c = btc["close"].values
     else:
-        btc = pd.DataFrame({'timestamp': ltf['timestamp'], 'close': ltf['close']})
+        btc = pd.DataFrame({'timestamp': exec_tf['timestamp'], 'close': exec_tf['close']})
         btc_c = btc["close"].values
-    
+
     # Use 100 EMA for 4h context
     btc_ema_trend = _ema_np(btc_c, 100)
     btc_bull_arr = (btc_c > btc_ema_trend).astype(float)
-    
-    # Align to LTF (Shift 1 for Lag)
-    btc_s = pd.Series(btc_bull_arr, index=btc["timestamp"]).shift(1)
-    btc_aligned = btc_s.reindex(ltf["timestamp"], method='ffill').fillna(1.0).values
 
-    # Load Brains
-    brain = BrainLearningManager(cfg, args.brain_long_path, args.brain_short_path)
+    # Align to exec_tf using searchsorted for reliable alignment (no shift/reindex gaps)
+    btc_ts = btc["timestamp"].values
+    exec_ts = exec_tf["timestamp"].values
+    btc_idx = np.searchsorted(btc_ts, exec_ts, side='right') - 1
+    # Use idx-1 to enforce lag (only fully closed BTC candles)
+    btc_idx_lagged = np.clip(btc_idx - 1, 0, len(btc_bull_arr) - 1)
+    btc_aligned = btc_bull_arr[btc_idx_lagged]
+
+    # Load Brains (pass directory containing brain_*.joblib files)
+    brain = BrainLearningManager(cfg, args.brain_long_path)
     
     log.info("Generating V7 FEATURES via Engine...")
-    pre_h, pre_m, pre_l = Precomp(htf), Precomp(mtf), Precomp(ltf)
-    pre_map = {"htf": pre_h, "mtf": pre_m, "ltf": pre_l}
-    
+    pMacro, pSwing, pHtf, pExec = Precomp(macro_tf), Precomp(swing_tf), Precomp(htf), Precomp(exec_tf)
+    pre_map = {"macro_tf": pMacro, "swing_tf": pSwing, "htf": pHtf, "exec_tf": pExec}
+
     btc_val_arr = btc["close"].values
-    btc_s_close = pd.Series(btc_val_arr, index=btc["timestamp"]).shift(1).reindex(ltf["timestamp"], method='ffill').fillna(0.0).values
-    
+    btc_idx_close = np.searchsorted(btc_ts, exec_ts, side='right') - 1
+    btc_idx_close_lagged = np.clip(btc_idx_close - 1, 0, len(btc_val_arr) - 1)
+    btc_s_close = btc_val_arr[btc_idx_close_lagged]
+
     adv_features = precompute_v6_features(
-        pre_h, pre_m, pre_l, htf, mtf, ltf, 
+        pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf,
         btc_close_arr=btc_s_close
     )
     
     tm = TradeManager(cfg, ExchangeWrapper(cfg), MemoryManager(cfg), brain)
     all_closed = []
-    
+    daily_pnl_r = 0.0
+    daily_reset_ts = 0
+    max_daily_loss_r = getattr(cfg, 'max_daily_loss_r', 5.0)
+    MS_PER_DAY = 86_400_000
+
     since_ms = bt_helpers.parse_time(args.since)
     until_ms = bt_helpers.parse_time(args.until)
-    ltf_iter = ltf[(ltf["timestamp"] >= since_ms) & (ltf["timestamp"] < until_ms)]
+    exec_iter = exec_tf[(exec_tf["timestamp"] >= since_ms) & (exec_tf["timestamp"] < until_ms)]
 
     log.info("Downloading Macro Context for Backtester...")
-    dxy_aligned = fetch_macro_trend("DX=F", ltf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(ltf))
-    spx_aligned = fetch_macro_trend("ES=F", ltf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(ltf))
-    oi_aligned = fetch_delta_oi(ExchangeWrapper(cfg), cfg.symbol, cfg.ltf, ltf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(ltf))
+    dxy_aligned = fetch_macro_trend("DX=F", exec_tf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(exec_tf))
+    spx_aligned = fetch_macro_trend("ES=F", exec_tf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(exec_tf))
+    oi_aligned = fetch_delta_oi(ExchangeWrapper(cfg), cfg.symbol, cfg.exec_tf, exec_tf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(exec_tf))
 
-    for row in ltf_iter.itertuples():
+    for row in exec_iter.itertuples():
         ts = int(row.timestamp)
-        iH = np.searchsorted(htf['timestamp'].values, ts, side='right') - 1
-        iM = np.searchsorted(mtf['timestamp'].values, ts, side='right') - 1
-        iL = int(row.Index)
+        iMacro = np.searchsorted(macro_tf['timestamp'].values, ts, side='right') - 1
+        iSwing = np.searchsorted(swing_tf['timestamp'].values, ts, side='right') - 1
+        iHtf = np.searchsorted(htf['timestamp'].values, ts, side='right') - 1
+        iExec = int(row.Index)
 
-        if iH < 0 or iM < 0: continue
+        if iMacro < 0 or iSwing < 0 or iHtf < 0: continue
 
         bar = {"o": row.open, "h": row.high, "l": row.low, "c": row.close}
         closed = tm.step_bar(cfg.symbol, float(row.open), float(row.high), float(row.low), float(row.close), ts=ts)
-        all_closed.extend(closed)
+        if closed:
+            all_closed.extend(closed)
+            for t in closed:
+                daily_pnl_r += t.get('pnl_r', 0.0)
 
-        btc_val = btc_aligned[iL] if iL < len(btc_aligned) else 1.0
-        
+        # Reset daily PnL counter at day boundary
+        if daily_reset_ts == 0:
+            daily_reset_ts = ts
+        if ts - daily_reset_ts >= MS_PER_DAY:
+            daily_pnl_r = 0.0
+            daily_reset_ts = ts
+
+        # Daily loss circuit breaker
+        if daily_pnl_r <= -max_daily_loss_r:
+            continue
+
+        btc_val = btc_aligned[iExec] if iExec < len(btc_aligned) else 1.0
+
         extras = {
-            "btc_bullish": btc_val, 
+            "btc_bullish": btc_val,
             "funding_rate": 0.0,
             "btcd_trend": 0.0,
-            "dxy_trend": float(dxy_aligned[iL]) if getattr(cfg, 'use_macro_data', False) and iL < len(dxy_aligned) else 0.0,
-            "spx_trend": float(spx_aligned[iL]) if getattr(cfg, 'use_macro_data', False) and iL < len(spx_aligned) else 0.0,
-            "delta_oi": float(oi_aligned[iL]) if getattr(cfg, 'use_macro_data', False) and iL < len(oi_aligned) else 0.0,
+            "dxy_trend": float(dxy_aligned[iExec]) if getattr(cfg, 'use_macro_data', False) and iExec < len(dxy_aligned) else 0.0,
+            "spx_trend": float(spx_aligned[iExec]) if getattr(cfg, 'use_macro_data', False) and iExec < len(spx_aligned) else 0.0,
+            "delta_oi": float(oi_aligned[iExec]) if getattr(cfg, 'use_macro_data', False) and iExec < len(oi_aligned) else 0.0,
             "bid_ask_imbalance": 0.5,
             "macro_sentiment": 0.0
         }
 
-        base = confluence_features(cfg, htf, mtf, ltf, iH, iM, iL, pre_map, extras=extras)
-        base["timestamp"] = ts 
+        base = confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, max(0, iMacro-1), max(0, iSwing-1), max(0, iHtf-1), iExec, precomp=pre_map, extras=extras)
+        base["timestamp"] = ts
         base["symbol"] = cfg.symbol
 
-        plan = plan_trade_with_brain(cfg, brain, base, adv_features, iH, iM, iL, pre_l)
+        plan = plan_trade_with_brain(cfg, brain, base, adv_features, iExec, pExec)
         if plan: tm.submit_plan(plan, bar)
 
     dur = time.perf_counter() - start_t

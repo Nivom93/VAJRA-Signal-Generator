@@ -66,23 +66,36 @@ class MacroFetcher:
     def _fetch_data(self):
         try:
             import yfinance as yf
+            dxy_fetched = False
             for t in ["DX-Y.NYB", "UUP", "DX=F"]:
                 try:
                     dxy_c = yf.Ticker(t).history(period="5d")['Close']
                     if not dxy_c.empty:
                         self.state["dxy_val"] = float(dxy_c.iloc[-2]) if len(dxy_c) > 1 else 0.0
+                        self.state["dxy_last_update"] = time.time()
+                        dxy_fetched = True
                         break
                 except Exception:
                     continue
+            if not dxy_fetched:
+                # Mark as stale if not updated in 24h
+                if time.time() - self.state.get("dxy_last_update", 0) > 86400:
+                    self.state["dxy_val"] = 0.0
 
+            spx_fetched = False
             for t in ["^GSPC", "SPY", "ES=F"]:
                 try:
                     spx_c = yf.Ticker(t).history(period="5d")['Close']
                     if not spx_c.empty:
                         self.state["spx_val"] = float(spx_c.iloc[-2]) if len(spx_c) > 1 else 0.0
+                        self.state["spx_last_update"] = time.time()
+                        spx_fetched = True
                         break
                 except Exception:
                     continue
+            if not spx_fetched:
+                if time.time() - self.state.get("spx_last_update", 0) > 86400:
+                    self.state["spx_val"] = 0.0
         except ImportError:
             log.warning("yfinance not installed. Macro data fetch skipped.")
 
@@ -310,13 +323,17 @@ def _fetch_macro_context(ex, global_cache, cfg):
 
     return btc_bullish, btcd_trend, 0.0, 0.0, oracle_sentiment_val
 
-def drop_forming_candle(df, timeframe_str):
+def drop_forming_candle(df, timeframe_str, exchange_time_ms=None):
     if df is None or df.empty:
         return df
     # Parse timeframe to milliseconds (e.g., '1h' -> 3600000)
     tf_seconds = ccxt.Exchange.parse_timeframe(timeframe_str)
     tf_ms = tf_seconds * 1000
-    current_time_ms = int(time.time() * 1000)
+    # Use exchange server time if available, otherwise local time with safety buffer
+    if exchange_time_ms is not None:
+        current_time_ms = exchange_time_ms
+    else:
+        current_time_ms = int(time.time() * 1000) - 5000  # 5s safety buffer
 
     # CCXT OHLCV index/timestamp is the open time of the candle
     last_candle_open_ms = df.index[-1] if isinstance(df.index[-1], (int, np.integer)) else df['timestamp'].iloc[-1]
@@ -328,8 +345,19 @@ def drop_forming_candle(df, timeframe_str):
 async def run_bot(args):
     """Main Bot Loop"""
     
-    # Dictionary to track the last time a specific strategy fired
+    # Persistent cooldown tracking (survives restarts)
+    cooldown_path = Path("data_cache/strategy_cooldowns.json")
+    cooldown_path.parent.mkdir(parents=True, exist_ok=True)
     strategy_cooldowns = {}
+    try:
+        if cooldown_path.exists():
+            with open(cooldown_path, 'r') as f:
+                strategy_cooldowns = json.load(f)
+            # Prune expired entries
+            now = int(time.time())
+            strategy_cooldowns = {k: v for k, v in strategy_cooldowns.items() if now - v < 7200}
+    except Exception:
+        strategy_cooldowns = {}
     COOLDOWN_SECONDS = 7200  # 2 hours
 
     # 1. Init Config
@@ -398,8 +426,11 @@ async def run_bot(args):
 async def bot_loop(cfg, ex, tm, executor, brain, market_cache, global_cache, macro_fetcher, strategy_cooldowns, COOLDOWN_SECONDS, args):
     btc_bullish = 1.0
     btcd_trend = 0.0 # Default Neutral
-    
+
     last_processed_ts = {}
+    daily_pnl_r = 0.0
+    daily_reset_date = datetime.now(timezone.utc).date()
+    max_daily_loss_r = getattr(cfg, 'max_daily_loss_r', 5.0)
 
     while True:
         try:
@@ -437,11 +468,17 @@ async def bot_loop(cfg, ex, tm, executor, brain, market_cache, global_cache, mac
                 market_cache[symbol]["exec_tf"] = pd.concat([market_cache[symbol]["exec_tf"], new_exec]).drop_duplicates(subset=["timestamp"], keep="last").tail(500).reset_index(drop=True)
                 exec_tf = market_cache[symbol]["exec_tf"]
                 
+                # Fetch exchange server time for accurate forming candle detection
+                try:
+                    exchange_time_ms = ex.client.milliseconds()
+                except Exception:
+                    exchange_time_ms = None
+
                 # Smart Slicing: Dynamically drop the forming candle based on its timeframe
-                macro_tf = drop_forming_candle(macro_tf, cfg.macro_tf)
-                swing_tf = drop_forming_candle(swing_tf, cfg.swing_tf)
-                htf = drop_forming_candle(htf, cfg.htf)
-                exec_tf = drop_forming_candle(exec_tf, cfg.exec_tf)
+                macro_tf = drop_forming_candle(macro_tf, cfg.macro_tf, exchange_time_ms)
+                swing_tf = drop_forming_candle(swing_tf, cfg.swing_tf, exchange_time_ms)
+                htf = drop_forming_candle(htf, cfg.htf, exchange_time_ms)
+                exec_tf = drop_forming_candle(exec_tf, cfg.exec_tf, exchange_time_ms)
 
                 if exec_tf.empty or len(macro_tf) < 2 or len(swing_tf) < 2 or len(htf) < 2 or len(exec_tf) < 2: continue
                 
@@ -518,7 +555,19 @@ async def bot_loop(cfg, ex, tm, executor, brain, market_cache, global_cache, mac
 
                 if closed:
                     for t in closed:
-                        log.info(f"[{symbol}] ⛔ Trade Closed: {t['side']} PnL: {t['pnl_r']:.2f}R")
+                        log.info(f"[{symbol}] Trade Closed: {t['side']} PnL: {t['pnl_r']:.2f}R")
+                        daily_pnl_r += t.get('pnl_r', 0.0)
+
+                # Reset daily PnL at midnight UTC
+                today = datetime.now(timezone.utc).date()
+                if today != daily_reset_date:
+                    daily_pnl_r = 0.0
+                    daily_reset_date = today
+
+                # Daily loss circuit breaker
+                if daily_pnl_r <= -max_daily_loss_r:
+                    log.warning(f"[{symbol}] DAILY LOSS LIMIT HIT ({daily_pnl_r:.2f}R). Halting new entries.")
+                    continue
 
                 # Step 2: Look for New Entries
                 plan = plan_trade_with_brain(cfg, brain, base, adv_features, iExec, pExec)
@@ -532,8 +581,13 @@ async def bot_loop(cfg, ex, tm, executor, brain, market_cache, global_cache, mac
                         log.info(f"⏳ Cooldown active for {strat_key}. Skipping duplicate signal.")
                         continue
 
-                    # If we pass the cooldown, update the dictionary and proceed
+                    # If we pass the cooldown, update the dictionary and persist
                     strategy_cooldowns[strat_key] = current_ts
+                    try:
+                        with open(cooldown_path, 'w') as f:
+                            json.dump(strategy_cooldowns, f)
+                    except Exception:
+                        pass
 
                     # SPOOFING DEFENSE: Block limit orders if facing a massive spoofed wall
                     if plan.get("type", cfg.execution_style) == 'limit':

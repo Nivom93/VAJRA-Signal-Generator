@@ -190,9 +190,10 @@ def _build_full_features(base, adv_features, iMacro, iSwing, iHtf, iExec, len_ma
 
     full_feats["rsi_14"] = float(pExec.rsi14[iExec]) if iExec < len(pExec.rsi14) else 50.0
 
+    # Session flags instead of raw hour/day (generalize better across regimes)
     entry_dt = pd.to_datetime(ts, unit="ms", utc=True)
-    full_feats["hour_of_day"] = entry_dt.hour
-    full_feats["day_of_week"] = entry_dt.dayofweek
+    full_feats["is_london_session"] = 1.0 if 7 <= entry_dt.hour <= 16 else 0.0
+    full_feats["is_ny_session"] = 1.0 if 13 <= entry_dt.hour <= 22 else 0.0
     return full_feats
 
 def main():
@@ -260,8 +261,12 @@ def main():
         btc_ema_trend = _ema_np(btc_c, 100)
         btc_bull_arr = (btc_c > btc_ema_trend).astype(float)
 
-        btc_s = pd.Series(btc_bull_arr, index=btc["timestamp"]).shift(1)
-        btc_aligned = btc_s.reindex(exec_tf["timestamp"], method='ffill').fillna(1.0).values
+        # Align BTC trend using searchsorted for reliable alignment
+        btc_ts = btc["timestamp"].values
+        export_exec_ts = exec_tf["timestamp"].values
+        btc_idx = np.searchsorted(btc_ts, export_exec_ts, side='right') - 1
+        btc_idx_lagged = np.clip(btc_idx - 1, 0, len(btc_bull_arr) - 1)
+        btc_aligned = btc_bull_arr[btc_idx_lagged]
 
         macro_tf.sort_values("timestamp", inplace=True); macro_tf.reset_index(drop=True, inplace=True)
         swing_tf.sort_values("timestamp", inplace=True); swing_tf.reset_index(drop=True, inplace=True)
@@ -300,9 +305,9 @@ def main():
         pMacro, pSwing, pHtf, pExec = Precomp(macro_tf), Precomp(swing_tf), Precomp(htf), Precomp(exec_tf)
         pre_map = {"macro_tf": pMacro, "swing_tf": pSwing, "htf": pHtf, "exec_tf": pExec}
 
-        btc_s_close = pd.Series(btc_c, index=btc["timestamp"]).shift(1).reindex(exec_tf["timestamp"], method='ffill').fillna(0.0).values
-        if len(btc_s_close) != len(exec_tf):
-            btc_s_close = np.resize(btc_s_close, len(exec_tf))
+        btc_idx_close = np.searchsorted(btc_ts, export_exec_ts, side='right') - 1
+        btc_idx_close_lagged = np.clip(btc_idx_close - 1, 0, len(btc_c) - 1)
+        btc_s_close = btc_c[btc_idx_close_lagged]
 
         log.info("Generating V7 features...")
         adv_features = precompute_v6_features(
@@ -339,18 +344,19 @@ def main():
                 meta = next((m for m in open_meta if m["key"] == cl.get("key")), None)
                 if meta:
                     open_meta.remove(meta)
-                    # STRICT BINARY SIGNAL LABELING
 
-                    # STRICT ASYMMETRIC TARGET LABELING (2.2R to 3.0R HUNTING)
                     if -50 < cl["pnl_r"] < 50:
-                        # Time-in-Market constraint: 192 bars = 48 hours on 15m timeframe
                         bars_open = cl.get("bars_open", 0)
+                        pnl_r = cl["pnl_r"]
 
-                        # ONLY label as a WIN (1.0) if the trade actually hit its planned Take Profit structurally.
+                        # Soft meta-label: reward profitable trades proportionally,
+                        # with bonus for hitting structural TP quickly
                         if cl.get("exit_reason") == "tp" and bars_open <= 192:
                             meta_label = 1.0
+                        elif pnl_r > 0.5:
+                            # Profitable trades that didn't hit exact TP still have edge
+                            meta_label = min(pnl_r / meta.get("rr", 2.0), 0.9)
                         else:
-                            # Scalps, weak wins, and losses are treated as a LOSS (0.0) to force the AI to seek explosive momentum
                             meta_label = 0.0
 
                         events.append({
