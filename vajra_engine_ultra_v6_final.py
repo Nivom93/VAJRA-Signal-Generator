@@ -1393,6 +1393,13 @@ class BrainLearningManager:
                     side = parts[2]
                     brain_data = joblib.load(str(model_file))
 
+                    # Load XGBoost model natively if saved in new format
+                    if "xgb_model_file" in brain_data:
+                        import xgboost as xgb
+                        clf = xgb.XGBClassifier()
+                        clf.load_model(str(p / brain_data["xgb_model_file"]))
+                        brain_data["classifier"] = clf
+
                     self.brains[(strat, side)] = brain_data
                     loaded += 1
             except Exception as e:

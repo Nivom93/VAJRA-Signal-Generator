@@ -353,11 +353,15 @@ def main(argv=None):
 
             valid_edge = bool(avg_roc > 0.50 and avg_prec > 0.10)
 
+            # Save XGBoost model natively (version-agnostic JSON format)
+            xgb_model_file = out_dir / f"brain_{strat_clean}_{side}.xgb"
+            final_model.save_model(str(xgb_model_file))
+
             pipeline = {
-                "classifier": final_model,
+                "xgb_model_file": str(xgb_model_file.name),
                 "feature_names": selected_features,
                 "training_args": vars(args),
-                "model": "xgboost_uncalibrated_boosted",
+                "model": "xgboost_native",
                 "wfa_acc": avg_acc,
                 "wfa_prec": avg_prec,
                 "wfa_roc_auc": avg_roc,
