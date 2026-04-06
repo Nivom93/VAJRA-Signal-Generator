@@ -18,9 +18,9 @@ def _strategy_overrides(cfg):
     cfg.time_in_force_decay = 24           # 24 bars (6h) for order TTL
 
     # Structural Geometry (relaxed for higher trade frequency)
-    cfg.min_rr = 1.5           # Accept 1.5R+ setups (captures more movements)
+    cfg.min_rr = 1.8           # Accept 1.8R+ setups (tighter targets = higher win rate)
     cfg.atr_mult_sl = 0.05     # Tight 0.05 ATR micro-buffer (setup invalidation + whisker)
-    cfg.atr_mult_tp = 3.5      # Max TP cap at 3.5R
+    cfg.atr_mult_tp = 3.0      # Max TP cap at 3.0R (closer targets hit more often)
 
     # Risk & Concurrency
     cfg.risk_per_trade = 0.01
