@@ -354,7 +354,7 @@ def main(argv=None):
             valid_edge = bool(avg_roc > 0.50 and avg_prec > 0.10)
 
             # Save XGBoost model natively (version-agnostic JSON format)
-            xgb_model_file = out_dir / f"brain_{strat_clean}_{side}.xgb"
+            xgb_model_file = out_dir / f"brain_{strat_clean}_{side}.json"
             final_model.get_booster().save_model(str(xgb_model_file))
 
             pipeline = {
