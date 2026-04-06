@@ -522,7 +522,8 @@ class AadhiraayanEngineConfig:
     exchange_id: str = "bybit"; market_type: str = "swap"; symbol: str = "BTC/USDT"
     macro_tf: str = "1d"; swing_tf: str = "4h"; htf: str = "1h"; exec_tf: str = "15m"
     risk_per_trade: float = 0.01; min_rr: float = 1.0; rr: float = 2.0
-    atr_mult_sl: float = 1.0; atr_mult_tp: float = 2.0; scalper_rr: float = 2.0
+    atr_mult_sl: float = 0.0; atr_mult_tp: float = 2.0; scalper_rr: float = 2.0
+    pullback_atr_mult: float = 0.0
     use_dca: bool = False; dca_max_safety_orders: int = 1
     dca_step_scale: float = 1.0; dca_volume_scale: float = 2.0; dca_tp_scale: float = 1.5
     be_trigger_r: float = 0.0; trailing_stop_trigger_r: float = 0.0; trailing_dist_r: float = 0.0
@@ -887,12 +888,12 @@ def _ensure_precomp(df, pre): return pre if isinstance(pre, Precomp) else Precom
 
 def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, iHtf, iExec, precomp=None, extras=None):
     if iMacro is None: iMacro=len(macro_tf)-1; iSwing=len(swing_tf)-1; iHtf=len(htf)-1; iExec=len(exec_tf)-1
-    
-    # Strictly aligned pointers for fully closed candles to prevent lookahead
-    idx_Macro = max(0, iMacro)
-    idx_Swing = max(0, iSwing)
-    idx_Htf = max(0, iHtf)
-    idx_Exec = iExec
+
+    # Respect the passed-in indices (callers pass iMacro-1 etc. to prevent lookahead)
+    idx_Macro = max(0, min(iMacro, len(macro_tf)-1))
+    idx_Swing = max(0, min(iSwing, len(swing_tf)-1))
+    idx_Htf = max(0, min(iHtf, len(htf)-1))
+    idx_Exec = max(0, min(iExec, len(exec_tf)-1))
     
     pMacro=_ensure_precomp(macro_tf, precomp.get("macro_tf") if precomp else None)
     pSwing=_ensure_precomp(swing_tf, precomp.get("swing_tf") if precomp else None)
@@ -1034,10 +1035,10 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
     f["asian_range_swept_dn"] = 1.0 if pExec.l[idx_Exec] < pExec.asian_low[idx_Exec] and pExec.c[idx_Exec] > pExec.asian_low[idx_Exec] else 0.0
     
     ts = exec_tf.timestamp.iloc[idx_Exec]
-    f["hour_of_day"] = float((int(ts) // 3600000) % 24)
-    
-    dt = pd.to_datetime(ts, unit='ms', utc=True)
-    f["day_of_week"] = float(dt.dayofweek)
+    # Killzone session flags (generalize better than raw hour/day features)
+    hour = (int(ts) // 3600000) % 24
+    f["is_london_session"] = 1.0 if 7 <= hour <= 16 else 0.0
+    f["is_ny_session"] = 1.0 if 13 <= hour <= 22 else 0.0
 
     if extras:
         f["funding_rate"] = float(extras.get("funding_rate", 0.0))
@@ -1180,7 +1181,7 @@ def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, b
     else:
         f['eth_btc_rsi'] = np.full(len(cl), 50.0)
         f['eth_btc_trend_score'] = np.zeros(len(cl))
-        f['rel_strength_divergence'] = np.zeros(cl)
+        f['rel_strength_divergence'] = np.zeros(len(cl))
 
     # ---------------------------------------------------------
     # DIRECTIVE 1: MULTI-TIMEFRAME VOLATILITY SQUEEZE
@@ -1268,16 +1269,16 @@ def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, b
     bull_div_rsi = np.zeros(n)
     bear_div_rsi = np.zeros(n)
     for i in range(15, n):
-        # Lookback window of 15 bars
+        # Lookback window of 15 PRIOR bars (exclude current bar to avoid tautology)
         window_cl = cl[i-15:i]
         window_rsi = rsi[i-15:i]
 
-        # Bullish Divergence check
+        # Bullish Divergence: price makes lower low vs prior window low, RSI makes higher low
         min_idx = np.argmin(window_cl)
         if cl[i] < window_cl[min_idx] and rsi[i] > window_rsi[min_idx]:
             bull_div_rsi[i] = 1.0
 
-        # Bearish Divergence check
+        # Bearish Divergence: price makes higher high vs prior window high, RSI makes lower high
         max_idx = np.argmax(window_cl)
         if cl[i] > window_cl[max_idx] and rsi[i] < window_rsi[max_idx]:
             bear_div_rsi[i] = 1.0
@@ -1726,53 +1727,68 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     bull_ewo = any(pExec.ewo_div_bull[max(0, iExec-5):iExec+1] > 0) if pExec and hasattr(pExec, 'ewo_div_bull') else False
     bear_ewo = any(pExec.ewo_div_bear[max(0, iExec-5):iExec+1] > 0) if pExec and hasattr(pExec, 'ewo_div_bear') else False
 
+    # OB freshness gate: discard stale order blocks (>20 bars old)
+    ob_bull_fresh = base.get("bars_since_ob_bull", 0) <= 20
+    ob_bear_fresh = base.get("bars_since_ob_bear", 0) <= 20
+
+    # FVG tolerance: allow near-gap mitigation within 0.1% of FVG level
+    fvg_tol = px * 0.001
+
+    # QM zone tolerance: accept entries within 0.3 ATR of QM level
+    qm_zone = current_atr * 0.3
+
     if can_long:
         side = 'long'
-        # 1. Exact ICT OB Mean Threshold Mitigation
-        if ob_bull_ce > 0 and low <= ob_bull_ce and px > ob_bull_bot:
+        # 1. ICT OB Mean Threshold Mitigation (fresh OBs only)
+        if ob_bull_ce > 0 and ob_bull_fresh and low <= ob_bull_ce and px > ob_bull_bot:
             setup_type = "ALPHA_LONG"
             logic_desc = "Strict OB Mean Threshold Mitigation."
-        # 2. Elliott Wave 5 Exhaustion or OBV Divergence with BOS
-        elif (bull_ewo or bull_obv) and base.get("bos_up", 0) > 0:
+        # 2. Elliott Wave 5 Exhaustion or OBV Divergence with BOS + momentum confirmation
+        elif (bull_ewo or bull_obv) and base.get("bos_up", 0) > 0 and base.get("rsi_14", 50) < 45:
             setup_type = "BETA_LONG"
-            logic_desc = "Elliott Wave 5 or OBV Divergence with Structural Shift."
-        # 3. Quasimodo (Strict Left Shoulder Tap)
-        elif base.get("qm_bull", 0) > 0 and low <= base.get("qm_bull", 0) and px > base.get("qm_bull", 0):
+            logic_desc = "Elliott Wave 5 or OBV Divergence with Structural Shift + RSI confirmation."
+        # 3. Quasimodo (zone-based entry instead of exact price)
+        elif base.get("qm_bull", 0) > 0 and low <= (base.get("qm_bull", 0) + qm_zone) and px > base.get("qm_bull", 0):
             setup_type = "GAMMA_LONG"
             logic_desc = "Strict Quasimodo Structural Retest."
-        # 4. Strict FVG Intersection
-        elif fvg_bull > 0 and low <= fvg_bull <= high and px > fvg_bull:
+        # 4. FVG Mitigation with tolerance band
+        elif fvg_bull > 0 and low <= (fvg_bull + fvg_tol) and px > (fvg_bull - fvg_tol):
             setup_type = "DELTA_LONG"
-            logic_desc = "Strict FVG Mitigation."
+            logic_desc = "FVG Mitigation with tolerance."
 
     if not setup_type and can_short:    # <--- MUST BE 'if', NOT 'elif'
         side = 'short'
-        # 1. Exact ICT OB Mean Threshold Mitigation
-        if ob_bear_ce > 0 and high >= ob_bear_ce and px < ob_bear_top:
+        # 1. ICT OB Mean Threshold Mitigation (fresh OBs only)
+        if ob_bear_ce > 0 and ob_bear_fresh and high >= ob_bear_ce and px < ob_bear_top:
             setup_type = "ALPHA_SHORT"
             logic_desc = "Strict OB Mean Threshold Mitigation."
-        # 2. Elliott Wave 5 Exhaustion or OBV Divergence with BOS
-        elif (bear_ewo or bear_obv) and base.get("bos_down", 0) > 0:
+        # 2. Elliott Wave 5 Exhaustion or OBV Divergence with BOS + momentum confirmation
+        elif (bear_ewo or bear_obv) and base.get("bos_down", 0) > 0 and base.get("rsi_14", 50) > 55:
             setup_type = "BETA_SHORT"
-            logic_desc = "Elliott Wave 5 or OBV Divergence with Structural Shift."
-        # 3. Quasimodo (Strict Left Shoulder Tap)
-        elif base.get("qm_bear", 0) > 0 and high >= base.get("qm_bear", 0) and px < base.get("qm_bear", 0):
+            logic_desc = "Elliott Wave 5 or OBV Divergence with Structural Shift + RSI confirmation."
+        # 3. Quasimodo (zone-based entry)
+        elif base.get("qm_bear", 0) > 0 and high >= (base.get("qm_bear", 0) - qm_zone) and px < base.get("qm_bear", 0):
             setup_type = "GAMMA_SHORT"
             logic_desc = "Strict Quasimodo Structural Retest."
-        # 4. Strict FVG Intersection
-        elif fvg_bear > 0 and low <= fvg_bear <= high and px < fvg_bear:
+        # 4. FVG Mitigation with tolerance band
+        elif fvg_bear > 0 and low <= (fvg_bear + fvg_tol) and px < (fvg_bear + fvg_tol):
             setup_type = "DELTA_SHORT"
-            logic_desc = "Strict FVG Mitigation."
+            logic_desc = "FVG Mitigation with tolerance."
 
     if not setup_type: return None
 
     # ==========================================================
     # STRICT R:R GEOMETRY
     # ==========================================================
-    entry_target = px
+    # Dynamic Retracement Bidding
+    pullback_dist = current_atr * getattr(cfg, 'pullback_atr_mult', 0.0)
+    if side == 'long':
+        entry_target = px - pullback_dist
+    else:
+        entry_target = px + pullback_dist
 
     if side == 'long':
-        sl = min(base.get("last_swing_low", px), low) - (current_atr * 0.2)
+        sl = min(base.get("last_swing_low", px), low) - (current_atr * getattr(cfg, 'atr_mult_sl', 0.0))
         if sl >= entry_target: return None
         risk_distance = entry_target - sl
 
@@ -1798,7 +1814,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         rr = (tp - entry_target) / risk_distance
 
     else:
-        sl = max(base.get("last_swing_high", px), high) + (current_atr * 0.2)
+        sl = max(base.get("last_swing_high", px), high) + (current_atr * getattr(cfg, 'atr_mult_sl', 0.0))
         if sl <= entry_target: return None
         risk_distance = sl - entry_target
 
