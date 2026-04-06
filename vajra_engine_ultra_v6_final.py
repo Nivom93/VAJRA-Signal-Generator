@@ -144,12 +144,31 @@ def _strict_divergence_np(close, indicator, last_sl, last_sh):
     n = len(close)
     div_bull = np.zeros(n, dtype=np.float64)
     div_bear = np.zeros(n, dtype=np.float64)
+    # Track indicator value at the most recent swing low/high
+    ind_at_sl = np.zeros(n, dtype=np.float64)
+    ind_at_sh = np.zeros(n, dtype=np.float64)
+    prev_sl_price = 0.0
+    prev_sh_price = 0.0
+    for i in range(1, n):
+        # Detect when swing low changes (new swing low confirmed)
+        if last_sl[i] != last_sl[i-1] and last_sl[i] > 0:
+            ind_at_sl[i] = indicator[i]
+            prev_sl_price = last_sl[i]
+        else:
+            ind_at_sl[i] = ind_at_sl[i-1]
+        # Detect when swing high changes
+        if last_sh[i] != last_sh[i-1] and last_sh[i] > 0:
+            ind_at_sh[i] = indicator[i]
+            prev_sh_price = last_sh[i]
+        else:
+            ind_at_sh[i] = ind_at_sh[i-1]
+
     for i in range(10, n):
-        # Strict Bullish Div: Lower Low in Price, STRICTLY Higher Low in Indicator
-        if close[i] < last_sl[i] and indicator[i] > indicator[i-5]:
+        # Bullish Div: Price makes lower low vs last swing, indicator makes higher low
+        if close[i] < last_sl[i] and ind_at_sl[i] > 0 and indicator[i] > ind_at_sl[i]:
             div_bull[i] = 1.0
-        # Strict Bearish Div: Higher High in Price, STRICTLY Lower High in Indicator
-        if close[i] > last_sh[i] and indicator[i] < indicator[i-5]:
+        # Bearish Div: Price makes higher high vs last swing, indicator makes lower high
+        if close[i] > last_sh[i] and ind_at_sh[i] != 0 and indicator[i] < ind_at_sh[i]:
             div_bear[i] = 1.0
     return div_bull, div_bear
 
@@ -350,33 +369,57 @@ def _detect_patterns(open_p, high, low, close, swing_hi, swing_lo, last_sh, last
     w_pattern = np.zeros(n); m_pattern = np.zeros(n)
     fvg_bull = np.zeros(n); fvg_bear = np.zeros(n)
     sweep_bull = np.zeros(n); sweep_bear = np.zeros(n)
-    
+
     for i in range(5, n):
-        # 1. Double Bottom (W Pattern)
-        if swing_lo[i-1] == 0 and low[i] > low[i-1]: 
-            prev_sl = last_sl[i-5] 
+        # 1. Double Bottom (W Pattern) — with tolerance zone
+        if swing_lo[i-1] == 0 and low[i] > low[i-1]:
+            prev_sl = last_sl[i-5]
             if prev_sl > 0:
                 dist = abs(low[i] - prev_sl) / prev_sl
-                if dist < 0.005: w_pattern[i] = 1.0
+                if dist < 0.008: w_pattern[i] = 1.0
 
-        # 2. Double Top (M Pattern)
+        # 2. Double Top (M Pattern) — with tolerance zone
         if swing_hi[i-1] == 0 and high[i] < high[i-1]:
             prev_sh = last_sh[i-5]
             if prev_sh > 0:
                 dist = abs(high[i] - prev_sh) / prev_sh
-                if dist < 0.005: m_pattern[i] = 1.0
+                if dist < 0.008: m_pattern[i] = 1.0
 
-        # 3. Fair Value Gaps (FVG)
-        if low[i] > high[i-2]: fvg_bull[i] = low[i]
-        if high[i] < low[i-2]: fvg_bear[i] = high[i]
+        # 3. Fair Value Gaps — include near-gaps (gap within 0.15% of closing = near-FVG)
+        exact_gap_bull = low[i] - high[i-2]
+        if exact_gap_bull > 0:
+            fvg_bull[i] = high[i-2] + exact_gap_bull * 0.5  # CE of the gap
+        elif close[i] > 0:
+            near_gap_pct = (high[i-2] - low[i]) / close[i]
+            if near_gap_pct < 0.0015 and near_gap_pct >= 0:
+                fvg_bull[i] = (low[i] + high[i-2]) * 0.5
 
-        # 4. Liquidity Sweeps (False Breakout)
+        exact_gap_bear = low[i-2] - high[i]
+        if exact_gap_bear > 0:
+            fvg_bear[i] = high[i] + exact_gap_bear * 0.5  # CE of the gap
+        elif close[i] > 0:
+            near_gap_pct = (high[i] - low[i-2]) / close[i]
+            if near_gap_pct < 0.0015 and near_gap_pct >= 0:
+                fvg_bear[i] = (high[i] + low[i-2]) * 0.5
+
+        # 4. Liquidity Sweeps — require rejection wick (close back inside structure zone)
         curr_sl = last_sl[i]
-        if low[i] < curr_sl and close[i] > curr_sl: sweep_bull[i] = 1.0
-            
+        if curr_sl > 0 and low[i] < curr_sl and close[i] > curr_sl:
+            # Validate: lower wick must be significant (swept + rejected)
+            rng = high[i] - low[i]
+            if rng > 1e-9:
+                lower_wick = (min(open_p[i], close[i]) - low[i]) / rng
+                if lower_wick > 0.15:
+                    sweep_bull[i] = 1.0
+
         curr_sh = last_sh[i]
-        if high[i] > curr_sh and close[i] < curr_sh: sweep_bear[i] = 1.0
-            
+        if curr_sh > 0 and high[i] > curr_sh and close[i] < curr_sh:
+            rng = high[i] - low[i]
+            if rng > 1e-9:
+                upper_wick = (high[i] - max(open_p[i], close[i])) / rng
+                if upper_wick > 0.15:
+                    sweep_bear[i] = 1.0
+
     return w_pattern, m_pattern, fvg_bull, fvg_bear, sweep_bull, sweep_bear
 
 # ==============================================================================
@@ -665,9 +708,15 @@ def _last_swing_prices_strict(high, low, cvd, sh_conf, sl_conf, right=3):
 def _bos_flags(close, high, low, lsh, lsl):
     n=close.size; bos_up=np.zeros(n,dtype=np.uint8); bos_dn=np.zeros(n,dtype=np.uint8)
     sweep_up=np.zeros(n,dtype=np.uint8); sweep_dn=np.zeros(n,dtype=np.uint8)
-    for i in range(n):
-        if close[i] > lsh[i]: bos_up[i]=1
-        if close[i] < lsl[i]: bos_dn[i]=1
+    for i in range(1, n):
+        rng = high[i] - low[i]
+        if rng < 1e-12:
+            continue
+        # BOS requires displacement: candle body must be >50% of range (strong commitment)
+        body_pct = abs(close[i] - close[i-1]) / rng if rng > 0 else 0.0
+        if close[i] > lsh[i] and body_pct > 0.4: bos_up[i]=1
+        if close[i] < lsl[i] and body_pct > 0.4: bos_dn[i]=1
+        # Sweeps: wick beyond structure but close back inside (liquidity grab)
         if high[i] > lsh[i] and close[i] < lsh[i]: sweep_up[i]=1
         if low[i] < lsl[i] and close[i] > lsl[i]: sweep_dn[i]=1
     return bos_up, bos_dn, sweep_up, sweep_dn
@@ -803,16 +852,27 @@ def _detect_wyckoff(h, l, c, vol_spike, cvd_div_bull, cvd_div_bear, last_sl, las
     spring = np.zeros(n)
     upthrust = np.zeros(n)
     for i in range(5, n):
-        # Spring: Sweeps last_sl, but closes back above it, with vol_spike and cvd_div
+        # Spring: Sweeps last_sl, closes back above it
+        # Requires: volume confirmation OR CVD divergence (within 3-bar window)
         curr_sl = last_sl[i-1]
         if curr_sl > 0 and l[i] < curr_sl and c[i] > curr_sl:
-            if vol_spike[i] > 0 and cvd_div_bull[i] > 0:
+            has_vol = False
+            has_cvd = False
+            for k in range(max(0, i-2), i+1):
+                if vol_spike[k] > 0: has_vol = True
+                if cvd_div_bull[k] > 0: has_cvd = True
+            if has_vol or has_cvd:
                 spring[i] = 1.0
 
-        # Upthrust: Sweeps last_sh, but closes back below it, with vol_spike and cvd_div
+        # Upthrust: Sweeps last_sh, closes back below it
         curr_sh = last_sh[i-1]
         if curr_sh > 0 and h[i] > curr_sh and c[i] < curr_sh:
-            if vol_spike[i] > 0 and cvd_div_bear[i] > 0:
+            has_vol = False
+            has_cvd = False
+            for k in range(max(0, i-2), i+1):
+                if vol_spike[k] > 0: has_vol = True
+                if cvd_div_bear[k] > 0: has_cvd = True
+            if has_vol or has_cvd:
                 upthrust[i] = 1.0
     return spring, upthrust
 
@@ -1600,294 +1660,338 @@ def plan_trade(cfg, f):
 
 def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     px = base.get("price")
-    if not px: return None
-    
-    current_atr = pExec.atr14[iExec] if pExec and iExec < len(pExec.atr14) else (px * 0.01)
-    sl_atr = base.get("atr_exec_pct",0)*0.01*px*cfg.atr_mult_sl
-    
-    # DYNAMIC TP SCALING
-    bb_width = base.get("bb_width", 0.0)
-    if getattr(cfg, 'dynamic_tp_enabled', True):
-        # Scale structurally relative to Bollinger Band volatility expansion
-        bb_mult = min(max(bb_width / 2.0, 1.5), 5.0)
-        tp_atr_dist = current_atr * bb_mult
-    else:
-        tp_atr_dist = base.get("atr_exec_pct",0)*0.01*px*cfg.atr_mult_tp
-        
-    structure_buffer = 0.5 * current_atr
-    
-    funding = base.get("funding_rate", 0.0)
-    delta_oi = base.get("delta_oi", 0.0) # Passed from CCXT real-time
-    btc_bullish = base.get("btc_bullish", 1.0) 
-    btcd_trend = base.get("btcd_trend", 0.0) 
-    dxy_trend = base.get("dxy_trend", 0.0)
-    spx_trend = base.get("spx_trend", 0.0)
-    bid_ask_imbalance = base.get("bid_ask_imbalance", 0.5)
-    
-    adx_val = base.get("adx", 25.0)
-    rvol = base.get("rvol", 1.0)
-    rsi = base.get("rsi", 50.0)
-    cvd_roc = base.get("cvd_roc", 0.0)
-    poc = base.get("poc", px)
-    vah = base.get("vah", px)
-    val = base.get("val", px)
-    
+    if not px or not pExec: return None
+
+    current_atr = pExec.atr14[iExec] if iExec < len(pExec.atr14) else (px * 0.01)
+    if current_atr < 1e-12: current_atr = px * 0.01
+    sl_buffer = current_atr * getattr(cfg, 'atr_mult_sl', 0.15)
+
+    # ==========================================================
+    # PHASE 1: MULTI-TIMEFRAME REGIME DETECTION
+    # ==========================================================
+    macro_up = base.get("macro_up", 0)
+    macro_down = base.get("macro_down", 0)
+    swing_up = base.get("swing_up", 0)
+    swing_down = base.get("swing_down", 0)
+    htf_up = base.get("htf_up", 0)
+    htf_down = base.get("htf_down", 0)
+
+    bullish_tf_count = int(macro_up > 0) + int(swing_up > 0) + int(htf_up > 0)
+    bearish_tf_count = int(macro_down > 0) + int(swing_down > 0) + int(htf_down > 0)
+
+    # HARD REGIME GATE: Block counter-trend trades in strong unidirectional trends
     can_long = True
     can_short = True
-    
-    # SPOOFING PROTECTION
+    is_reversal_context = False
+
+    if bearish_tf_count == 3:
+        # All 3 higher TFs bearish — block longs unless reversal evidence
+        can_long = False
+    if bullish_tf_count == 3:
+        # All 3 higher TFs bullish — block shorts unless reversal evidence
+        can_short = False
+
+    # ==========================================================
+    # PHASE 2: REVERSAL DETECTION (Override regime gate when evidence is overwhelming)
+    # ==========================================================
+    # Divergence detection (5-bar temporal lookback)
+    bull_obv = any(pExec.obv_div_bull[max(0, iExec-5):iExec+1] > 0) if hasattr(pExec, 'obv_div_bull') else False
+    bear_obv = any(pExec.obv_div_bear[max(0, iExec-5):iExec+1] > 0) if hasattr(pExec, 'obv_div_bear') else False
+    bull_ewo = any(pExec.ewo_div_bull[max(0, iExec-5):iExec+1] > 0) if hasattr(pExec, 'ewo_div_bull') else False
+    bear_ewo = any(pExec.ewo_div_bear[max(0, iExec-5):iExec+1] > 0) if hasattr(pExec, 'ewo_div_bear') else False
+    bull_cvd = any(pExec.cvd_div_bull[max(0, iExec-5):iExec+1] > 0) if hasattr(pExec, 'cvd_div_bull') else False
+    bear_cvd = any(pExec.cvd_div_bear[max(0, iExec-5):iExec+1] > 0) if hasattr(pExec, 'cvd_div_bear') else False
+    bull_rsi_div = any(pExec.div_bull[max(0, iExec-5):iExec+1] > 0) if hasattr(pExec, 'div_bull') else False
+    bear_rsi_div = any(pExec.div_bear[max(0, iExec-5):iExec+1] > 0) if hasattr(pExec, 'div_bear') else False
+
+    # Wyckoff spring/upthrust (3-bar lookback)
+    has_spring = any(pExec.spring[max(0, iExec-2):iExec+1] > 0) if hasattr(pExec, 'spring') else False
+    has_upthrust = any(pExec.upthrust[max(0, iExec-2):iExec+1] > 0) if hasattr(pExec, 'upthrust') else False
+
+    # Count bullish reversal evidence
+    bull_reversal_evidence = int(bull_obv) + int(bull_ewo) + int(bull_cvd) + int(bull_rsi_div) + int(has_spring)
+    bear_reversal_evidence = int(bear_obv) + int(bear_ewo) + int(bear_cvd) + int(bear_rsi_div) + int(has_upthrust)
+
+    # Unlock counter-trend if 3+ reversal signals converge
+    if not can_long and bull_reversal_evidence >= 3:
+        can_long = True
+        is_reversal_context = True
+    if not can_short and bear_reversal_evidence >= 3:
+        can_short = True
+        is_reversal_context = True
+
+    # ==========================================================
+    # PHASE 3: ORACLE MACRO GATE
+    # ==========================================================
+    oracle_sentiment = base.get("macro_sentiment", 0.0)
+    btc_bullish = base.get("btc_bullish", 1.0)
+    bid_ask_imbalance = base.get("bid_ask_imbalance", 0.5)
+
+    # Oracle hard veto: deeply negative sentiment blocks longs, deeply positive blocks shorts
+    if oracle_sentiment < -0.6 and not is_reversal_context:
+        can_long = False
+    if oracle_sentiment > 0.6 and not is_reversal_context:
+        can_short = False
+
+    # BTC regime: if BTC is bearish and this isn't BTC, reduce long conviction
+    if btc_bullish < 0.5 and not is_reversal_context:
+        if bearish_tf_count >= 2:
+            can_long = False
+
+    # Spoofing defense
     if bid_ask_imbalance > 0.80: can_long = False
     if bid_ask_imbalance < 0.20: can_short = False
-    
-    w_pattern = base.get("w_pattern", 0.0); m_pattern = base.get("m_pattern", 0.0)
-    sweep_bull = base.get("sweep_bull_p", 0.0); sweep_bear = base.get("sweep_bear_p", 0.0)
-    
-    swing_high = pExec.last_sh[iExec] if pExec else 0.0
-    swing_low = pExec.last_sl[iExec] if pExec else 0.0
-    
-    htf_sh = adv.get('htf_swing_high', [0.0])[iExec] if 'htf_swing_high' in adv else 0.0
-    htf_sl = adv.get('htf_swing_low', [0.0])[iExec] if 'htf_swing_low' in adv else 0.0
-    mtf_sh = adv.get('mtf_swing_high', [0.0])[iExec] if 'mtf_swing_high' in adv else 0.0
-    mtf_sl = adv.get('mtf_swing_low', [0.0])[iExec] if 'mtf_swing_low' in adv else 0.0
 
-    reversion_penalty = 1.0
-    if adx_val > 30: reversion_penalty = 0.5 
-    
-    # PRE-FETCH STRICT LOGIC VARIABLES
+    if not can_long and not can_short: return None
+
+    # ==========================================================
+    # PHASE 4: PRECISE STRUCTURAL ENTRY DETECTION
+    # ==========================================================
     px = pExec.c[iExec]
     low = pExec.l[iExec]
     high = pExec.h[iExec]
+    adx_val = base.get("adx", 25.0)
 
     ob_bull_bot = base.get("ob_bull_bot", 0)
     ob_bull_top = base.get("ob_bull_top", 0)
     ob_bear_bot = base.get("ob_bear_bot", 0)
     ob_bear_top = base.get("ob_bear_top", 0)
-
-    # Consequent Encroachment / Mean Threshold of Order Blocks
     ob_bull_ce = (ob_bull_top + ob_bull_bot) / 2 if ob_bull_top > 0 else 0
     ob_bear_ce = (ob_bear_top + ob_bear_bot) / 2 if ob_bear_bot > 0 else 0
 
+    ob_bull_fresh = 0 < base.get("bars_since_ob_bull", 999) <= 20
+    ob_bear_fresh = 0 < base.get("bars_since_ob_bear", 999) <= 20
+
     fvg_bull = base.get("fvg_bull", 0)
     fvg_bear = base.get("fvg_bear", 0)
+    fvg_tol = px * 0.001
+    qm_zone = current_atr * 0.3
 
-    # ==========================================================
-    # STRUCTURAL WICK GEOMETRY & REJECTION GATING (Anti-Falling Knife)
-    # ==========================================================
+    sweep_bull = base.get("sweep_bull_p", 0.0)
+    sweep_bear = base.get("sweep_bear_p", 0.0)
+
+    # Wick rejection detection (3-bar window)
     is_bull_rejection = False
     is_bear_rejection = False
+    for idx in range(max(0, iExec - 2), iExec + 1):
+        if idx >= len(pExec.h): continue
+        c_range = pExec.h[idx] - pExec.l[idx]
+        if c_range > 1e-9:
+            body_top = max(pExec.o[idx], pExec.c[idx])
+            body_bot = min(pExec.o[idx], pExec.c[idx])
+            if (body_bot - pExec.l[idx]) / c_range > 0.25: is_bull_rejection = True
+            if (pExec.h[idx] - body_top) / c_range > 0.25: is_bear_rejection = True
 
-    if pExec:
-        # Check the current bar and the last 2 bars (offsets 0, 1, 2)
-        start_idx = max(0, iExec - 2)
-        for idx in range(start_idx, iExec + 1):
-            if idx >= len(pExec.h): continue
-            c_h = pExec.h[idx]
-            c_l = pExec.l[idx]
-            c_o = pExec.o[idx]
-            c_c = pExec.c[idx]
-            c_range = c_h - c_l
+    # Volume confirmation (current or recent bar)
+    has_volume = any(pExec.vol_spike[max(0, iExec-2):iExec+1] > 0) if hasattr(pExec, 'vol_spike') else False
+    rvol = base.get("rvol", 1.0)
+    has_elevated_vol = rvol > 1.2
 
-            if c_range > 1e-9:
-                body_top = max(c_o, c_c)
-                body_bot = min(c_o, c_c)
-                upper_wick = (c_h - body_top) / c_range
-                lower_wick = (body_bot - c_l) / c_range
-
-                if lower_wick > 0.20:
-                    is_bull_rejection = True
-                if upper_wick > 0.20:
-                    is_bear_rejection = True
-
-    # Market Maker Trap Exploitation
-    bull_trap_exploited = False
-    bear_trap_exploited = False
-    if pExec and hasattr(pExec, 'rolling_vwap_20') and iExec < len(pExec.rolling_vwap_20):
-        bull_trap_exploited = base.get("sweep_high", 0) > 0 and px < pExec.rolling_vwap_20[iExec]
-        bear_trap_exploited = base.get("sweep_low", 0) > 0 and px > pExec.rolling_vwap_20[iExec]
-
-    # Extract strict divergences from pExec
-    obv_div_bull = False
-    obv_div_bear = False
-    ewo_div_bull = False
-    ewo_div_bear = False
-    if pExec:
-        obv_div_bull = pExec.obv_div_bull[iExec] > 0 if hasattr(pExec, 'obv_div_bull') and iExec < len(pExec.obv_div_bull) else False
-        obv_div_bear = pExec.obv_div_bear[iExec] > 0 if hasattr(pExec, 'obv_div_bear') and iExec < len(pExec.obv_div_bear) else False
-        ewo_div_bull = pExec.ewo_div_bull[iExec] > 0 if hasattr(pExec, 'ewo_div_bull') and iExec < len(pExec.ewo_div_bull) else False
-        ewo_div_bear = pExec.ewo_div_bear[iExec] > 0 if hasattr(pExec, 'ewo_div_bear') and iExec < len(pExec.ewo_div_bear) else False
-
-    # STRICT EVALUATION
     setup_type = None
     logic_desc = ""
     side = None
 
-    # Temporal Divergence Lookbacks (Divergence can form prior to structural break)
-    bull_obv = any(pExec.obv_div_bull[max(0, iExec-5):iExec+1] > 0) if pExec and hasattr(pExec, 'obv_div_bull') else False
-    bear_obv = any(pExec.obv_div_bear[max(0, iExec-5):iExec+1] > 0) if pExec and hasattr(pExec, 'obv_div_bear') else False
-    bull_ewo = any(pExec.ewo_div_bull[max(0, iExec-5):iExec+1] > 0) if pExec and hasattr(pExec, 'ewo_div_bull') else False
-    bear_ewo = any(pExec.ewo_div_bear[max(0, iExec-5):iExec+1] > 0) if pExec and hasattr(pExec, 'ewo_div_bear') else False
-
-    # OB freshness gate: discard stale order blocks (>20 bars old)
-    ob_bull_fresh = base.get("bars_since_ob_bull", 0) <= 20
-    ob_bear_fresh = base.get("bars_since_ob_bear", 0) <= 20
-
-    # FVG tolerance: allow near-gap mitigation within 0.1% of FVG level
-    fvg_tol = px * 0.001
-
-    # QM zone tolerance: accept entries within 0.3 ATR of QM level
-    qm_zone = current_atr * 0.3
-
+    # ---- LONG SETUPS ----
     if can_long:
         side = 'long'
-        # 1. ICT OB Mean Threshold Mitigation (fresh OBs only)
-        if ob_bull_ce > 0 and ob_bull_fresh and low <= ob_bull_ce and px > ob_bull_bot:
-            setup_type = "ALPHA_LONG"
-            logic_desc = "Strict OB Mean Threshold Mitigation."
-        # 2. Elliott Wave 5 Exhaustion or OBV Divergence with BOS + momentum confirmation
-        elif (bull_ewo or bull_obv) and base.get("bos_up", 0) > 0 and base.get("rsi_14", 50) < 45:
-            setup_type = "BETA_LONG"
-            logic_desc = "Elliott Wave 5 or OBV Divergence with Structural Shift + RSI confirmation."
-        # 3. Quasimodo (zone-based entry instead of exact price)
-        elif base.get("qm_bull", 0) > 0 and low <= (base.get("qm_bull", 0) + qm_zone) and px > base.get("qm_bull", 0):
-            setup_type = "GAMMA_LONG"
-            logic_desc = "Strict Quasimodo Structural Retest."
-        # 4. FVG Mitigation with tolerance band
-        elif fvg_bull > 0 and low <= (fvg_bull + fvg_tol) and px > (fvg_bull - fvg_tol):
-            setup_type = "DELTA_LONG"
-            logic_desc = "FVG Mitigation with tolerance."
 
-    if not setup_type and can_short:    # <--- MUST BE 'if', NOT 'elif'
+        # ALPHA_LONG: OB Consequent Encroachment + Rejection Wick
+        if (ob_bull_ce > 0 and ob_bull_fresh and low <= ob_bull_ce and px > ob_bull_bot
+                and is_bull_rejection):
+            setup_type = "ALPHA_LONG"
+            logic_desc = "OB CE mitigation with wick rejection confirmation."
+
+        # BETA_LONG: Multi-divergence with structural BOS + momentum exhaustion
+        elif ((bull_ewo or bull_obv or bull_cvd) and base.get("bos_up", 0) > 0
+                and base.get("rsi_14", 50) < 45):
+            setup_type = "BETA_LONG"
+            logic_desc = "Divergence confluence + BOS + RSI exhaustion."
+
+        # GAMMA_LONG: Quasimodo retest with volume
+        elif (base.get("qm_bull", 0) > 0
+                and low <= (base.get("qm_bull", 0) + qm_zone) and px > base.get("qm_bull", 0)
+                and (has_volume or has_elevated_vol)):
+            setup_type = "GAMMA_LONG"
+            logic_desc = "QM structural retest with volume confirmation."
+
+        # DELTA_LONG: FVG mitigation
+        elif (fvg_bull > 0 and low <= (fvg_bull + fvg_tol) and px > (fvg_bull - fvg_tol)
+                and is_bull_rejection):
+            setup_type = "DELTA_LONG"
+            logic_desc = "FVG CE mitigation with rejection."
+
+        # EPSILON_LONG: Wyckoff Spring (sweep + reclaim + volume)
+        elif has_spring and sweep_bull > 0:
+            setup_type = "EPSILON_LONG"
+            logic_desc = "Wyckoff spring: liquidity sweep + reclaim."
+
+    # ---- SHORT SETUPS ----
+    if not setup_type and can_short:
         side = 'short'
-        # 1. ICT OB Mean Threshold Mitigation (fresh OBs only)
-        if ob_bear_ce > 0 and ob_bear_fresh and high >= ob_bear_ce and px < ob_bear_top:
+
+        # ALPHA_SHORT: OB CE + Rejection Wick
+        if (ob_bear_ce > 0 and ob_bear_fresh and high >= ob_bear_ce and px < ob_bear_top
+                and is_bear_rejection):
             setup_type = "ALPHA_SHORT"
-            logic_desc = "Strict OB Mean Threshold Mitigation."
-        # 2. Elliott Wave 5 Exhaustion or OBV Divergence with BOS + momentum confirmation
-        elif (bear_ewo or bear_obv) and base.get("bos_down", 0) > 0 and base.get("rsi_14", 50) > 55:
+            logic_desc = "OB CE mitigation with wick rejection confirmation."
+
+        # BETA_SHORT: Multi-divergence with BOS + momentum exhaustion
+        elif ((bear_ewo or bear_obv or bear_cvd) and base.get("bos_down", 0) > 0
+                and base.get("rsi_14", 50) > 55):
             setup_type = "BETA_SHORT"
-            logic_desc = "Elliott Wave 5 or OBV Divergence with Structural Shift + RSI confirmation."
-        # 3. Quasimodo (zone-based entry)
-        elif base.get("qm_bear", 0) > 0 and high >= (base.get("qm_bear", 0) - qm_zone) and px < base.get("qm_bear", 0):
+            logic_desc = "Divergence confluence + BOS + RSI exhaustion."
+
+        # GAMMA_SHORT: QM retest with volume
+        elif (base.get("qm_bear", 0) > 0
+                and high >= (base.get("qm_bear", 0) - qm_zone) and px < base.get("qm_bear", 0)
+                and (has_volume or has_elevated_vol)):
             setup_type = "GAMMA_SHORT"
-            logic_desc = "Strict Quasimodo Structural Retest."
-        # 4. FVG Mitigation with tolerance band
-        elif fvg_bear > 0 and low <= (fvg_bear + fvg_tol) and px < (fvg_bear + fvg_tol):
+            logic_desc = "QM structural retest with volume confirmation."
+
+        # DELTA_SHORT: FVG mitigation
+        elif (fvg_bear > 0 and low <= (fvg_bear + fvg_tol) and px < (fvg_bear + fvg_tol)
+                and is_bear_rejection):
             setup_type = "DELTA_SHORT"
-            logic_desc = "FVG Mitigation with tolerance."
+            logic_desc = "FVG CE mitigation with rejection."
+
+        # EPSILON_SHORT: Wyckoff Upthrust
+        elif has_upthrust and sweep_bear > 0:
+            setup_type = "EPSILON_SHORT"
+            logic_desc = "Wyckoff upthrust: liquidity sweep + reclaim."
 
     if not setup_type: return None
 
     # ==========================================================
-    # STRICT R:R GEOMETRY
+    # PHASE 5: SETUP-SPECIFIC PRECISE SL (Invalidation Point)
     # ==========================================================
-    # Dynamic Retracement Bidding
     pullback_dist = current_atr * getattr(cfg, 'pullback_atr_mult', 0.0)
-    if side == 'long':
-        entry_target = px - pullback_dist
-    else:
-        entry_target = px + pullback_dist
+    entry_target = px - pullback_dist if side == 'long' else px + pullback_dist
+
+    swing_high = pExec.last_sh[iExec]
+    swing_low = pExec.last_sl[iExec]
+
+    htf_sh = adv.get('htf_swing_high', np.zeros(1))
+    htf_sl = adv.get('htf_swing_low', np.zeros(1))
+    mtf_sh = adv.get('mtf_swing_high', np.zeros(1))
+    mtf_sl = adv.get('mtf_swing_low', np.zeros(1))
+    htf_sh_val = float(htf_sh[iExec]) if hasattr(htf_sh, '__getitem__') and iExec < len(htf_sh) else 0.0
+    htf_sl_val = float(htf_sl[iExec]) if hasattr(htf_sl, '__getitem__') and iExec < len(htf_sl) else 0.0
+    mtf_sh_val = float(mtf_sh[iExec]) if hasattr(mtf_sh, '__getitem__') and iExec < len(mtf_sh) else 0.0
+    mtf_sl_val = float(mtf_sl[iExec]) if hasattr(mtf_sl, '__getitem__') and iExec < len(mtf_sl) else 0.0
+
+    strat_base = setup_type.split("_")[0]
 
     if side == 'long':
-        sl = min(base.get("last_swing_low", px), low) - (current_atr * getattr(cfg, 'atr_mult_sl', 0.0))
+        # Setup-specific SL: use the tightest structural invalidation
+        if strat_base == "ALPHA" and ob_bull_bot > 0:
+            sl = ob_bull_bot - sl_buffer  # Below OB body = OB invalidated
+        elif strat_base == "GAMMA" and base.get("qm_bull", 0) > 0:
+            sl = base.get("qm_bull", 0) - sl_buffer  # Below QM pivot
+        elif strat_base == "DELTA" and fvg_bull > 0:
+            # Below FVG low boundary
+            fvg_low = fvg_bull - fvg_tol
+            sl = fvg_low - sl_buffer
+        else:
+            sl = min(swing_low, low) - sl_buffer
+
         if sl >= entry_target: return None
         risk_distance = entry_target - sl
 
-        possible_tps = [base.get("ob_bear_bot", 0), base.get("vah", 0), htf_sh, mtf_sh]
-        valid_tps = sorted([t for t in possible_tps if t > entry_target])
-
-        if not valid_tps:
-            valid_tps = [entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 3.0))]
+        # Structural TP targets
+        possible_tps = [t for t in [ob_bear_bot, base.get("vah", 0), htf_sh_val, mtf_sh_val] if t > entry_target]
+        possible_tps.sort()
+        if not possible_tps:
+            possible_tps = [entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 3.0))]
 
         selected_tp = None
-        for t in valid_tps:
+        for t in possible_tps:
             curr_rr = (t - entry_target) / risk_distance
-            if curr_rr >= getattr(cfg, 'min_rr', 1.8):
-                if curr_rr > getattr(cfg, 'atr_mult_tp', 3.0):
-                    selected_tp = entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 3.0))
+            if curr_rr >= getattr(cfg, 'min_rr', 2.0):
+                if curr_rr > getattr(cfg, 'atr_mult_tp', 3.5):
+                    selected_tp = entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 3.5))
                 else:
                     selected_tp = t
                 break
 
         if selected_tp is None: return None
-
         tp = selected_tp
         rr = (tp - entry_target) / risk_distance
 
-    else:
-        sl = max(base.get("last_swing_high", px), high) + (current_atr * getattr(cfg, 'atr_mult_sl', 0.0))
+    else:  # short
+        if strat_base == "ALPHA" and ob_bear_top > 0:
+            sl = ob_bear_top + sl_buffer
+        elif strat_base == "GAMMA" and base.get("qm_bear", 0) > 0:
+            sl = base.get("qm_bear", 0) + sl_buffer
+        elif strat_base == "DELTA" and fvg_bear > 0:
+            fvg_high = fvg_bear + fvg_tol
+            sl = fvg_high + sl_buffer
+        else:
+            sl = max(swing_high, high) + sl_buffer
+
         if sl <= entry_target: return None
         risk_distance = sl - entry_target
 
-        possible_tps = [base.get("ob_bull_top", 0), base.get("val", 0), htf_sl, mtf_sl]
-        valid_tps = sorted([t for t in possible_tps if t > 0 and t < entry_target], reverse=True)
-
-        if not valid_tps:
-            valid_tps = [entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 3.0))]
+        possible_tps = [t for t in [ob_bull_top, base.get("val", 0), htf_sl_val, mtf_sl_val] if 0 < t < entry_target]
+        possible_tps.sort(reverse=True)
+        if not possible_tps:
+            possible_tps = [entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 3.5))]
 
         selected_tp = None
-        for t in valid_tps:
+        for t in possible_tps:
             curr_rr = (entry_target - t) / risk_distance
-            if curr_rr >= getattr(cfg, 'min_rr', 1.8):
-                if curr_rr > getattr(cfg, 'atr_mult_tp', 3.0):
-                    selected_tp = entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 3.0))
+            if curr_rr >= getattr(cfg, 'min_rr', 2.0):
+                if curr_rr > getattr(cfg, 'atr_mult_tp', 3.5):
+                    selected_tp = entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 3.5))
                 else:
                     selected_tp = t
                 break
 
         if selected_tp is None: return None
-
         tp = selected_tp
         rr = (entry_target - tp) / risk_distance
 
-    # Nominal Target Distance Gate
-    price_target_dist_pct = abs(tp - entry_target) / entry_target * 100.0
-    if price_target_dist_pct < getattr(cfg, 'min_target_dist_pct', 0.15):
+    # Minimum target distance gate
+    if abs(tp - entry_target) / entry_target * 100.0 < getattr(cfg, 'min_target_dist_pct', 0.15):
         return None
 
     # ==========================================================
-    # DYNAMIC EV GATE & ANALYSIS
+    # PHASE 6: AI PROBABILITY GATE & EV CALCULATION
     # ==========================================================
     ev = rr
     risk_factor = 1.0
-    parts = setup_type.split("_")
-    strat = parts[0]
+    strat = strat_base
+    win_prob = 0.5
 
-    # True Structural Reversal Warning
-    rev_warn = base.get("last_swing_low", px) if side == 'long' else base.get("last_swing_high", px)
-    analysis_str = "No AI active."
+    rev_warn = swing_low if side == 'long' else swing_high
+    analysis_str = f"SETUP: {setup_type}. {logic_desc}"
 
     if brain:
-        win_prob = brain.predict_probability(strat, side, base, adv, iExec, px, pExec)
-        if win_prob is None: return None
+        prob = brain.predict_probability(strat, side, base, adv, iExec, px, pExec)
+        if prob is None: return None
+        win_prob = prob
 
-        if side == 'long' and win_prob < getattr(cfg, 'min_prob_long', 0.50):
-            return None
-        if side == 'short' and win_prob < getattr(cfg, 'min_prob_short', 0.50):
+        min_prob = getattr(cfg, 'min_prob_long', 0.50) if side == 'long' else getattr(cfg, 'min_prob_short', 0.50)
+        if win_prob < min_prob:
             return None
 
         ev = (win_prob * rr) - ((1.0 - win_prob) * 1.0)
-        if ev <= getattr(cfg, 'min_ev', 0.05): return None
+        if ev <= getattr(cfg, 'min_ev', 0.0): return None
 
-        edge = ev
         if getattr(cfg, 'dynamic_risk_scaling', True):
-            base_risk = 1.0 + (edge ** 1.5)
-            risk_factor = min(base_risk, getattr(cfg, 'max_risk_factor', 2.5))
-        else:
-            risk_factor = 1.0
+            risk_factor = min(1.0 + (ev ** 1.5), getattr(cfg, 'max_risk_factor', 2.5))
 
-        prob_desc = "HIGH CONFIDENCE" if win_prob > 0.60 else "EDGE"
+        regime = "REVERSAL" if is_reversal_context else "TREND"
+        confidence = "HIGH" if win_prob > 0.60 else "MODERATE"
         analysis_str = (
-            f"🚨 SETUP: {setup_type}. LOGIC: {logic_desc} "
-            f"AI PROB: {win_prob*100:.1f}% ({prob_desc} - EV: {ev:.2f}R). "
-            f"ENTRY: {entry_target:.2f}. TARGET: {tp:.2f} ({rr:.2f} RR). "
-            f"⚠️ REVERSAL WARNING: Close manually if market structure violates {rev_warn:.2f}."
+            f"SETUP: {setup_type} [{regime}]. {logic_desc} "
+            f"AI: {win_prob*100:.1f}% ({confidence}, EV: {ev:.2f}R). "
+            f"R:R {rr:.1f}. TF alignment: {bullish_tf_count}B/{bearish_tf_count}S. "
+            f"Invalidation: {rev_warn:.2f}."
         )
 
-    best_plan = {
+    return {
         "side": side, "entry": entry_target, "sl": sl, "tp": tp, "rr": rr,
-        "prob": win_prob if brain else 0.5, # Compatibility
-        "key": f"{setup_type}_{side}", "features": base,
+        "prob": win_prob, "key": f"{setup_type}_{side}", "features": base,
         "risk_factor": risk_factor, "strategy": setup_type, "type": "market",
         "analysis": analysis_str
     }
-    return best_plan
