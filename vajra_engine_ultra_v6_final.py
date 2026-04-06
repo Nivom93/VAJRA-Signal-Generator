@@ -1396,9 +1396,9 @@ class BrainLearningManager:
                     # Load XGBoost model natively if saved in new format
                     if "xgb_model_file" in brain_data:
                         import xgboost as xgb
-                        clf = xgb.XGBClassifier()
-                        clf.load_model(str(p / brain_data["xgb_model_file"]))
-                        brain_data["classifier"] = clf
+                        booster = xgb.Booster()
+                        booster.load_model(str(p / brain_data["xgb_model_file"]))
+                        brain_data["booster"] = booster
 
                     self.brains[(strat, side)] = brain_data
                     loaded += 1
@@ -1413,8 +1413,12 @@ class BrainLearningManager:
         try:
             vec = self._build_vec(side, base, adv, iExec, px, pExec, b['feature_names'])
             vec = np.clip(np.nan_to_num(vec, nan=0.0), -1e10, 1e10).astype(np.float32)
-            # Classifier predict_proba logic
-            prob = b['classifier'].predict_proba(vec)[0][1]
+            if "booster" in b:
+                import xgboost as xgb
+                dmat = xgb.DMatrix(vec, feature_names=b['feature_names'])
+                prob = float(b['booster'].predict(dmat)[0])
+            else:
+                prob = b['classifier'].predict_proba(vec)[0][1]
             return prob
         except Exception as e:
             log.error(f"Brain Prediction Failed: {e}\n{traceback.format_exc()}")

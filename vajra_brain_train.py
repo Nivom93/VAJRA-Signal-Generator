@@ -355,7 +355,7 @@ def main(argv=None):
 
             # Save XGBoost model natively (version-agnostic JSON format)
             xgb_model_file = out_dir / f"brain_{strat_clean}_{side}.xgb"
-            final_model.save_model(str(xgb_model_file))
+            final_model.get_booster().save_model(str(xgb_model_file))
 
             pipeline = {
                 "xgb_model_file": str(xgb_model_file.name),
