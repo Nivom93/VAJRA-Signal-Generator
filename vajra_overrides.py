@@ -17,15 +17,15 @@ def _strategy_overrides(cfg):
     cfg.dynamic_tp_enabled = False         # Enforce strict structural targets
     cfg.time_in_force_decay = 24           # 24 bars (6h) for order TTL
 
-    # Strict Structural Geometry
-    cfg.min_rr = 2.0           # Minimum 2R structural distance (god-tier selectivity)
+    # Structural Geometry (relaxed for higher trade frequency)
+    cfg.min_rr = 1.5           # Accept 1.5R+ setups (captures more movements)
     cfg.atr_mult_sl = 0.05     # Tight 0.05 ATR micro-buffer (setup invalidation + whisker)
     cfg.atr_mult_tp = 3.5      # Max TP cap at 3.5R
 
     # Risk & Concurrency
     cfg.risk_per_trade = 0.01
-    cfg.max_concurrent = 4             # Reduce from 6 to 4 (quality over quantity)
-    cfg.min_target_dist_pct = 0.15
+    cfg.max_concurrent = 6             # Allow 6 concurrent trades (capture all movements)
+    cfg.min_target_dist_pct = 0.10     # Lower min target distance (more setups qualify)
     cfg.use_macro_data = True
     cfg.use_meta_labeling = True
 
@@ -34,8 +34,8 @@ def _strategy_overrides(cfg):
     cfg.slippage_bps = 3.0             # Realistic 3bps slippage
     cfg.max_risk_factor = 2.0          # Cap dynamic risk scaling
 
-    # AI Gates (higher selectivity)
-    cfg.min_ev = 0.10                  # Minimum 0.10R expected value
-    cfg.min_prob_long = 0.35           # Require 35%+ AI probability for longs
-    cfg.min_prob_short = 0.35          # Require 35%+ AI probability for shorts
+    # AI Gates (relaxed — let structural logic do the filtering)
+    cfg.min_ev = 0.0                   # No EV gate (structural setups pre-filtered)
+    cfg.min_prob_long = 0.20           # Soft 20% AI gate for longs
+    cfg.min_prob_short = 0.20          # Soft 20% AI gate for shorts
     cfg.dynamic_risk_scaling = True

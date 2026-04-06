@@ -1759,13 +1759,13 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     ob_bull_ce = (ob_bull_top + ob_bull_bot) / 2 if ob_bull_top > 0 else 0
     ob_bear_ce = (ob_bear_top + ob_bear_bot) / 2 if ob_bear_bot > 0 else 0
 
-    ob_bull_fresh = 0 < base.get("bars_since_ob_bull", 999) <= 20
-    ob_bear_fresh = 0 < base.get("bars_since_ob_bear", 999) <= 20
+    ob_bull_fresh = 0 < base.get("bars_since_ob_bull", 999) <= 40
+    ob_bear_fresh = 0 < base.get("bars_since_ob_bear", 999) <= 40
 
     fvg_bull = base.get("fvg_bull", 0)
     fvg_bear = base.get("fvg_bear", 0)
-    fvg_tol = px * 0.001
-    qm_zone = current_atr * 0.3
+    fvg_tol = px * 0.002  # Widen FVG tolerance to 0.2%
+    qm_zone = current_atr * 0.5  # Widen QM zone to 0.5 ATR
 
     sweep_bull = base.get("sweep_bull_p", 0.0)
     sweep_bear = base.get("sweep_bear_p", 0.0)
@@ -1795,33 +1795,29 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     if can_long:
         side = 'long'
 
-        # ALPHA_LONG: OB Consequent Encroachment + Rejection Wick
-        if (ob_bull_ce > 0 and ob_bull_fresh and low <= ob_bull_ce and px > ob_bull_bot
-                and is_bull_rejection):
+        # ALPHA_LONG: OB Consequent Encroachment (rejection wick is a bonus, not required)
+        if ob_bull_ce > 0 and ob_bull_fresh and low <= ob_bull_ce and px > ob_bull_bot:
             setup_type = "ALPHA_LONG"
-            logic_desc = "OB CE mitigation with wick rejection confirmation."
+            logic_desc = "OB CE mitigation." + (" Rejection confirmed." if is_bull_rejection else "")
 
-        # BETA_LONG: Multi-divergence with structural BOS + momentum exhaustion
-        elif ((bull_ewo or bull_obv or bull_cvd) and base.get("bos_up", 0) > 0
-                and base.get("rsi_14", 50) < 45):
+        # BETA_LONG: Divergence + BOS (divergence forms at exhaustion, BOS confirms shift)
+        elif (bull_ewo or bull_obv or bull_cvd or bull_rsi_div) and base.get("bos_up", 0) > 0:
             setup_type = "BETA_LONG"
-            logic_desc = "Divergence confluence + BOS + RSI exhaustion."
+            logic_desc = "Divergence confluence + structural BOS confirmation."
 
-        # GAMMA_LONG: Quasimodo retest with volume
+        # GAMMA_LONG: Quasimodo structural retest
         elif (base.get("qm_bull", 0) > 0
-                and low <= (base.get("qm_bull", 0) + qm_zone) and px > base.get("qm_bull", 0)
-                and (has_volume or has_elevated_vol)):
+                and low <= (base.get("qm_bull", 0) + qm_zone) and px > base.get("qm_bull", 0)):
             setup_type = "GAMMA_LONG"
-            logic_desc = "QM structural retest with volume confirmation."
+            logic_desc = "QM structural retest."
 
-        # DELTA_LONG: FVG mitigation
-        elif (fvg_bull > 0 and low <= (fvg_bull + fvg_tol) and px > (fvg_bull - fvg_tol)
-                and is_bull_rejection):
+        # DELTA_LONG: FVG mitigation (the gap itself is the edge, rejection is bonus)
+        elif fvg_bull > 0 and low <= (fvg_bull + fvg_tol) and px > (fvg_bull - fvg_tol):
             setup_type = "DELTA_LONG"
-            logic_desc = "FVG CE mitigation with rejection."
+            logic_desc = "FVG CE mitigation." + (" Rejection confirmed." if is_bull_rejection else "")
 
-        # EPSILON_LONG: Wyckoff Spring (sweep + reclaim + volume)
-        elif has_spring and sweep_bull > 0:
+        # EPSILON_LONG: Wyckoff Spring (spring already validates sweep + reclaim + volume)
+        elif has_spring:
             setup_type = "EPSILON_LONG"
             logic_desc = "Wyckoff spring: liquidity sweep + reclaim."
 
@@ -1829,33 +1825,29 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     if not setup_type and can_short:
         side = 'short'
 
-        # ALPHA_SHORT: OB CE + Rejection Wick
-        if (ob_bear_ce > 0 and ob_bear_fresh and high >= ob_bear_ce and px < ob_bear_top
-                and is_bear_rejection):
+        # ALPHA_SHORT: OB CE
+        if ob_bear_ce > 0 and ob_bear_fresh and high >= ob_bear_ce and px < ob_bear_top:
             setup_type = "ALPHA_SHORT"
-            logic_desc = "OB CE mitigation with wick rejection confirmation."
+            logic_desc = "OB CE mitigation." + (" Rejection confirmed." if is_bear_rejection else "")
 
-        # BETA_SHORT: Multi-divergence with BOS + momentum exhaustion
-        elif ((bear_ewo or bear_obv or bear_cvd) and base.get("bos_down", 0) > 0
-                and base.get("rsi_14", 50) > 55):
+        # BETA_SHORT: Divergence + BOS
+        elif (bear_ewo or bear_obv or bear_cvd or bear_rsi_div) and base.get("bos_down", 0) > 0:
             setup_type = "BETA_SHORT"
-            logic_desc = "Divergence confluence + BOS + RSI exhaustion."
+            logic_desc = "Divergence confluence + structural BOS confirmation."
 
-        # GAMMA_SHORT: QM retest with volume
+        # GAMMA_SHORT: QM retest
         elif (base.get("qm_bear", 0) > 0
-                and high >= (base.get("qm_bear", 0) - qm_zone) and px < base.get("qm_bear", 0)
-                and (has_volume or has_elevated_vol)):
+                and high >= (base.get("qm_bear", 0) - qm_zone) and px < base.get("qm_bear", 0)):
             setup_type = "GAMMA_SHORT"
-            logic_desc = "QM structural retest with volume confirmation."
+            logic_desc = "QM structural retest."
 
         # DELTA_SHORT: FVG mitigation
-        elif (fvg_bear > 0 and low <= (fvg_bear + fvg_tol) and px < (fvg_bear + fvg_tol)
-                and is_bear_rejection):
+        elif fvg_bear > 0 and low <= (fvg_bear + fvg_tol) and px < (fvg_bear + fvg_tol):
             setup_type = "DELTA_SHORT"
-            logic_desc = "FVG CE mitigation with rejection."
+            logic_desc = "FVG CE mitigation." + (" Rejection confirmed." if is_bear_rejection else "")
 
         # EPSILON_SHORT: Wyckoff Upthrust
-        elif has_upthrust and sweep_bear > 0:
+        elif has_upthrust:
             setup_type = "EPSILON_SHORT"
             logic_desc = "Wyckoff upthrust: liquidity sweep + reclaim."
 
