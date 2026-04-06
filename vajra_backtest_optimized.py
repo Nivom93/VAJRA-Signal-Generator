@@ -217,13 +217,17 @@ def run_backtest(args, preloaded: Optional[Preloaded]=None, markets_data=None):
     btc_ema_trend = _ema_np(btc_c, 100)
     btc_bull_arr = (btc_c > btc_ema_trend).astype(float)
     
-    btc_s = pd.Series(btc_bull_arr, index=btc["timestamp"]).shift(1) 
-    btc_aligned = btc_s.reindex(exec_tf["timestamp"], method='ffill').fillna(1.0).values
+    # Align BTC trend to exec_tf using searchsorted for reliable alignment
+    btc_ts = btc["timestamp"].values
+    exec_ts_arr = exec_tf["timestamp"].values
+    btc_idx = np.searchsorted(btc_ts, exec_ts_arr, side='right') - 1
+    # Use idx-1 to enforce lag (only fully closed BTC candles)
+    btc_idx_lagged = np.clip(btc_idx - 1, 0, len(btc_bull_arr) - 1)
+    btc_aligned = btc_bull_arr[btc_idx_lagged]
 
     # Align BTC Close for relative strength features
-    btc_s_close = pd.Series(btc_c, index=btc["timestamp"]).shift(1).reindex(exec_tf["timestamp"], method='ffill').fillna(0.0).values
-    if len(btc_s_close) != len(exec_tf):
-        btc_s_close = np.resize(btc_s_close, len(exec_tf))
+    btc_idx_close_lagged = np.clip(btc_idx - 1, 0, len(btc_c) - 1)
+    btc_s_close = btc_c[btc_idx_close_lagged]
 
     brain = BrainLearningManager(cfg, getattr(args, 'brains_dir', None))
     mem = MemoryManager(cfg, db=None)
@@ -256,6 +260,10 @@ def run_backtest(args, preloaded: Optional[Preloaded]=None, markets_data=None):
 
     iMacro = 0; iSwing = 0; iHtf = 0
     all_closed: List[Dict[str, Any]] = []
+    daily_pnl_r = 0.0
+    daily_reset_ts = since_ms
+    max_daily_loss_r = getattr(cfg, 'max_daily_loss_r', 5.0)
+    MS_PER_DAY = 86_400_000
     
     # OPTIMIZED PROGRESS BAR (Less I/O)
     progress = None
@@ -271,7 +279,20 @@ def run_backtest(args, preloaded: Optional[Preloaded]=None, markets_data=None):
         iExec = int(exec_tf.index.get_loc(rowL.Index))
 
         closed = tm.step_bar(cfg.symbol, float(rowL.open), float(rowL.high), float(rowL.low), float(rowL.close), ts=ts)
-        if closed: all_closed.extend(closed)
+        if closed:
+            all_closed.extend(closed)
+            for t in closed:
+                daily_pnl_r += t.get('pnl_r', 0.0)
+
+        # Reset daily PnL counter at day boundary
+        if ts - daily_reset_ts >= MS_PER_DAY:
+            daily_pnl_r = 0.0
+            daily_reset_ts = ts
+
+        # Daily loss circuit breaker
+        if daily_pnl_r <= -max_daily_loss_r:
+            if progress: progress.update(1)
+            continue
 
         # Inject BTC Context & Orderbook Stub
         btc_bull_val = btc_aligned[iExec] if iExec < len(btc_aligned) else 1.0

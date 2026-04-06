@@ -20,7 +20,7 @@ def _strategy_overrides(cfg):
 
     # Strict Structural Geometry
     cfg.min_rr = 1.8          # Engine WILL REJECT trades with < 1.8R structural distance
-    cfg.atr_mult_sl = 0.0     # SL is 100% pure structure, no ATR offset
+    cfg.atr_mult_sl = 0.15    # Micro-buffer to prevent stop hunts on exact structure
     cfg.atr_mult_tp = 3.0     # Max TP cap at 3.0R
 
     # Risk & Concurrency
@@ -29,6 +29,10 @@ def _strategy_overrides(cfg):
     cfg.min_target_dist_pct = 0.15
     cfg.use_macro_data = True
     cfg.use_meta_labeling = True
+
+    # Risk Controls
+    cfg.max_daily_loss_r = 5.0       # Halt trading after 5R daily loss
+    cfg.slippage_bps = 3.0           # Realistic 3bps slippage for backtesting
 
     # AI Gates
     cfg.min_ev = 0.00
