@@ -1397,7 +1397,13 @@ class BrainLearningManager:
                     if "xgb_model_file" in brain_data:
                         import xgboost as xgb
                         booster = xgb.Booster()
-                        booster.load_model(str(p / brain_data["xgb_model_file"]))
+                        xgb_path = p / brain_data["xgb_model_file"]
+                        # Fallback: .xgb -> .json for renamed format
+                        if not xgb_path.exists():
+                            alt = xgb_path.with_suffix(".json") if xgb_path.suffix == ".xgb" else xgb_path.with_suffix(".xgb")
+                            if alt.exists():
+                                xgb_path = alt
+                        booster.load_model(str(xgb_path))
                         brain_data["booster"] = booster
 
                     self.brains[(strat, side)] = brain_data
