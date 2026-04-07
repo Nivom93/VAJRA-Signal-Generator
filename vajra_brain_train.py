@@ -516,6 +516,14 @@ def _train_meta_brain(df: pd.DataFrame, base_feature_names: list, args, out_dir:
         "equal_highs_count", "equal_lows_count",
         "hurst_exponent",
         "macro_sentiment",
+        # Market Structure Reading
+        "struct_trend", "struct_strength", "struct_break",
+        "struct_bias_score",
+        "htf_struct_trend", "htf_struct_strength", "htf_struct_break",
+        "macro_struct_trend", "macro_struct_strength",
+        "struct_align_bull", "struct_align_bear",
+        "recent_hh_count", "recent_hl_count",
+        "recent_lh_count", "recent_ll_count",
     ]
     found_ctx = [c for c in CONTEXT_FEATURES if c in df.columns]
 
