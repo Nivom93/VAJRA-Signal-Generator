@@ -1729,11 +1729,11 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     bull_reversal_evidence = int(bull_obv) + int(bull_ewo) + int(bull_cvd) + int(bull_rsi_div) + int(has_spring)
     bear_reversal_evidence = int(bear_obv) + int(bear_ewo) + int(bear_cvd) + int(bear_rsi_div) + int(has_upthrust)
 
-    # Unlock counter-trend if 3+ reversal signals converge
-    if not can_long and bull_reversal_evidence >= 3:
+    # Unlock counter-trend if 4+ reversal signals converge (stricter — reversals are lower win rate)
+    if not can_long and bull_reversal_evidence >= 4:
         can_long = True
         is_reversal_context = True
-    if not can_short and bear_reversal_evidence >= 3:
+    if not can_short and bear_reversal_evidence >= 4:
         can_short = True
         is_reversal_context = True
 
@@ -1762,12 +1762,27 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     if not can_long and not can_short: return None
 
     # ==========================================================
+    # PHASE 3B: MARKET QUALITY FILTERS
+    # ==========================================================
+    adx_val = base.get("adx", 25.0)
+
+    # Choppy market filter: ADX < 15 means no directional conviction — skip
+    if adx_val < 15.0 and not is_reversal_context:
+        return None
+
+    # Multi-TF alignment: require at least 2 TF agreement for trend trades
+    if not is_reversal_context:
+        if can_long and not can_short and bullish_tf_count < 2:
+            return None  # Not enough TF support for a long-only context
+        if can_short and not can_long and bearish_tf_count < 2:
+            return None  # Not enough TF support for a short-only context
+
+    # ==========================================================
     # PHASE 4: PRECISE STRUCTURAL ENTRY DETECTION
     # ==========================================================
     px = pExec.c[iExec]
     low = pExec.l[iExec]
     high = pExec.h[iExec]
-    adx_val = base.get("adx", 25.0)
 
     ob_bull_bot = base.get("ob_bull_bot", 0)
     ob_bull_top = base.get("ob_bull_top", 0)
@@ -1808,65 +1823,88 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     logic_desc = ""
     side = None
 
+    # Volume confirmation gate — require elevated volume or spike for valid entries
+    has_vol_confirm = has_volume or has_elevated_vol
+
     # ---- LONG SETUPS ----
     if can_long:
         side = 'long'
 
-        # ALPHA_LONG: OB Consequent Encroachment (rejection wick is a bonus, not required)
+        # ALPHA_LONG: OB CE — REQUIRE rejection wick confirmation + volume
         if ob_bull_ce > 0 and ob_bull_fresh and low <= ob_bull_ce and px > ob_bull_bot:
-            setup_type = "ALPHA_LONG"
-            logic_desc = "OB CE mitigation." + (" Rejection confirmed." if is_bull_rejection else "")
+            if is_bull_rejection and has_vol_confirm:
+                setup_type = "ALPHA_LONG"
+                logic_desc = "OB CE mitigation + rejection wick + volume confirmed."
 
-        # BETA_LONG: Divergence + BOS (divergence forms at exhaustion, BOS confirms shift)
-        elif (bull_ewo or bull_obv or bull_cvd or bull_rsi_div) and base.get("bos_up", 0) > 0:
-            setup_type = "BETA_LONG"
-            logic_desc = "Divergence confluence + structural BOS confirmation."
+        # BETA_LONG: Divergence + BOS (BOS is the confirmation itself; require 2+ divs)
+        if not setup_type:
+            div_count = int(bull_ewo) + int(bull_obv) + int(bull_cvd) + int(bull_rsi_div)
+            if div_count >= 2 and base.get("bos_up", 0) > 0 and has_vol_confirm:
+                setup_type = "BETA_LONG"
+                logic_desc = f"Divergence confluence ({div_count} divs) + structural BOS + volume."
 
-        # GAMMA_LONG: Quasimodo structural retest
-        elif (base.get("qm_bull", 0) > 0
-                and low <= (base.get("qm_bull", 0) + qm_zone) and px > base.get("qm_bull", 0)):
-            setup_type = "GAMMA_LONG"
-            logic_desc = "QM structural retest."
+        # GAMMA_LONG: QM retest — REQUIRE rejection wick
+        if not setup_type:
+            if (base.get("qm_bull", 0) > 0
+                    and low <= (base.get("qm_bull", 0) + qm_zone)
+                    and px > base.get("qm_bull", 0)
+                    and is_bull_rejection and has_vol_confirm):
+                setup_type = "GAMMA_LONG"
+                logic_desc = "QM structural retest + rejection wick + volume."
 
-        # DELTA_LONG: FVG mitigation (the gap itself is the edge, rejection is bonus)
-        elif fvg_bull > 0 and low <= (fvg_bull + fvg_tol) and px > (fvg_bull - fvg_tol):
-            setup_type = "DELTA_LONG"
-            logic_desc = "FVG CE mitigation." + (" Rejection confirmed." if is_bull_rejection else "")
+        # DELTA_LONG: FVG mitigation — REQUIRE rejection wick + volume
+        if not setup_type:
+            if (fvg_bull > 0 and low <= (fvg_bull + fvg_tol)
+                    and px > (fvg_bull - fvg_tol)
+                    and is_bull_rejection and has_vol_confirm):
+                setup_type = "DELTA_LONG"
+                logic_desc = "FVG CE mitigation + rejection wick + volume."
 
-        # EPSILON_LONG: Wyckoff Spring (spring already validates sweep + reclaim + volume)
-        elif has_spring:
-            setup_type = "EPSILON_LONG"
-            logic_desc = "Wyckoff spring: liquidity sweep + reclaim."
+        # EPSILON_LONG: Wyckoff Spring (spring already has volume built in)
+        if not setup_type:
+            if has_spring and has_vol_confirm:
+                setup_type = "EPSILON_LONG"
+                logic_desc = "Wyckoff spring: liquidity sweep + reclaim + volume."
 
     # ---- SHORT SETUPS ----
     if not setup_type and can_short:
         side = 'short'
 
-        # ALPHA_SHORT: OB CE
+        # ALPHA_SHORT: OB CE — REQUIRE rejection wick + volume
         if ob_bear_ce > 0 and ob_bear_fresh and high >= ob_bear_ce and px < ob_bear_top:
-            setup_type = "ALPHA_SHORT"
-            logic_desc = "OB CE mitigation." + (" Rejection confirmed." if is_bear_rejection else "")
+            if is_bear_rejection and has_vol_confirm:
+                setup_type = "ALPHA_SHORT"
+                logic_desc = "OB CE mitigation + rejection wick + volume confirmed."
 
-        # BETA_SHORT: Divergence + BOS
-        elif (bear_ewo or bear_obv or bear_cvd or bear_rsi_div) and base.get("bos_down", 0) > 0:
-            setup_type = "BETA_SHORT"
-            logic_desc = "Divergence confluence + structural BOS confirmation."
+        # BETA_SHORT: Divergence + BOS — require 2+ divergences
+        if not setup_type:
+            div_count = int(bear_ewo) + int(bear_obv) + int(bear_cvd) + int(bear_rsi_div)
+            if div_count >= 2 and base.get("bos_down", 0) > 0 and has_vol_confirm:
+                setup_type = "BETA_SHORT"
+                logic_desc = f"Divergence confluence ({div_count} divs) + structural BOS + volume."
 
-        # GAMMA_SHORT: QM retest
-        elif (base.get("qm_bear", 0) > 0
-                and high >= (base.get("qm_bear", 0) - qm_zone) and px < base.get("qm_bear", 0)):
-            setup_type = "GAMMA_SHORT"
-            logic_desc = "QM structural retest."
+        # GAMMA_SHORT: QM retest — REQUIRE rejection wick
+        if not setup_type:
+            if (base.get("qm_bear", 0) > 0
+                    and high >= (base.get("qm_bear", 0) - qm_zone)
+                    and px < base.get("qm_bear", 0)
+                    and is_bear_rejection and has_vol_confirm):
+                setup_type = "GAMMA_SHORT"
+                logic_desc = "QM structural retest + rejection wick + volume."
 
-        # DELTA_SHORT: FVG mitigation
-        elif fvg_bear > 0 and low <= (fvg_bear + fvg_tol) and px < (fvg_bear + fvg_tol):
-            setup_type = "DELTA_SHORT"
-            logic_desc = "FVG CE mitigation." + (" Rejection confirmed." if is_bear_rejection else "")
+        # DELTA_SHORT: FVG mitigation — REQUIRE rejection wick + volume
+        if not setup_type:
+            if (fvg_bear > 0 and high >= (fvg_bear - fvg_tol)
+                    and px < (fvg_bear + fvg_tol)
+                    and is_bear_rejection and has_vol_confirm):
+                setup_type = "DELTA_SHORT"
+                logic_desc = "FVG CE mitigation + rejection wick + volume."
 
         # EPSILON_SHORT: Wyckoff Upthrust
-        elif has_upthrust:
-            setup_type = "EPSILON_SHORT"
-            logic_desc = "Wyckoff upthrust: liquidity sweep + reclaim."
+        if not setup_type:
+            if has_upthrust and has_vol_confirm:
+                setup_type = "EPSILON_SHORT"
+                logic_desc = "Wyckoff upthrust: liquidity sweep + reclaim + volume."
 
     if not setup_type: return None
 
