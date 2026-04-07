@@ -1018,6 +1018,111 @@ def _multi_swing_fractal_range(high, low, swing_hi, swing_lo, lookback_swings=3)
     return frac_high, frac_low
 
 
+@njit(cache=True)
+def _market_structure_np(high, low, sh_conf, sl_conf, right=3):
+    """Classify market structure by comparing consecutive swing highs and swing lows.
+
+    For each bar, tracks:
+    - Whether each swing high is HH or LH relative to the previous swing high
+    - Whether each swing low is HL or LL relative to the previous swing low
+    - Structural trend state: +1 (bullish: HH+HL), -1 (bearish: LH+LL), 0 (ranging/mixed)
+    - Trend strength: count of consecutive structure points confirming the trend
+    - Structure break flag: 1 when the current bar breaks the prevailing structure
+
+    Returns 7 arrays:
+      is_hh, is_hl, is_lh, is_ll — rolling flags at confirmation bar
+      struct_trend — +1 bullish, -1 bearish, 0 ranging
+      struct_strength — consecutive confirmations (0-10 capped)
+      struct_break — 1 on the bar where structure first invalidates
+    """
+    n = high.size
+    is_hh = np.zeros(n, dtype=np.float64)
+    is_hl = np.zeros(n, dtype=np.float64)
+    is_lh = np.zeros(n, dtype=np.float64)
+    is_ll = np.zeros(n, dtype=np.float64)
+    struct_trend = np.zeros(n, dtype=np.float64)
+    struct_strength = np.zeros(n, dtype=np.float64)
+    struct_break = np.zeros(n, dtype=np.float64)
+
+    # Track the last two swing highs and swing lows for comparison
+    prev_sh = 0.0  # previous confirmed swing high price
+    curr_sh = 0.0  # most recent confirmed swing high price
+    prev_sl = 0.0
+    curr_sl = 0.0
+    sh_count = 0
+    sl_count = 0
+
+    # Running structural state
+    last_sh_type = 0   # +1 = HH, -1 = LH
+    last_sl_type = 0   # +1 = HL, -1 = LL
+    trend = 0          # +1 bullish, -1 bearish, 0 mixed
+    strength = 0       # consecutive confirmations
+
+    for i in range(n):
+        # Check for new confirmed swing high
+        if sh_conf[i] == 1 and i >= right:
+            swing_price = high[i - right]
+            if sh_count >= 1 and curr_sh > 0:
+                prev_sh = curr_sh
+                curr_sh = swing_price
+                if curr_sh > prev_sh:
+                    is_hh[i] = 1.0
+                    last_sh_type = 1  # HH
+                elif curr_sh < prev_sh:
+                    is_lh[i] = 1.0
+                    last_sh_type = -1  # LH
+                # else equal — no change
+            else:
+                curr_sh = swing_price
+            sh_count += 1
+
+        # Check for new confirmed swing low
+        if sl_conf[i] == 1 and i >= right:
+            swing_price = low[i - right]
+            if sl_count >= 1 and curr_sl > 0:
+                prev_sl = curr_sl
+                curr_sl = swing_price
+                if curr_sl > prev_sl:
+                    is_hl[i] = 1.0
+                    last_sl_type = 1  # HL
+                elif curr_sl < prev_sl:
+                    is_ll[i] = 1.0
+                    last_sl_type = -1  # LL
+            else:
+                curr_sl = swing_price
+            sl_count += 1
+
+        # Determine structural trend from latest swing classifications
+        old_trend = trend
+        if last_sh_type == 1 and last_sl_type == 1:
+            # HH + HL = bullish structure
+            trend = 1
+        elif last_sh_type == -1 and last_sl_type == -1:
+            # LH + LL = bearish structure
+            trend = -1
+        elif last_sh_type != 0 and last_sl_type != 0:
+            # Mixed (HH + LL or LH + HL) = ranging / transitional
+            trend = 0
+        # else: not enough data yet, trend stays 0
+
+        # Track strength: consecutive confirmations in the same direction
+        if trend == old_trend and trend != 0:
+            if sh_conf[i] == 1 or sl_conf[i] == 1:
+                strength = min(strength + 1, 10)
+        elif trend != old_trend:
+            strength = 1  # Reset on change
+
+        # Structure break detection:
+        # A break occurs when trend changes from established (+1 or -1) to something else
+        if old_trend != 0 and trend != old_trend and (sh_conf[i] == 1 or sl_conf[i] == 1):
+            struct_break[i] = 1.0
+
+        struct_trend[i] = float(trend)
+        struct_strength[i] = float(strength)
+
+    return is_hh, is_hl, is_lh, is_ll, struct_trend, struct_strength, struct_break
+
+
 class Precomp:
     def __init__(self, df):
         self.o=df.open.values; self.h=df.high.values; self.l=df.low.values; self.c=df.close.values; self.v=df.volume.values
@@ -1093,6 +1198,11 @@ class Precomp:
         self.fractal_high, self.fractal_low = _multi_swing_fractal_range(
             self.h, self.l, self.swing_hi, self.swing_lo, lookback_swings=3
         )
+
+        # Market Structure Reading: HH/HL/LH/LL classification + trend state
+        (self.is_hh, self.is_hl, self.is_lh, self.is_ll,
+         self.struct_trend, self.struct_strength, self.struct_break
+        ) = _market_structure_np(self.h, self.l, self.swing_hi, self.swing_lo, right=3)
 
 def _trend_flags(e50, e200): return (1.0, 0.0) if e50>e200 else ((0.0, 1.0) if e50<e200 else (0.0, 0.0))
 def _ensure_precomp(df, pre): return pre if isinstance(pre, Precomp) else Precomp(df)
@@ -1171,6 +1281,52 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
             choch_down_val = 1.0
     f["choch_up"] = choch_up_val
     f["choch_down"] = choch_down_val
+
+    # ---- MARKET STRUCTURE READING (HH/HL/LH/LL + Trend State) ----
+    # Structural trend from ACTUAL price action, not lagging EMA crossovers
+    f["struct_trend"] = float(pExec.struct_trend[idx_Exec])         # +1 bull, -1 bear, 0 ranging
+    f["struct_strength"] = float(pExec.struct_strength[idx_Exec])   # consecutive confirmations (0-10)
+    f["struct_break"] = float(pExec.struct_break[idx_Exec])         # 1.0 on structure break bar
+
+    # Recent HH/HL/LH/LL counts in lookback window (structure quality)
+    struct_lookback = min(30, idx_Exec)
+    recent_hh = 0.0; recent_hl = 0.0; recent_lh = 0.0; recent_ll = 0.0
+    for sb in range(max(0, idx_Exec - struct_lookback), idx_Exec + 1):
+        recent_hh += pExec.is_hh[sb]
+        recent_hl += pExec.is_hl[sb]
+        recent_lh += pExec.is_lh[sb]
+        recent_ll += pExec.is_ll[sb]
+    f["recent_hh_count"] = recent_hh
+    f["recent_hl_count"] = recent_hl
+    f["recent_lh_count"] = recent_lh
+    f["recent_ll_count"] = recent_ll
+
+    # Structure bias score: +1 = fully bullish structure, -1 = fully bearish
+    bull_struct_pts = recent_hh + recent_hl
+    bear_struct_pts = recent_lh + recent_ll
+    total_struct_pts = bull_struct_pts + bear_struct_pts
+    f["struct_bias_score"] = float((bull_struct_pts - bear_struct_pts) / max(total_struct_pts, 1.0))
+
+    # HTF structure reading (swing timeframe gives higher-level structure)
+    f["htf_struct_trend"] = float(pHtf.struct_trend[idx_Htf])
+    f["htf_struct_strength"] = float(pHtf.struct_strength[idx_Htf])
+    f["htf_struct_break"] = float(pHtf.struct_break[idx_Htf])
+
+    # Macro structure (daily)
+    f["macro_struct_trend"] = float(pMacro.struct_trend[idx_Macro])
+    f["macro_struct_strength"] = float(pMacro.struct_strength[idx_Macro])
+
+    # Multi-TF structure alignment (price-action based, not EMA-based)
+    f["struct_align_bull"] = float(
+        (1.0 if pMacro.struct_trend[idx_Macro] > 0 else 0.0) +
+        (1.0 if pHtf.struct_trend[idx_Htf] > 0 else 0.0) +
+        (1.0 if pExec.struct_trend[idx_Exec] > 0 else 0.0)
+    )
+    f["struct_align_bear"] = float(
+        (1.0 if pMacro.struct_trend[idx_Macro] < 0 else 0.0) +
+        (1.0 if pHtf.struct_trend[idx_Htf] < 0 else 0.0) +
+        (1.0 if pExec.struct_trend[idx_Exec] < 0 else 0.0)
+    )
 
     # ---- DISPLACEMENT SEQUENCE DETECTION ----
     # Displacement = large body candle (>1.5x ATR) that breaks structure
@@ -1521,6 +1677,11 @@ def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, b
     rng = pExec.last_sh - pExec.last_sl
     safe_rng = np.where(rng == 0, 1.0, rng)
     f['premium_discount_index'] = np.where(rng > 0, (cl - pExec.last_sl) / safe_rng, 0.5)
+
+    # Market Structure arrays (HH/HL/LH/LL + trend state)
+    f['struct_trend_arr'] = pExec.struct_trend
+    f['struct_strength_arr'] = pExec.struct_strength
+    f['struct_break_arr'] = pExec.struct_break
 
     f['div_bull_arr'] = pExec.div_bull
     f['div_bear_arr'] = pExec.div_bear
@@ -1945,6 +2106,14 @@ class BrainLearningManager:
                 "equal_highs_count", "equal_lows_count",
                 "hurst_exponent",
                 "macro_sentiment",
+                # Market Structure Reading
+                "struct_trend", "struct_strength", "struct_break",
+                "struct_bias_score",
+                "htf_struct_trend", "htf_struct_strength", "htf_struct_break",
+                "macro_struct_trend", "macro_struct_strength",
+                "struct_align_bull", "struct_align_bear",
+                "recent_hh_count", "recent_hl_count",
+                "recent_lh_count", "recent_ll_count",
             ]
             for k in context_keys:
                 val = base.get(k, 0.0)
@@ -2243,19 +2412,30 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     bullish_tf_count = int(macro_up > 0) + int(swing_up > 0) + int(htf_up > 0)
     bearish_tf_count = int(macro_down > 0) + int(swing_down > 0) + int(htf_down > 0)
 
+    # Price-action structural alignment (HH/HL/LH/LL based, not EMA lag)
+    struct_align_bull = base.get("struct_align_bull", 0)
+    struct_align_bear = base.get("struct_align_bear", 0)
+
     # REGIME GATE: Block counter-trend trades when strong unidirectional trend
     can_long = True
     can_short = True
     is_reversal_context = False
 
-    # Relaxed gate: block only when ALL 3 TFs agree AND momentum confirms
-    if bearish_tf_count == 3:
+    # Relaxed gate: block only when ALL 3 TFs agree AND structure confirms
+    # EMAs say bearish AND price structure is bearish = high conviction block
+    if bearish_tf_count == 3 and struct_align_bear >= 2:
         can_long = False
-    if bullish_tf_count == 3:
+    elif bearish_tf_count == 3:
+        # EMAs say bearish but structure disagrees — allow with weak flag
+        can_long = True
+    if bullish_tf_count == 3 and struct_align_bull >= 2:
         can_short = False
+    elif bullish_tf_count == 3:
+        can_short = True
+
     # Partial regime bias: when 2/3 TFs agree, allow but flag as weaker conviction
-    is_weak_long = (bearish_tf_count >= 2 and bullish_tf_count == 0)
-    is_weak_short = (bullish_tf_count >= 2 and bearish_tf_count == 0)
+    is_weak_long = (bearish_tf_count >= 2 and bullish_tf_count == 0 and struct_align_bear >= 1)
+    is_weak_short = (bullish_tf_count >= 2 and bearish_tf_count == 0 and struct_align_bull >= 1)
 
     # ==========================================================
     # PHASE 2: REVERSAL DETECTION (Override regime gate when evidence is overwhelming)
@@ -2425,6 +2605,15 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         bull_struct_score += 1.0; bull_struct_reasons.append(f"DIV×{div_count_bull}")
     if is_bull_rejection:
         bull_struct_score += 0.5; bull_struct_reasons.append("WICK")
+    # Structure alignment: bullish HH/HL structure on exec TF
+    if base.get("struct_trend", 0) > 0:
+        bull_struct_score += 1.0; bull_struct_reasons.append("STRUCT_BULL")
+    # HTF structure confirmation: higher timeframe also bullish structure
+    if base.get("htf_struct_trend", 0) > 0:
+        bull_struct_score += 0.5; bull_struct_reasons.append("HTF_STRUCT")
+    # Structure break of bearish trend = bullish reversal signal
+    if base.get("struct_break", 0) > 0 and base.get("struct_trend", 0) >= 0:
+        bull_struct_score += 1.0; bull_struct_reasons.append("STRUCT_BRK")
 
     # ---- Bearish confluence ----
     bear_struct_score = 0.0
@@ -2454,6 +2643,15 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         bear_struct_score += 1.0; bear_struct_reasons.append(f"DIV×{div_count_bear}")
     if is_bear_rejection:
         bear_struct_score += 0.5; bear_struct_reasons.append("WICK")
+    # Structure alignment: bearish LH/LL structure on exec TF
+    if base.get("struct_trend", 0) < 0:
+        bear_struct_score += 1.0; bear_struct_reasons.append("STRUCT_BEAR")
+    # HTF structure confirmation: higher timeframe also bearish structure
+    if base.get("htf_struct_trend", 0) < 0:
+        bear_struct_score += 0.5; bear_struct_reasons.append("HTF_STRUCT")
+    # Structure break of bullish trend = bearish reversal signal
+    if base.get("struct_break", 0) > 0 and base.get("struct_trend", 0) <= 0:
+        bear_struct_score += 1.0; bear_struct_reasons.append("STRUCT_BRK")
 
     # Inject confluence scores into base features so the brain can see them
     base["bull_confluence_score"] = bull_struct_score
