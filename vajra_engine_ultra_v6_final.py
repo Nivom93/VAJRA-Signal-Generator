@@ -468,7 +468,7 @@ def _rsi14_np(close):
     if close.size < 2: return np.full_like(close, 50.0)
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta>0, delta, 0.0); loss = np.where(delta<0, -delta, 0.0)
-    avg_gain = _ema_np(gain, 27); avg_loss = _ema_np(loss, 27)
+    avg_gain = _ema_np(gain, 14); avg_loss = _ema_np(loss, 14)
     with np.errstate(divide='ignore', invalid='ignore'): rsi = 100.0 - (100.0 / (1.0 + (avg_gain/(avg_loss+1e-12))))
     return np.nan_to_num(rsi, nan=50.0)
 
