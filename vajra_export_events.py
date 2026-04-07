@@ -349,13 +349,16 @@ def main():
                         bars_open = cl.get("bars_open", 0)
                         pnl_r = cl["pnl_r"]
 
-                        # Soft meta-label: reward profitable trades proportionally,
-                        # with bonus for hitting structural TP quickly
+                        # Improved meta-label: graduated reward system
+                        # - TP hit within time = perfect signal (1.0)
+                        # - Any profit > 0 = positive signal (scaled)
+                        # - Loss = negative signal (0.0)
                         if cl.get("exit_reason") == "tp" and bars_open <= 192:
                             meta_label = 1.0
-                        elif pnl_r > 0.5:
-                            # Profitable trades that didn't hit exact TP still have edge
-                            meta_label = min(pnl_r / meta.get("rr", 2.0), 0.9)
+                        elif pnl_r > 0:
+                            # Any profitable trade is a positive label (scaled by quality)
+                            rr_target = meta.get("rr", 2.0)
+                            meta_label = max(0.3, min(pnl_r / rr_target, 0.95))
                         else:
                             meta_label = 0.0
 

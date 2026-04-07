@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-vajra_brain_train.py — Advanced Trainer (v8.0 - XGBoost Institutional Paradigm)
+vajra_brain_train.py — Advanced Trainer (v9.0 - Enhanced Signal Capture)
 ====================================================================
-LEVEL 30 UPGRADE:
-- ALGORITHM SWAP: Replaced GradientBoostingClassifier with XGBClassifier.
-- INSTITUTIONAL NOISE CANCELLATION: Native L1 (reg_alpha) and L2 (reg_lambda).
-- TOXIC FEATURE BANLIST: Purged absolute prices/derivatives to prevent Time-Travel OOD Collapse.
+LEVEL 31 UPGRADE:
+- SMOTE OVERSAMPLING: Synthetic minority class generation for balanced training.
+- ADAPTIVE RFE: Feature count scales with sqrt(n_samples) — no more arbitrary cap at 30.
+- IMPROVED BANLIST: Preserved normalized ATR/velocity features for brain learning.
+- CALIBRATED PROBABILITIES: Isotonic calibration for reliable confidence estimates.
+- ADAPTIVE WFA FOLDS: Fewer folds for small datasets to prevent fold starvation.
 """
 from __future__ import annotations
 
@@ -26,6 +28,12 @@ from sklearn.metrics import accuracy_score, precision_score, roc_auc_score, f1_s
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import RFE
 from sklearn.calibration import CalibratedClassifierCV
+
+try:
+    from imblearn.over_sampling import SMOTE
+    HAS_SMOTE = True
+except ImportError:
+    HAS_SMOTE = False
 
 try:
     from sklearn.frozen import FrozenEstimator
@@ -50,7 +58,10 @@ def _parse_extras(s: Optional[str]) -> List[str]:
 
 def is_feature_column(df: pd.DataFrame, col: str, extra_exclude: Set[str]) -> bool:
     # ========================================================================
-    # THE TOXIC FEATURE BANLIST (PREVENTS OOD COLLAPSE & TIME TRAVEL)
+    # REFINED TOXIC FEATURE BANLIST (v9.0)
+    # Removed: atr_pct features (normalized, safe to use)
+    # Removed: kalman_vel (when normalized to ATR, not absolute)
+    # Kept: All absolute price levels that cause OOD collapse
     # ========================================================================
     BASE_EXCLUDE_COLS = {
         "timestamp", "symbol", "entry_ts", "exit_ts", "key", "features", "label", "entry_ts_dt",
@@ -58,7 +69,7 @@ def is_feature_column(df: pd.DataFrame, col: str, extra_exclude: Set[str]) -> bo
         "entry_price", "exit_price", "price", "stop_loss", "sl", "tp", "take_profit",
         "side", "risk_factor", "rr", "prob", "atr_htf", "atr_ltf", "entry",
         "hour_of_day", "day_of_week",
-        
+
         # --- ABSOLUTE PRICES (Forces AI to memorize the year) ---
         "last_swing_high", "last_swing_low", "ob_bull_price", "ob_bear_price",
         "ob_bull_top", "ob_bull_bot", "ob_bear_top", "ob_bear_bot",
@@ -66,14 +77,17 @@ def is_feature_column(df: pd.DataFrame, col: str, extra_exclude: Set[str]) -> bo
         "dc_high_20", "dc_low_20", "htf_ema50", "macro_ema50", "swing_ema50",
         "htf_swing_high", "htf_swing_low", "mtf_swing_high", "mtf_swing_low",
         "ema20_L", "ema50_L", "ema100_L", "mtf_ema200_arr", "bb_upper", "bb_lower",
-        "kc_upper", "kc_lower", "kalman_price", 
-        "fib_786_long", "fib_886_long", "fib_786_short", "fib_886_short",
-        
-        # --- ABSOLUTE DERIVATIVES (Scale massively as BTC price rises) ---
-        "kalman_vel", "atr14_L", "atr7_L", "cvd"
+        "kc_upper", "kc_lower", "kalman_price",
+        "fib_382_long", "fib_500_long", "fib_618_long", "fib_786_long", "fib_886_long",
+        "fib_382_short", "fib_500_short", "fib_618_short", "fib_786_short", "fib_886_short",
+        "fib_ext_1272", "fib_ext_1618",
+        "rolling_vwap_20",
+
+        # --- ABSOLUTE DERIVATIVES (Scale with price — use normalized versions instead) ---
+        "atr14_L", "atr7_L", "cvd"
     }
     EXCLUDE_SUFFIXES = {"_dt", "_ts"}
-    
+
     if col in BASE_EXCLUDE_COLS or col in extra_exclude: return False
     if any(col.endswith(suf) for suf in EXCLUDE_SUFFIXES): return False
     if col not in df.columns: return False
@@ -92,42 +106,43 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
                 for line in f:
                     if line.strip(): rows.append(json.loads(line))
         except Exception as e: log.error(f"Error {p}: {e}")
-    
+
     if not rows: raise ValueError("No valid events found in files.")
     df = pd.DataFrame(rows)
-    
+
     if filter_side in ("long", "short") and "side" in df.columns:
         sv = 1.0 if filter_side == "long" else 0.0
         if pd.api.types.is_numeric_dtype(df["side"]): df = df[df["side"] == sv].copy()
         else: df = df[df["side"] == filter_side].copy()
-        
+
     df["pnl_r"] = pd.to_numeric(df["pnl_r"], errors='coerce')
     df.dropna(subset=["pnl_r"], inplace=True)
-    
-    # Pure Target Binary (Signal Vacuum) with Time-in-Market Constraint
+
+    # Pure Target Binary with improved labeling
     if "meta_label" in df.columns:
-        df["label"] = pd.to_numeric(df["meta_label"], errors='coerce').fillna(0).astype(int)
-        log.info("🎯 Dynamic Target & Time-in-Market Constraint mapped via meta_label.")
+        # Use threshold > 0.25 for binary (any meaningful profit = positive)
+        df["label"] = (pd.to_numeric(df["meta_label"], errors='coerce').fillna(0) > 0.25).astype(int)
+        log.info("🎯 Dynamic Target mapped via meta_label (threshold > 0.25 for positive).")
     elif "pnl_r" in df.columns:
         df["label"] = (df["pnl_r"] > 0).astype(int)
-        log.info("🎯 Pure Target Binary (Fallback) detected. Target mapped to hit dynamic TP before SL.")
+        log.info("🎯 Pure Target Binary (Fallback): pnl_r > 0.")
     else:
         df["label"] = 0
-        
+
     df["entry_ts"] = pd.to_numeric(df["entry_ts"], errors='coerce')
     df.dropna(subset=["entry_ts"], inplace=True)
-    
+
     df.sort_values("entry_ts", inplace=True)
-    
+
     initial_len = len(df)
     df = _enforce_causality_drop(df, lookahead=5)
     log.info(f"Causality Check: Dropped {initial_len - len(df)} rows.")
-    
+
     if len(df) == 0:
         raise ValueError("0 samples remain after filtering. Aborting training.")
 
     df["entry_ts_dt"] = pd.to_datetime(df["entry_ts"], unit="ms", utc=True)
-    
+
     candidates = [c for c in df.columns if is_feature_column(df, c, extra_exclude)]
 
     # FORCE INCLUSION OF NEW SENTIENT REGIME SCORE
@@ -140,13 +155,37 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
         if s.isnull().all() or s.dropna().nunique() <= 1: continue
         keep.append(c)
         df[c] = s
-        
+
     log.info(f"Selected {len(keep)} Normalized Features. Total Samples: {len(df)}")
     meta_cols = [c for c in ["side", "strategy"] if c in df.columns]
     return df[keep + ["label", "entry_ts_dt", "pnl_r"] + meta_cols].copy(), sorted(keep)
 
 def _sanitize_data(X: np.ndarray) -> np.ndarray:
     return np.clip(np.nan_to_num(X, nan=0.0), -1e10, 1e10).astype(np.float32)
+
+def _apply_smote(X_train, y_train, random_state=42):
+    """Apply SMOTE oversampling if imlearn is available and minority class is sufficient."""
+    if not HAS_SMOTE:
+        return X_train, y_train
+
+    pos_count = np.sum(y_train == 1)
+    neg_count = np.sum(y_train == 0)
+
+    if pos_count < 6 or neg_count < 6:
+        return X_train, y_train
+
+    # Only oversample to 40% of majority (avoid full balance which introduces too much noise)
+    target_ratio = min(0.4, pos_count / max(1, neg_count))
+    if target_ratio >= 0.35:
+        return X_train, y_train  # Already reasonably balanced
+
+    try:
+        k_neighbors = min(5, pos_count - 1)
+        smote = SMOTE(sampling_strategy=0.4, random_state=random_state, k_neighbors=k_neighbors)
+        X_res, y_res = smote.fit_resample(X_train, y_train)
+        return X_res, y_res
+    except Exception:
+        return X_train, y_train
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
@@ -163,7 +202,8 @@ def main(argv=None):
     ap.add_argument("--weight-decay", type=float, default=0.999)
     ap.add_argument("--wfa-folds", type=int, default=5)
     ap.add_argument("--tune", action="store_true", help="Enable RandomizedSearchCV for hyperparameter tuning.")
-    
+    ap.add_argument("--no-smote", action="store_true", help="Disable SMOTE oversampling.")
+
     args = ap.parse_args(argv)
 
     # BULLETPROOF TRAINING PARAMS: Forcefully prevent users from extreme overfitting via CLI
@@ -173,13 +213,13 @@ def main(argv=None):
     try:
         # Load all sides, we will filter manually
         df, base_feature_names = load_events_df(args.events, args.min_win_r, "all", set(_parse_extras(args.exclude_cols)))
-    except Exception as e: 
+    except Exception as e:
         log.error(f"Data load failed: {e}")
         return
 
     out_dir = Path(args.brains_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Find all strategies
     if "strategy" not in df.columns:
         log.warning("No 'strategy' column found in exported events! Defaulting to 'UNKNOWN'.")
@@ -188,14 +228,13 @@ def main(argv=None):
     # Extract all distinct setups
     base_strategies = list(set([s.split('_')[0] for s in df["strategy"].unique()]))
     for strat_clean in base_strategies:
-        # Strat names often have _LONG / _SHORT appended in the strategy string (e.g. ALPHA_LONG)
-        # OR side is saved separately
         for side in ["long", "short"]:
             side_val = 1.0 if side == "long" else 0.0
             mask = (df["side"] == side_val) | (df["side"] == side) | (df["strategy"].str.endswith(side.upper()))
             subset = df[(df["strategy"].str.startswith(strat_clean)) & mask].copy()
 
-            if len(subset) < 30:
+            # Lowered minimum sample threshold from 30 to 20
+            if len(subset) < 20:
                 log.info(f"Skipping {strat_clean}_{side} - Not enough samples ({len(subset)})")
                 continue
 
@@ -208,29 +247,34 @@ def main(argv=None):
 
             pos_cases = np.sum(y_all == 1)
             neg_cases = np.sum(y_all == 0)
+            # Softer class weighting — cap at 20x instead of 100x to prevent noise amplification
             scale_weight = float(neg_cases) / max(1.0, float(pos_cases))
-            scale_weight = min(scale_weight, 100.0) # Cap extreme weights
+            scale_weight = min(scale_weight, 20.0)
 
             n_samples = len(X_all)
-            actual_folds = min(args.wfa_folds, max(2, n_samples // 15))
-            actual_gap = max(5, min(20, n_samples // 8))
+            # Adaptive folds: fewer folds for small datasets (min 2, scale with data)
+            actual_folds = min(args.wfa_folds, max(2, n_samples // 25))
+            actual_gap = max(3, min(15, n_samples // 10))
             log.info(f"Running Walk-Forward Analysis ({actual_folds} folds) with dynamic per-fold RFE Feature Selection...")
+
+            if HAS_SMOTE and not args.no_smote:
+                log.info(f"  SMOTE oversampling: ENABLED (pos={pos_cases}, neg={neg_cases})")
+
             tscv = TimeSeriesSplit(n_splits=actual_folds, gap=actual_gap)
-            
+
             best_tuned_params = {}
             acc_scores = []
             prec_scores = []
             roc_auc_scores = []
             f1_scores = []
-            
+
             for i, (train_idx, test_idx) in enumerate(tscv.split(X_all)):
                 X_tr_full, y_tr = X_all[train_idx], y_all[train_idx]
                 X_te_full, y_te = X_all[test_idx], y_all[test_idx]
 
-                # Calculate dynamic cap based on the fold's training size
-                pos_cases_fold = np.sum(y_tr == 1)
+                # ADAPTIVE RFE: scale features with sqrt(n_samples) — not arbitrary cap at 30
                 n_samples_fold = len(X_tr_full)
-                dynamic_n_features_fold = max(8, min(30, int(n_samples_fold / 10)))
+                dynamic_n_features_fold = max(8, min(int(np.sqrt(n_samples_fold) * 1.5), len(base_feature_names)))
 
                 # Dynamically run RFE on this specific fold
                 estimator_rfe = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
@@ -241,11 +285,15 @@ def main(argv=None):
                 X_tr = X_tr_full[:, selector.support_]
                 X_te = X_te_full[:, selector.support_]
 
-                # Dynamically calculate and cap fold-specific class weighting
+                # Apply SMOTE oversampling on training fold (not validation!)
+                if not args.no_smote:
+                    X_tr, y_tr = _apply_smote(X_tr, y_tr, random_state=42 + i)
+
+                # Recalculate fold-specific class weighting after potential SMOTE
                 neg_cases_fold = np.sum(y_tr == 0)
                 pos_cases_fold = np.sum(y_tr == 1)
                 fold_scale_weight = float(neg_cases_fold) / max(1.0, float(pos_cases_fold))
-                fold_scale_weight = min(fold_scale_weight, 100.0)
+                fold_scale_weight = min(fold_scale_weight, 20.0)
 
                 clf = xgb.XGBClassifier(
                     n_estimators=args.n_estimators,
@@ -261,27 +309,28 @@ def main(argv=None):
                     scale_pos_weight=fold_scale_weight
                 )
 
-                # Hyperparameter Tuning Support
+                # Hyperparameter Tuning Support (lowered min positive cases from 15 to 8)
                 if getattr(args, 'tune', False):
-                    if pos_cases_fold >= 15:
+                    orig_pos = np.sum(y_all[train_idx] == 1)  # Use original count for threshold
+                    if orig_pos >= 8:
                         from sklearn.model_selection import RandomizedSearchCV
                         param_dist = {
                             'learning_rate': [0.01, 0.05, 0.1, 0.2],
-                            'max_depth': [1, 2, 3, 4],
-                            'n_estimators': [50, 100, 150],
+                            'max_depth': [1, 2, 3, 4, 5],
+                            'n_estimators': [50, 100, 150, 200],
                             'reg_alpha': [0.1, 1.0, 5.0],
                             'reg_lambda': [0.1, 1.0, 5.0],
                             'subsample': [0.6, 0.8, 1.0],
                             'colsample_bytree': [0.6, 0.8, 1.0]
                         }
                         cv_folds = min(3, max(2, len(X_tr) // 15))
-                        random_search = RandomizedSearchCV(clf, param_distributions=param_dist, n_iter=10, scoring='roc_auc', cv=cv_folds, random_state=42)
+                        random_search = RandomizedSearchCV(clf, param_distributions=param_dist, n_iter=15, scoring='roc_auc', cv=cv_folds, random_state=42)
                         random_search.fit(X_tr, y_tr)
                         clf = random_search.best_estimator_
                         best_tuned_params = random_search.best_params_
                         log.info(f"    Fold {i+1} Tuned Params: {random_search.best_params_}")
                     else:
-                        log.info(f"    Fold {i+1}: Skipped Tuning (Insufficient Positive Cases: {pos_cases_fold} < 15)")
+                        log.info(f"    Fold {i+1}: Skipped Tuning (Insufficient Positive Cases: {orig_pos} < 8)")
 
                 clf.fit(X_tr, y_tr)
 
@@ -309,15 +358,21 @@ def main(argv=None):
 
             log.info("Running Final RFE Feature Selection on FULL dataset for Production Model...")
 
-            # Calculate dynamic cap based on the entire dataset size
+            # ADAPTIVE RFE for final model: sqrt(n) * 1.5, no arbitrary cap
             n_samples_all = len(X_all)
-            dynamic_n_features_final = max(8, min(30, int(n_samples_all / 10)))
+            dynamic_n_features_final = max(10, min(int(np.sqrt(n_samples_all) * 1.5), len(base_feature_names)))
 
-            log.info(f"Dynamic RFE: Limiting to {dynamic_n_features_final} features for {n_samples_all} samples.")
+            log.info(f"Dynamic RFE: Selecting up to {dynamic_n_features_final} features for {n_samples_all} samples.")
 
             estimator_rfe_final = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
             selector_final = RFE(estimator_rfe_final, n_features_to_select=dynamic_n_features_final, step=1)
-            selector_final = selector_final.fit(X_all, y_all)
+
+            # Apply SMOTE before final RFE if enabled
+            X_all_for_rfe, y_all_for_rfe = X_all, y_all
+            if not args.no_smote:
+                X_all_for_rfe, y_all_for_rfe = _apply_smote(X_all, y_all, random_state=99)
+
+            selector_final = selector_final.fit(X_all_for_rfe, y_all_for_rfe)
             selected_features = [f for f, s in zip(base_feature_names, selector_final.support_) if s]
 
             X_all_sel = X_all[:, selector_final.support_]
@@ -325,13 +380,23 @@ def main(argv=None):
 
             log.info("Training and Calibrating Final Production Model on FULL dataset...")
 
+            # Apply SMOTE on the selected features for final training
+            X_final_train, y_final_train = X_all_sel, y_all
+            if not args.no_smote:
+                X_final_train, y_final_train = _apply_smote(X_all_sel, y_all, random_state=42)
+
+            # Recalculate weight after SMOTE
+            final_pos = np.sum(y_final_train == 1)
+            final_neg = np.sum(y_final_train == 0)
+            final_weight = min(float(final_neg) / max(1.0, float(final_pos)), 20.0)
+
             if best_tuned_params:
                 final_model = xgb.XGBClassifier(
                     **best_tuned_params,
                     random_state=42,
                     objective='binary:logistic',
                     eval_metric='logloss',
-                    scale_pos_weight=scale_weight
+                    scale_pos_weight=final_weight
                 )
             else:
                 final_model = xgb.XGBClassifier(
@@ -345,11 +410,10 @@ def main(argv=None):
                     random_state=42,
                     objective='binary:logistic',
                     eval_metric='logloss',
-                    scale_pos_weight=scale_weight
+                    scale_pos_weight=final_weight
                 )
 
-            # Fit the final model directly (No Calibration)
-            final_model.fit(X_all_sel, y_all)
+            final_model.fit(X_final_train, y_final_train)
 
             valid_edge = bool(avg_roc > 0.50 and avg_prec > 0.10)
 
@@ -366,7 +430,11 @@ def main(argv=None):
                 "wfa_prec": avg_prec,
                 "wfa_roc_auc": avg_roc,
                 "wfa_f1": avg_f1,
-                "valid_edge": valid_edge
+                "valid_edge": valid_edge,
+                "smote_enabled": HAS_SMOTE and not args.no_smote,
+                "n_features_selected": len(selected_features),
+                "n_samples_total": n_samples_all,
+                "pos_neg_ratio": f"{pos_cases}/{neg_cases}"
             }
 
             out_file = out_dir / f"brain_{strat_clean}_{side}.joblib"

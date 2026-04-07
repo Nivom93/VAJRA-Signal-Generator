@@ -1072,23 +1072,85 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
     f["dist_asian_high_pct"] = (px - f["asian_high"]) / px_safe * 100
     f["dist_asian_low_pct"] = (px - f["asian_low"]) / px_safe * 100
 
-    # SMC & Fibonacci Deep Wick Geometry
+    # SMC & Fibonacci Deep Wick Geometry (EXPANDED: Full Fib Suite + OTE Zone)
     macro_high = max(f["last_swing_high"], f["last_swing_low"])
     macro_low = min(f["last_swing_high"], f["last_swing_low"])
     fractal_range = macro_high - macro_low
 
     if fractal_range > 0:
-        f["fib_786_long"] = macro_low + (fractal_range * 0.214)
-        f["fib_886_long"] = macro_low + (fractal_range * 0.114)
+        # Standard Fibonacci retracements
+        f["fib_382_long"] = macro_low + (fractal_range * 0.618)    # 38.2% retrace for longs
+        f["fib_500_long"] = macro_low + (fractal_range * 0.500)    # 50% retrace (equilibrium)
+        f["fib_618_long"] = macro_low + (fractal_range * 0.382)    # 61.8% retrace (golden ratio)
+        f["fib_786_long"] = macro_low + (fractal_range * 0.214)    # 78.6% retrace (deep)
+        f["fib_886_long"] = macro_low + (fractal_range * 0.114)    # 88.6% retrace (extreme)
+        f["fib_382_short"] = macro_high - (fractal_range * 0.618)
+        f["fib_500_short"] = macro_high - (fractal_range * 0.500)
+        f["fib_618_short"] = macro_high - (fractal_range * 0.382)
         f["fib_786_short"] = macro_high - (fractal_range * 0.214)
         f["fib_886_short"] = macro_high - (fractal_range * 0.114)
-    else:
-        f["fib_786_long"] = f["fib_886_long"] = f["fib_786_short"] = f["fib_886_short"] = px
 
+        # ICT Optimal Trade Entry (OTE) Zone: 62-79% retracement
+        ote_top_long = macro_low + (fractal_range * 0.382)   # 61.8% retrace
+        ote_bot_long = macro_low + (fractal_range * 0.214)   # 78.6% retrace
+        f["in_ote_zone_long"] = 1.0 if ote_bot_long <= px <= ote_top_long else 0.0
+        ote_top_short = macro_high - (fractal_range * 0.214)
+        ote_bot_short = macro_high - (fractal_range * 0.382)
+        f["in_ote_zone_short"] = 1.0 if ote_bot_short <= px <= ote_top_short else 0.0
+
+        # Premium/Discount zone (above/below 50% = premium/discount)
+        f["fib_position_pct"] = (px - macro_low) / fractal_range * 100.0  # 0-100 scale
+        f["is_discount_zone"] = 1.0 if px < (macro_low + fractal_range * 0.5) else 0.0
+        f["is_premium_zone"] = 1.0 if px > (macro_low + fractal_range * 0.5) else 0.0
+
+        # Fibonacci extensions (for TP targeting)
+        f["fib_ext_1272"] = macro_high + (fractal_range * 0.272)
+        f["fib_ext_1618"] = macro_high + (fractal_range * 0.618)
+    else:
+        f["fib_382_long"] = f["fib_500_long"] = f["fib_618_long"] = px
+        f["fib_786_long"] = f["fib_886_long"] = px
+        f["fib_382_short"] = f["fib_500_short"] = f["fib_618_short"] = px
+        f["fib_786_short"] = f["fib_886_short"] = px
+        f["in_ote_zone_long"] = 0.0; f["in_ote_zone_short"] = 0.0
+        f["fib_position_pct"] = 50.0
+        f["is_discount_zone"] = 0.0; f["is_premium_zone"] = 0.0
+        f["fib_ext_1272"] = f["fib_ext_1618"] = px
+
+    f["dist_fib_618_long_pct"] = (px - f["fib_618_long"]) / px_safe * 100
     f["dist_fib_786_long_pct"] = (px - f["fib_786_long"]) / px_safe * 100
     f["dist_fib_886_long_pct"] = (px - f["fib_886_long"]) / px_safe * 100
+    f["dist_fib_618_short_pct"] = (px - f["fib_618_short"]) / px_safe * 100
     f["dist_fib_786_short_pct"] = (px - f["fib_786_short"]) / px_safe * 100
     f["dist_fib_886_short_pct"] = (px - f["fib_886_short"]) / px_safe * 100
+
+    # Displacement detection: large body candle (>2x ATR) = institutional commitment
+    curr_atr = pExec.atr14[idx_Exec] if idx_Exec < len(pExec.atr14) else px * 0.01
+    curr_body = abs(pExec.c[idx_Exec] - pExec.o[idx_Exec])
+    f["is_displacement"] = 1.0 if curr_body > curr_atr * 1.5 else 0.0
+    f["displacement_ratio"] = curr_body / (curr_atr + 1e-12)
+
+    # Recent displacement lookback (any displacement in last 5 bars)
+    recent_disp_bull = 0.0
+    recent_disp_bear = 0.0
+    for rb in range(max(0, idx_Exec - 4), idx_Exec + 1):
+        if rb < len(pExec.c):
+            rb_body = abs(pExec.c[rb] - pExec.o[rb])
+            rb_atr = pExec.atr14[rb] if rb < len(pExec.atr14) else px * 0.01
+            if rb_body > rb_atr * 1.5:
+                if pExec.c[rb] > pExec.o[rb]: recent_disp_bull = 1.0
+                else: recent_disp_bear = 1.0
+    f["recent_displacement_bull"] = recent_disp_bull
+    f["recent_displacement_bear"] = recent_disp_bear
+
+    # Liquidity void detection: gap between current bar low and prior bar high (or vice versa)
+    if idx_Exec > 0:
+        gap_up = pExec.l[idx_Exec] - pExec.h[idx_Exec - 1]
+        gap_dn = pExec.l[idx_Exec - 1] - pExec.h[idx_Exec]
+        f["liquidity_void_up"] = max(0, gap_up) / (curr_atr + 1e-12)
+        f["liquidity_void_dn"] = max(0, gap_dn) / (curr_atr + 1e-12)
+    else:
+        f["liquidity_void_up"] = 0.0
+        f["liquidity_void_dn"] = 0.0
 
     # Check if Asian Range was just swept
     f["asian_range_swept_up"] = 1.0 if pExec.h[idx_Exec] > pExec.asian_high[idx_Exec] and pExec.c[idx_Exec] < pExec.asian_high[idx_Exec] else 0.0
@@ -1348,6 +1410,104 @@ def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, b
 
     f['dist_to_kc_upper_pct'] = np.where(kc_upper_arr > 0, (cl - kc_upper_arr) / kc_upper_arr * 100.0, 0.0)
     f['dist_to_kc_lower_pct'] = np.where(kc_lower_arr > 0, (cl - kc_lower_arr) / kc_lower_arr * 100.0, 0.0)
+
+    # ---------------------------------------------------------
+    # DIRECTIVE 5: MOMENTUM PERSISTENCE & ACCELERATION FEATURES
+    # ---------------------------------------------------------
+    # RSI Rate of Change — captures momentum acceleration/deceleration
+    f['rsi_roc_5'] = _roc(pExec.rsi14, 5)
+    f['rsi_roc_10'] = _roc(pExec.rsi14, 10)
+
+    # MACD Histogram slope — momentum persistence indicator
+    macd_hist = pExec.macd - pExec.macd_sig
+    f['macd_hist_slope_3'] = _roc(macd_hist, 3)
+    f['macd_hist_slope_5'] = _roc(macd_hist, 5)
+
+    # Stochastic %K/%D proxy via RSI normalization
+    rsi_min_14 = pd.Series(pExec.rsi14).rolling(14, min_periods=1).min().to_numpy()
+    rsi_max_14 = pd.Series(pExec.rsi14).rolling(14, min_periods=1).max().to_numpy()
+    rsi_range = rsi_max_14 - rsi_min_14
+    f['stoch_rsi_k'] = np.where(rsi_range > 1e-9, (pExec.rsi14 - rsi_min_14) / rsi_range * 100.0, 50.0)
+    f['stoch_rsi_d'] = _ema_np(f['stoch_rsi_k'], 3)
+
+    # ---------------------------------------------------------
+    # DIRECTIVE 6: CANDLE PATTERN FEATURES (numeric for brain)
+    # ---------------------------------------------------------
+    body_size_arr = np.abs(cl - pExec.o)
+    total_range_arr = pExec.h - pExec.l
+    safe_range = np.where(total_range_arr > 1e-9, total_range_arr, 1e-9)
+
+    # Engulfing pattern detection
+    prev_body = np.abs(np.roll(cl, 1) - np.roll(pExec.o, 1))
+    curr_body = body_size_arr
+    bullish_close = cl > pExec.o
+    bearish_close = cl < pExec.o
+    prev_bearish = np.roll(cl, 1) < np.roll(pExec.o, 1)
+    prev_bullish = np.roll(cl, 1) > np.roll(pExec.o, 1)
+    f['engulf_bull_signal'] = np.where(bullish_close & prev_bearish & (curr_body > prev_body * 1.1), 1.0, 0.0)
+    f['engulf_bear_signal'] = np.where(bearish_close & prev_bullish & (curr_body > prev_body * 1.1), 1.0, 0.0)
+    f['engulf_bull_signal'][0] = 0.0
+    f['engulf_bear_signal'][0] = 0.0
+
+    # Pin bar strength (normalized wick dominance)
+    f['pin_bull_strength'] = (np.minimum(pExec.o, cl) - pExec.l) / safe_range
+    f['pin_bear_strength'] = (pExec.h - np.maximum(pExec.o, cl)) / safe_range
+
+    # Inside bar (contraction) — prior bar engulfs current
+    prev_high = np.roll(pExec.h, 1)
+    prev_low = np.roll(pExec.l, 1)
+    f['is_inside_bar'] = np.where((pExec.h <= prev_high) & (pExec.l >= prev_low), 1.0, 0.0)
+    f['is_inside_bar'][0] = 0.0
+
+    # Body-to-range ratio (doji detection when low)
+    f['body_range_ratio'] = body_size_arr / safe_range
+
+    # ---------------------------------------------------------
+    # DIRECTIVE 7: ROLLING HURST EXPONENT (Mean Reversion vs Trend)
+    # ---------------------------------------------------------
+    n = len(cl)
+    hurst_arr = np.full(n, 0.5)
+    hurst_window = 100
+    for i in range(hurst_window, n):
+        chunk = cl[i - hurst_window:i]
+        if np.std(chunk) < 1e-9:
+            continue
+        # Simplified R/S method
+        mean_c = np.mean(chunk)
+        deviations = np.cumsum(chunk - mean_c)
+        r_val = np.max(deviations) - np.min(deviations)
+        s_val = np.std(chunk, ddof=1)
+        if s_val > 1e-9 and r_val > 1e-9:
+            # H = log(R/S) / log(n)
+            hurst_arr[i] = np.log(r_val / s_val) / np.log(hurst_window)
+    f['rolling_hurst'] = np.clip(hurst_arr, 0.0, 1.0)
+
+    # ---------------------------------------------------------
+    # DIRECTIVE 8: INTER-TIMEFRAME DIVERGENCE SCORING
+    # ---------------------------------------------------------
+    # HTF bullish + LTF bearish = bullish divergence setup, and vice versa
+    ltf_momentum = np.where(pExec.rsi14 > 50, 1.0, -1.0)
+    mtf_rsi_s = pd.Series(pSwing.rsi14, index=swing_tf.timestamp).shift(1).reindex(exec_tf.timestamp, method='ffill').fillna(50).values
+    htf_rsi_s = pd.Series(pMacro.rsi14, index=macro_tf.timestamp).shift(1).reindex(exec_tf.timestamp, method='ffill').fillna(50).values
+    mtf_momentum = np.where(mtf_rsi_s > 50, 1.0, -1.0)
+    htf_momentum = np.where(htf_rsi_s > 50, 1.0, -1.0)
+
+    # Cross-TF divergence: when LTF diverges from HTF, potential reversal
+    f['ltf_htf_momentum_div'] = ltf_momentum - htf_momentum  # +2 = LTF bull/HTF bear, -2 = opposite
+    f['ltf_mtf_momentum_div'] = ltf_momentum - mtf_momentum
+
+    # ---------------------------------------------------------
+    # DIRECTIVE 9: ADAPTIVE VOLATILITY FEATURES
+    # ---------------------------------------------------------
+    # Volatility of volatility (vol-of-vol) — regime change detector
+    atr_pct = pExec.atr14 / (np.abs(cl) + 1e-12) * 100
+    f['vol_of_vol_20'] = _rolling_std(atr_pct, 20)
+
+    # ATR expansion/contraction rate
+    f['atr_expansion_rate'] = _roc(atr_pct, 10)
+
+    # Normalized ATR percentile change (acceleration of volatility)
+    f['atr_pctl_roc_10'] = _roc(pExec.atr_percentile_100 * 100.0, 10)
 
     # ---------------------------------------------------------
     # DIRECTIVE 4: STRIP COLLINEAR NOISE
@@ -1696,17 +1856,19 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     bullish_tf_count = int(macro_up > 0) + int(swing_up > 0) + int(htf_up > 0)
     bearish_tf_count = int(macro_down > 0) + int(swing_down > 0) + int(htf_down > 0)
 
-    # HARD REGIME GATE: Block counter-trend trades in strong unidirectional trends
+    # REGIME GATE: Block counter-trend trades when strong unidirectional trend
     can_long = True
     can_short = True
     is_reversal_context = False
 
+    # Relaxed gate: block only when ALL 3 TFs agree AND momentum confirms
     if bearish_tf_count == 3:
-        # All 3 higher TFs bearish — block longs unless reversal evidence
         can_long = False
     if bullish_tf_count == 3:
-        # All 3 higher TFs bullish — block shorts unless reversal evidence
         can_short = False
+    # Partial regime bias: when 2/3 TFs agree, allow but flag as weaker conviction
+    is_weak_long = (bearish_tf_count >= 2 and bullish_tf_count == 0)
+    is_weak_short = (bullish_tf_count >= 2 and bearish_tf_count == 0)
 
     # ==========================================================
     # PHASE 2: REVERSAL DETECTION (Override regime gate when evidence is overwhelming)
@@ -1729,11 +1891,19 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     bull_reversal_evidence = int(bull_obv) + int(bull_ewo) + int(bull_cvd) + int(bull_rsi_div) + int(has_spring)
     bear_reversal_evidence = int(bear_obv) + int(bear_ewo) + int(bear_cvd) + int(bear_rsi_div) + int(has_upthrust)
 
-    # Unlock counter-trend if 4+ reversal signals converge (stricter — reversals are lower win rate)
-    if not can_long and bull_reversal_evidence >= 4:
+    # Unlock counter-trend when reversal evidence converges (configurable threshold)
+    reversal_min = getattr(cfg, 'reversal_evidence_min', 2)
+    if not can_long and bull_reversal_evidence >= reversal_min:
         can_long = True
         is_reversal_context = True
-    if not can_short and bear_reversal_evidence >= 4:
+    if not can_short and bear_reversal_evidence >= reversal_min:
+        can_short = True
+        is_reversal_context = True
+    # Also unlock on strong single-signal reversals (Wyckoff spring/upthrust are high-conviction)
+    if not can_long and has_spring and bull_reversal_evidence >= 1:
+        can_long = True
+        is_reversal_context = True
+    if not can_short and has_upthrust and bear_reversal_evidence >= 1:
         can_short = True
         is_reversal_context = True
 
@@ -1744,20 +1914,20 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     btc_bullish = base.get("btc_bullish", 1.0)
     bid_ask_imbalance = base.get("bid_ask_imbalance", 0.5)
 
-    # Oracle hard veto: deeply negative sentiment blocks longs, deeply positive blocks shorts
-    if oracle_sentiment < -0.6 and not is_reversal_context:
+    # Oracle hard veto: only block on extreme sentiment (widened from ±0.6 to ±0.8)
+    if oracle_sentiment < -0.8 and not is_reversal_context:
         can_long = False
-    if oracle_sentiment > 0.6 and not is_reversal_context:
+    if oracle_sentiment > 0.8 and not is_reversal_context:
         can_short = False
 
-    # BTC regime: if BTC is bearish and this isn't BTC, reduce long conviction
-    if btc_bullish < 0.5 and not is_reversal_context:
-        if bearish_tf_count >= 2:
+    # BTC regime: only block longs when BTC is deeply bearish AND all TFs confirm
+    if btc_bullish < 0.3 and not is_reversal_context:
+        if bearish_tf_count >= 3:
             can_long = False
 
-    # Spoofing defense
-    if bid_ask_imbalance > 0.80: can_long = False
-    if bid_ask_imbalance < 0.20: can_short = False
+    # Spoofing defense (widened from 0.80/0.20 to 0.90/0.10 — less false positives)
+    if bid_ask_imbalance > 0.90: can_long = False
+    if bid_ask_imbalance < 0.10: can_short = False
 
     if not can_long and not can_short: return None
 
@@ -1766,16 +1936,18 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # ==========================================================
     adx_val = base.get("adx", 25.0)
 
-    # Choppy market filter: ADX < 15 means no directional conviction — skip
-    if adx_val < 15.0 and not is_reversal_context:
+    # Choppy market filter — respects config (default threshold lowered to 10)
+    adx_threshold = getattr(cfg, 'adx_chop_threshold', 10.0)
+    if getattr(cfg, 'filter_adx_chop', True) and adx_val < adx_threshold and not is_reversal_context:
         return None
 
-    # Multi-TF alignment: require at least 2 TF agreement for trend trades
+    # Multi-TF alignment: configurable minimum (default 1 TF agreement)
+    mtf_min = getattr(cfg, 'mtf_alignment_min', 1)
     if not is_reversal_context:
-        if can_long and not can_short and bullish_tf_count < 2:
-            return None  # Not enough TF support for a long-only context
-        if can_short and not can_long and bearish_tf_count < 2:
-            return None  # Not enough TF support for a short-only context
+        if can_long and not can_short and bullish_tf_count < mtf_min:
+            return None
+        if can_short and not can_long and bearish_tf_count < mtf_min:
+            return None
 
     # ==========================================================
     # PHASE 4: PRECISE STRUCTURAL ENTRY DETECTION
@@ -1791,33 +1963,38 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     ob_bull_ce = (ob_bull_top + ob_bull_bot) / 2 if ob_bull_top > 0 else 0
     ob_bear_ce = (ob_bear_top + ob_bear_bot) / 2 if ob_bear_bot > 0 else 0
 
-    ob_bull_fresh = 0 < base.get("bars_since_ob_bull", 999) <= 40
-    ob_bear_fresh = 0 < base.get("bars_since_ob_bear", 999) <= 40
+    ob_max_age = getattr(cfg, 'ob_freshness_bars', 192)
+    ob_bull_fresh = 0 < base.get("bars_since_ob_bull", 999) <= ob_max_age
+    ob_bear_fresh = 0 < base.get("bars_since_ob_bear", 999) <= ob_max_age
 
     fvg_bull = base.get("fvg_bull", 0)
     fvg_bear = base.get("fvg_bear", 0)
-    fvg_tol = px * 0.002  # Widen FVG tolerance to 0.2%
-    qm_zone = current_atr * 0.5  # Widen QM zone to 0.5 ATR
+    fvg_tol_atr = getattr(cfg, 'fvg_tolerance_atr', 0.5)
+    fvg_tol = current_atr * fvg_tol_atr  # FVG zone = 0.5 ATR (was 0.2% of price)
+    qm_zone = current_atr * 0.75  # Widen QM zone to 0.75 ATR (was 0.5)
 
     sweep_bull = base.get("sweep_bull_p", 0.0)
     sweep_bear = base.get("sweep_bear_p", 0.0)
 
-    # Wick rejection detection (3-bar window)
+    # Wick rejection detection (5-bar window, configurable threshold)
+    wick_threshold = getattr(cfg, 'wick_rejection_pct', 0.15)
     is_bull_rejection = False
     is_bear_rejection = False
-    for idx in range(max(0, iExec - 2), iExec + 1):
+    for idx in range(max(0, iExec - 4), iExec + 1):
         if idx >= len(pExec.h): continue
         c_range = pExec.h[idx] - pExec.l[idx]
         if c_range > 1e-9:
             body_top = max(pExec.o[idx], pExec.c[idx])
             body_bot = min(pExec.o[idx], pExec.c[idx])
-            if (body_bot - pExec.l[idx]) / c_range > 0.25: is_bull_rejection = True
-            if (pExec.h[idx] - body_top) / c_range > 0.25: is_bear_rejection = True
+            if (body_bot - pExec.l[idx]) / c_range > wick_threshold: is_bull_rejection = True
+            if (pExec.h[idx] - body_top) / c_range > wick_threshold: is_bear_rejection = True
 
-    # Volume confirmation (current or recent bar)
-    has_volume = any(pExec.vol_spike[max(0, iExec-2):iExec+1] > 0) if hasattr(pExec, 'vol_spike') else False
+    # Volume confirmation (configurable lookback and threshold)
+    vol_lookback = getattr(cfg, 'vol_spike_lookback', 5)
+    has_volume = any(pExec.vol_spike[max(0, iExec-vol_lookback+1):iExec+1] > 0) if hasattr(pExec, 'vol_spike') else False
     rvol = base.get("rvol", 1.0)
-    has_elevated_vol = rvol > 1.2
+    rvol_threshold = getattr(cfg, 'vol_confirm_rvol', 0.8)
+    has_elevated_vol = rvol > rvol_threshold
 
     setup_type = None
     logic_desc = ""
@@ -1866,6 +2043,31 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
                 setup_type = "EPSILON_LONG"
                 logic_desc = "Wyckoff spring: liquidity sweep + reclaim + volume."
 
+        # ZETA_LONG: EMA Pullback — price pulls back to EMA20/50 in uptrend
+        if not setup_type:
+            ema20_val = base.get("ema20_dist_pct", 0)
+            ema50_val = base.get("dist_ema50_pct", 0)
+            htf_bullish = base.get("htf_up", 0) > 0
+            if htf_bullish and bullish_tf_count >= 2:
+                # Price within 0.3% of EMA20 or between EMA20 and EMA50
+                if -0.5 < ema20_val < 0.3 and is_bull_rejection and has_vol_confirm:
+                    setup_type = "ZETA_LONG"
+                    logic_desc = "EMA pullback entry in confirmed uptrend + rejection wick."
+
+        # ETA_LONG: Liquidity Sweep + Reclaim — sweep of recent low then reclaim
+        if not setup_type:
+            if sweep_bull > 0 and is_bull_rejection and has_vol_confirm:
+                setup_type = "ETA_LONG"
+                logic_desc = "Liquidity sweep below support + price reclaim + volume."
+
+        # THETA_LONG: Keltner/BB Mean Reversion — price at lower extreme
+        if not setup_type:
+            kc_lower_dist = base.get("dist_to_kc_lower_pct", 0)
+            vwap_z = base.get("vwap_z_score", 0)
+            if kc_lower_dist < -0.5 and vwap_z < -1.5 and is_bull_rejection and has_vol_confirm:
+                setup_type = "THETA_LONG"
+                logic_desc = "Mean reversion from Keltner lower band + VWAP extreme."
+
     # ---- SHORT SETUPS ----
     if not setup_type and can_short:
         side = 'short'
@@ -1906,6 +2108,29 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
                 setup_type = "EPSILON_SHORT"
                 logic_desc = "Wyckoff upthrust: liquidity sweep + reclaim + volume."
 
+        # ZETA_SHORT: EMA Pullback — price rallies to EMA20/50 in downtrend
+        if not setup_type:
+            ema20_val = base.get("ema20_dist_pct", 0)
+            htf_bearish = base.get("htf_down", 0) > 0
+            if htf_bearish and bearish_tf_count >= 2:
+                if -0.3 < ema20_val < 0.5 and is_bear_rejection and has_vol_confirm:
+                    setup_type = "ZETA_SHORT"
+                    logic_desc = "EMA pullback entry in confirmed downtrend + rejection wick."
+
+        # ETA_SHORT: Liquidity Sweep + Rejection — sweep of recent high then reject
+        if not setup_type:
+            if sweep_bear > 0 and is_bear_rejection and has_vol_confirm:
+                setup_type = "ETA_SHORT"
+                logic_desc = "Liquidity sweep above resistance + price rejection + volume."
+
+        # THETA_SHORT: Keltner/BB Mean Reversion — price at upper extreme
+        if not setup_type:
+            kc_upper_dist = base.get("dist_to_kc_upper_pct", 0)
+            vwap_z = base.get("vwap_z_score", 0)
+            if kc_upper_dist > 0.5 and vwap_z > 1.5 and is_bear_rejection and has_vol_confirm:
+                setup_type = "THETA_SHORT"
+                logic_desc = "Mean reversion from Keltner upper band + VWAP extreme."
+
     if not setup_type: return None
 
     # ==========================================================
@@ -1931,24 +2156,28 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     if side == 'long':
         # Setup-specific SL: use the tightest structural invalidation
         if strat_base == "ALPHA" and ob_bull_bot > 0:
-            sl = ob_bull_bot - sl_buffer  # Below OB body = OB invalidated
+            sl = ob_bull_bot - sl_buffer
         elif strat_base == "GAMMA" and base.get("qm_bull", 0) > 0:
-            sl = base.get("qm_bull", 0) - sl_buffer  # Below QM pivot
+            sl = base.get("qm_bull", 0) - sl_buffer
         elif strat_base == "DELTA" and fvg_bull > 0:
-            # Below FVG low boundary
             fvg_low = fvg_bull - fvg_tol
             sl = fvg_low - sl_buffer
+        elif strat_base == "THETA":
+            # Mean reversion: SL below Keltner lower - 1 ATR
+            sl = low - current_atr - sl_buffer
         else:
             sl = min(swing_low, low) - sl_buffer
 
         if sl >= entry_target: return None
         risk_distance = entry_target - sl
 
-        # Structural TP targets
-        possible_tps = [t for t in [ob_bear_bot, base.get("vah", 0), htf_sh_val, mtf_sh_val] if t > entry_target]
+        # Structural TP targets (expanded: include VWAP, Keltner bands, POC)
+        vwap_val = base.get("rolling_vwap_20", 0)
+        poc_val = base.get("poc", 0)
+        possible_tps = [t for t in [ob_bear_bot, base.get("vah", 0), htf_sh_val, mtf_sh_val, vwap_val, poc_val] if t > entry_target]
         possible_tps.sort()
         if not possible_tps:
-            possible_tps = [entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 3.0))]
+            possible_tps = [entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 4.0))]
 
         selected_tp = None
         for t in possible_tps:
@@ -1972,16 +2201,21 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         elif strat_base == "DELTA" and fvg_bear > 0:
             fvg_high = fvg_bear + fvg_tol
             sl = fvg_high + sl_buffer
+        elif strat_base == "THETA":
+            # Mean reversion: SL above Keltner upper + 1 ATR
+            sl = high + current_atr + sl_buffer
         else:
             sl = max(swing_high, high) + sl_buffer
 
         if sl <= entry_target: return None
         risk_distance = sl - entry_target
 
-        possible_tps = [t for t in [ob_bull_top, base.get("val", 0), htf_sl_val, mtf_sl_val] if 0 < t < entry_target]
+        vwap_val = base.get("rolling_vwap_20", 0)
+        poc_val = base.get("poc", 0)
+        possible_tps = [t for t in [ob_bull_top, base.get("val", 0), htf_sl_val, mtf_sl_val, vwap_val, poc_val] if 0 < t < entry_target]
         possible_tps.sort(reverse=True)
         if not possible_tps:
-            possible_tps = [entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 3.5))]
+            possible_tps = [entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 4.0))]
 
         selected_tp = None
         for t in possible_tps:
