@@ -50,3 +50,8 @@ def _strategy_overrides(cfg):
     cfg.ob_freshness_bars = 192         # OB valid for 192 bars / 48h on 15m (was 40)
     cfg.fvg_tolerance_atr = 0.5         # FVG zone tolerance = 0.5 ATR (was 0.2% of price)
     cfg.mtf_alignment_min = 1           # Only 1 TF agreement needed for trend trades (was 2)
+
+    # Meta-Brain threshold (separate from specialist min_prob)
+    # Meta-Brain outputs lower probabilities due to unbalanced base rate (~22% positive).
+    # This threshold is its go/no-go gate — trades must also clear specialist min_prob above.
+    cfg.min_meta_prob = 0.22
