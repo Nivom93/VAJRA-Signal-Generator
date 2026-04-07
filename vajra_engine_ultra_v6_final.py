@@ -2260,183 +2260,220 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # Volume confirmation gate — require elevated volume or spike for valid entries
     has_vol_confirm = has_volume or has_elevated_vol
 
-    # ---- LONG SETUPS ----
-    if can_long:
-        side = 'long'
+    # ==========================================================
+    # PHASE 4A: STRUCTURAL CONFLUENCE SCORING
+    # ==========================================================
+    # Count how many independent structural signals are active RIGHT NOW.
+    # This score is passed to the brain as a feature AND used to pick the
+    # best setup when multiple could fire on the same bar.
 
-        # ALPHA_LONG: OB CE — REQUIRE rejection wick confirmation + volume
+    # ---- Bullish confluence ----
+    bull_struct_score = 0.0
+    bull_struct_reasons = []
+    if ob_bull_ce > 0 and ob_bull_fresh and low <= ob_bull_ce:
+        bull_struct_score += 1.0; bull_struct_reasons.append("OB")
+    if fvg_bull > 0 and low <= (fvg_bull + fvg_tol) and px > (fvg_bull - fvg_tol):
+        bull_struct_score += 1.0; bull_struct_reasons.append("FVG")
+    if base.get("qm_bull", 0) > 0 and low <= (base.get("qm_bull", 0) + qm_zone):
+        bull_struct_score += 1.0; bull_struct_reasons.append("QM")
+    if has_spring:
+        bull_struct_score += 1.0; bull_struct_reasons.append("SPRING")
+    if sweep_bull > 0:
+        bull_struct_score += 1.0; bull_struct_reasons.append("SWEEP")
+    if base.get("in_ote_zone_long", 0) > 0:
+        bull_struct_score += 1.0; bull_struct_reasons.append("OTE")
+    if base.get("is_discount_zone", 0) > 0:
+        bull_struct_score += 0.5; bull_struct_reasons.append("DISCOUNT")
+    if base.get("wyckoff_accum", 0) > 0:
+        bull_struct_score += 1.0; bull_struct_reasons.append("ACCUM")
+    if base.get("choch_up", 0) > 0:
+        bull_struct_score += 1.0; bull_struct_reasons.append("CHOCH")
+    if base.get("displacement_bos_bull", 0) > 0:
+        bull_struct_score += 1.0; bull_struct_reasons.append("DISP+BOS")
+    div_count_bull = int(bull_ewo) + int(bull_obv) + int(bull_cvd) + int(bull_rsi_div)
+    if div_count_bull >= 2:
+        bull_struct_score += 1.0; bull_struct_reasons.append(f"DIV×{div_count_bull}")
+    if is_bull_rejection:
+        bull_struct_score += 0.5; bull_struct_reasons.append("WICK")
+
+    # ---- Bearish confluence ----
+    bear_struct_score = 0.0
+    bear_struct_reasons = []
+    if ob_bear_ce > 0 and ob_bear_fresh and high >= ob_bear_ce:
+        bear_struct_score += 1.0; bear_struct_reasons.append("OB")
+    if fvg_bear > 0 and high >= (fvg_bear - fvg_tol) and px < (fvg_bear + fvg_tol):
+        bear_struct_score += 1.0; bear_struct_reasons.append("FVG")
+    if base.get("qm_bear", 0) > 0 and high >= (base.get("qm_bear", 0) - qm_zone):
+        bear_struct_score += 1.0; bear_struct_reasons.append("QM")
+    if has_upthrust:
+        bear_struct_score += 1.0; bear_struct_reasons.append("UPTHRUST")
+    if sweep_bear > 0:
+        bear_struct_score += 1.0; bear_struct_reasons.append("SWEEP")
+    if base.get("in_ote_zone_short", 0) > 0:
+        bear_struct_score += 1.0; bear_struct_reasons.append("OTE")
+    if base.get("is_premium_zone", 0) > 0:
+        bear_struct_score += 0.5; bear_struct_reasons.append("PREMIUM")
+    if base.get("wyckoff_distrib", 0) > 0:
+        bear_struct_score += 1.0; bear_struct_reasons.append("DISTRIB")
+    if base.get("choch_down", 0) > 0:
+        bear_struct_score += 1.0; bear_struct_reasons.append("CHOCH")
+    if base.get("displacement_bos_bear", 0) > 0:
+        bear_struct_score += 1.0; bear_struct_reasons.append("DISP+BOS")
+    div_count_bear = int(bear_ewo) + int(bear_obv) + int(bear_cvd) + int(bear_rsi_div)
+    if div_count_bear >= 2:
+        bear_struct_score += 1.0; bear_struct_reasons.append(f"DIV×{div_count_bear}")
+    if is_bear_rejection:
+        bear_struct_score += 0.5; bear_struct_reasons.append("WICK")
+
+    # Inject confluence scores into base features so the brain can see them
+    base["bull_confluence_score"] = bull_struct_score
+    base["bear_confluence_score"] = bear_struct_score
+    base["bull_confluence_reasons"] = "+".join(bull_struct_reasons) if bull_struct_reasons else ""
+    base["bear_confluence_reasons"] = "+".join(bear_struct_reasons) if bear_struct_reasons else ""
+
+    # ==========================================================
+    # PHASE 4B: SETUP DETECTION (highest confluence wins)
+    # ==========================================================
+    # Collect ALL qualifying setups, then pick the one with highest confluence.
+    candidates = []
+
+    # ---- LONG CANDIDATES ----
+    if can_long:
+        # ALPHA_LONG: OB CE
         if ob_bull_ce > 0 and ob_bull_fresh and low <= ob_bull_ce and px > ob_bull_bot:
             if is_bull_rejection and has_vol_confirm:
-                setup_type = "ALPHA_LONG"
-                logic_desc = "OB CE mitigation + rejection wick + volume confirmed."
+                candidates.append(("ALPHA_LONG", "long", "OB CE mitigation + rejection wick + volume.", bull_struct_score))
 
-        # BETA_LONG: Divergence + BOS (BOS is the confirmation itself; require 2+ divs)
-        if not setup_type:
-            div_count = int(bull_ewo) + int(bull_obv) + int(bull_cvd) + int(bull_rsi_div)
-            if div_count >= 2 and base.get("bos_up", 0) > 0 and has_vol_confirm:
-                setup_type = "BETA_LONG"
-                logic_desc = f"Divergence confluence ({div_count} divs) + structural BOS + volume."
+        # BETA_LONG: Divergence + BOS
+        div_count = int(bull_ewo) + int(bull_obv) + int(bull_cvd) + int(bull_rsi_div)
+        if div_count >= 2 and base.get("bos_up", 0) > 0 and has_vol_confirm:
+            candidates.append(("BETA_LONG", "long", f"Divergence confluence ({div_count} divs) + structural BOS + volume.", bull_struct_score))
 
-        # GAMMA_LONG: QM retest — REQUIRE rejection wick
-        if not setup_type:
-            if (base.get("qm_bull", 0) > 0
-                    and low <= (base.get("qm_bull", 0) + qm_zone)
-                    and px > base.get("qm_bull", 0)
-                    and is_bull_rejection and has_vol_confirm):
-                setup_type = "GAMMA_LONG"
-                logic_desc = "QM structural retest + rejection wick + volume."
+        # GAMMA_LONG: QM retest
+        if (base.get("qm_bull", 0) > 0 and low <= (base.get("qm_bull", 0) + qm_zone)
+                and px > base.get("qm_bull", 0) and is_bull_rejection and has_vol_confirm):
+            candidates.append(("GAMMA_LONG", "long", "QM structural retest + rejection wick + volume.", bull_struct_score))
 
-        # DELTA_LONG: FVG mitigation — REQUIRE rejection wick + volume
-        if not setup_type:
-            if (fvg_bull > 0 and low <= (fvg_bull + fvg_tol)
-                    and px > (fvg_bull - fvg_tol)
-                    and is_bull_rejection and has_vol_confirm):
-                setup_type = "DELTA_LONG"
-                logic_desc = "FVG CE mitigation + rejection wick + volume."
+        # DELTA_LONG: FVG mitigation
+        if (fvg_bull > 0 and low <= (fvg_bull + fvg_tol)
+                and px > (fvg_bull - fvg_tol) and is_bull_rejection and has_vol_confirm):
+            candidates.append(("DELTA_LONG", "long", "FVG CE mitigation + rejection wick + volume.", bull_struct_score))
 
-        # EPSILON_LONG: Wyckoff Spring (spring already has volume built in)
-        if not setup_type:
-            if has_spring and has_vol_confirm:
-                setup_type = "EPSILON_LONG"
-                logic_desc = "Wyckoff spring: liquidity sweep + reclaim + volume."
+        # EPSILON_LONG: Wyckoff Spring
+        if has_spring and has_vol_confirm:
+            candidates.append(("EPSILON_LONG", "long", "Wyckoff spring: liquidity sweep + reclaim + volume.", bull_struct_score))
 
-        # ZETA_LONG: EMA Pullback — price pulls back to EMA20/50 in uptrend
-        if not setup_type:
-            ema20_val = base.get("ema20_dist_pct", 0)
-            ema50_val = base.get("dist_ema50_pct", 0)
-            htf_bullish = base.get("htf_up", 0) > 0
-            if htf_bullish and bullish_tf_count >= 2:
-                # Price within 0.3% of EMA20 or between EMA20 and EMA50
-                if -0.5 < ema20_val < 0.3 and is_bull_rejection and has_vol_confirm:
-                    setup_type = "ZETA_LONG"
-                    logic_desc = "EMA pullback entry in confirmed uptrend + rejection wick."
+        # ZETA_LONG: EMA Pullback
+        ema20_val = base.get("ema20_dist_pct", 0)
+        htf_bullish = base.get("htf_up", 0) > 0
+        if htf_bullish and bullish_tf_count >= 2:
+            if -0.5 < ema20_val < 0.3 and is_bull_rejection and has_vol_confirm:
+                candidates.append(("ZETA_LONG", "long", "EMA pullback entry in confirmed uptrend + rejection wick.", bull_struct_score))
 
-        # ETA_LONG: Liquidity Sweep + Reclaim — sweep of recent low then reclaim
-        if not setup_type:
-            if sweep_bull > 0 and is_bull_rejection and has_vol_confirm:
-                setup_type = "ETA_LONG"
-                logic_desc = "Liquidity sweep below support + price reclaim + volume."
+        # ETA_LONG: Liquidity Sweep + Reclaim
+        if sweep_bull > 0 and is_bull_rejection and has_vol_confirm:
+            candidates.append(("ETA_LONG", "long", "Liquidity sweep below support + price reclaim + volume.", bull_struct_score))
 
-        # THETA_LONG: Keltner/BB Mean Reversion — price at lower extreme
-        if not setup_type:
-            kc_lower_dist = base.get("dist_to_kc_lower_pct", 0)
-            vwap_z = base.get("vwap_z_score", 0)
-            if kc_lower_dist < -0.5 and vwap_z < -1.5 and is_bull_rejection and has_vol_confirm:
-                setup_type = "THETA_LONG"
-                logic_desc = "Mean reversion from Keltner lower band + VWAP extreme."
+        # THETA_LONG: Keltner/BB Mean Reversion
+        kc_lower_dist = base.get("dist_to_kc_lower_pct", 0)
+        vwap_z = base.get("vwap_z_score", 0)
+        if kc_lower_dist < -0.5 and vwap_z < -1.5 and is_bull_rejection and has_vol_confirm:
+            candidates.append(("THETA_LONG", "long", "Mean reversion from Keltner lower band + VWAP extreme.", bull_struct_score))
 
-        # IOTA_LONG: ICT Optimal Trade Entry — price in OTE zone (62-79% retrace) + displacement
-        if not setup_type:
-            in_ote = base.get("in_ote_zone_long", 0)
-            is_discount = base.get("is_discount_zone", 0)
-            has_disp = base.get("recent_displacement_bull", 0)
-            has_choch = base.get("choch_up", 0)
-            if in_ote > 0 and is_discount > 0 and bullish_tf_count >= 1:
-                if (has_disp > 0 or has_choch > 0) and is_bull_rejection and has_vol_confirm:
-                    setup_type = "IOTA_LONG"
-                    logic_desc = "ICT OTE zone entry (62-79% retrace) + displacement + trend."
+        # IOTA_LONG: ICT OTE
+        in_ote = base.get("in_ote_zone_long", 0)
+        is_discount = base.get("is_discount_zone", 0)
+        has_disp = base.get("recent_displacement_bull", 0)
+        has_choch = base.get("choch_up", 0)
+        if in_ote > 0 and is_discount > 0 and bullish_tf_count >= 1:
+            if (has_disp > 0 or has_choch > 0) and is_bull_rejection and has_vol_confirm:
+                candidates.append(("IOTA_LONG", "long", "ICT OTE zone entry (62-79% retrace) + displacement + trend.", bull_struct_score))
 
-        # KAPPA_LONG: Accumulation Spring — Wyckoff accumulation + spring pattern
-        if not setup_type:
-            has_accum = base.get("wyckoff_accum", 0)
-            if has_accum > 0 and has_spring and has_vol_confirm:
-                setup_type = "KAPPA_LONG"
-                logic_desc = "Wyckoff accumulation phase + spring + volume confirmation."
+        # KAPPA_LONG: Accumulation Spring
+        has_accum = base.get("wyckoff_accum", 0)
+        if has_accum > 0 and has_spring and has_vol_confirm:
+            candidates.append(("KAPPA_LONG", "long", "Wyckoff accumulation phase + spring + volume confirmation.", bull_struct_score))
 
-        # LAMBDA_LONG: ORB Breakout — Asian range breakout during London/NY
-        if not setup_type:
-            orb_b = base.get("orb_bull", 0) if "orb_bull" in base else 0
-            if orb_b > 0 and bullish_tf_count >= 1 and has_vol_confirm:
-                setup_type = "LAMBDA_LONG"
-                logic_desc = "Asian range breakout (ORB) during active session + volume."
+        # LAMBDA_LONG: ORB Breakout
+        orb_b = base.get("orb_bull", 0) if "orb_bull" in base else 0
+        if orb_b > 0 and bullish_tf_count >= 1 and has_vol_confirm:
+            candidates.append(("LAMBDA_LONG", "long", "Asian range breakout (ORB) during active session + volume.", bull_struct_score))
 
-    # ---- SHORT SETUPS ----
-    if not setup_type and can_short:
-        side = 'short'
-
-        # ALPHA_SHORT: OB CE — REQUIRE rejection wick + volume
+    # ---- SHORT CANDIDATES ----
+    if can_short:
+        # ALPHA_SHORT: OB CE
         if ob_bear_ce > 0 and ob_bear_fresh and high >= ob_bear_ce and px < ob_bear_top:
             if is_bear_rejection and has_vol_confirm:
-                setup_type = "ALPHA_SHORT"
-                logic_desc = "OB CE mitigation + rejection wick + volume confirmed."
+                candidates.append(("ALPHA_SHORT", "short", "OB CE mitigation + rejection wick + volume.", bear_struct_score))
 
-        # BETA_SHORT: Divergence + BOS — require 2+ divergences
-        if not setup_type:
-            div_count = int(bear_ewo) + int(bear_obv) + int(bear_cvd) + int(bear_rsi_div)
-            if div_count >= 2 and base.get("bos_down", 0) > 0 and has_vol_confirm:
-                setup_type = "BETA_SHORT"
-                logic_desc = f"Divergence confluence ({div_count} divs) + structural BOS + volume."
+        # BETA_SHORT: Divergence + BOS
+        div_count = int(bear_ewo) + int(bear_obv) + int(bear_cvd) + int(bear_rsi_div)
+        if div_count >= 2 and base.get("bos_down", 0) > 0 and has_vol_confirm:
+            candidates.append(("BETA_SHORT", "short", f"Divergence confluence ({div_count} divs) + structural BOS + volume.", bear_struct_score))
 
-        # GAMMA_SHORT: QM retest — REQUIRE rejection wick
-        if not setup_type:
-            if (base.get("qm_bear", 0) > 0
-                    and high >= (base.get("qm_bear", 0) - qm_zone)
-                    and px < base.get("qm_bear", 0)
-                    and is_bear_rejection and has_vol_confirm):
-                setup_type = "GAMMA_SHORT"
-                logic_desc = "QM structural retest + rejection wick + volume."
+        # GAMMA_SHORT: QM retest
+        if (base.get("qm_bear", 0) > 0 and high >= (base.get("qm_bear", 0) - qm_zone)
+                and px < base.get("qm_bear", 0) and is_bear_rejection and has_vol_confirm):
+            candidates.append(("GAMMA_SHORT", "short", "QM structural retest + rejection wick + volume.", bear_struct_score))
 
-        # DELTA_SHORT: FVG mitigation — REQUIRE rejection wick + volume
-        if not setup_type:
-            if (fvg_bear > 0 and high >= (fvg_bear - fvg_tol)
-                    and px < (fvg_bear + fvg_tol)
-                    and is_bear_rejection and has_vol_confirm):
-                setup_type = "DELTA_SHORT"
-                logic_desc = "FVG CE mitigation + rejection wick + volume."
+        # DELTA_SHORT: FVG mitigation
+        if (fvg_bear > 0 and high >= (fvg_bear - fvg_tol)
+                and px < (fvg_bear + fvg_tol) and is_bear_rejection and has_vol_confirm):
+            candidates.append(("DELTA_SHORT", "short", "FVG CE mitigation + rejection wick + volume.", bear_struct_score))
 
         # EPSILON_SHORT: Wyckoff Upthrust
-        if not setup_type:
-            if has_upthrust and has_vol_confirm:
-                setup_type = "EPSILON_SHORT"
-                logic_desc = "Wyckoff upthrust: liquidity sweep + reclaim + volume."
+        if has_upthrust and has_vol_confirm:
+            candidates.append(("EPSILON_SHORT", "short", "Wyckoff upthrust: liquidity sweep + reclaim + volume.", bear_struct_score))
 
-        # ZETA_SHORT: EMA Pullback — price rallies to EMA20/50 in downtrend
-        if not setup_type:
-            ema20_val = base.get("ema20_dist_pct", 0)
-            htf_bearish = base.get("htf_down", 0) > 0
-            if htf_bearish and bearish_tf_count >= 2:
-                if -0.3 < ema20_val < 0.5 and is_bear_rejection and has_vol_confirm:
-                    setup_type = "ZETA_SHORT"
-                    logic_desc = "EMA pullback entry in confirmed downtrend + rejection wick."
+        # ZETA_SHORT: EMA Pullback
+        ema20_val = base.get("ema20_dist_pct", 0)
+        htf_bearish = base.get("htf_down", 0) > 0
+        if htf_bearish and bearish_tf_count >= 2:
+            if -0.3 < ema20_val < 0.5 and is_bear_rejection and has_vol_confirm:
+                candidates.append(("ZETA_SHORT", "short", "EMA pullback entry in confirmed downtrend + rejection wick.", bear_struct_score))
 
-        # ETA_SHORT: Liquidity Sweep + Rejection — sweep of recent high then reject
-        if not setup_type:
-            if sweep_bear > 0 and is_bear_rejection and has_vol_confirm:
-                setup_type = "ETA_SHORT"
-                logic_desc = "Liquidity sweep above resistance + price rejection + volume."
+        # ETA_SHORT: Liquidity Sweep + Rejection
+        if sweep_bear > 0 and is_bear_rejection and has_vol_confirm:
+            candidates.append(("ETA_SHORT", "short", "Liquidity sweep above resistance + price rejection + volume.", bear_struct_score))
 
-        # THETA_SHORT: Keltner/BB Mean Reversion — price at upper extreme
-        if not setup_type:
-            kc_upper_dist = base.get("dist_to_kc_upper_pct", 0)
-            vwap_z = base.get("vwap_z_score", 0)
-            if kc_upper_dist > 0.5 and vwap_z > 1.5 and is_bear_rejection and has_vol_confirm:
-                setup_type = "THETA_SHORT"
-                logic_desc = "Mean reversion from Keltner upper band + VWAP extreme."
+        # THETA_SHORT: Keltner/BB Mean Reversion
+        kc_upper_dist = base.get("dist_to_kc_upper_pct", 0)
+        vwap_z = base.get("vwap_z_score", 0)
+        if kc_upper_dist > 0.5 and vwap_z > 1.5 and is_bear_rejection and has_vol_confirm:
+            candidates.append(("THETA_SHORT", "short", "Mean reversion from Keltner upper band + VWAP extreme.", bear_struct_score))
 
-        # IOTA_SHORT: ICT Optimal Trade Entry — price in OTE zone (62-79% retrace) + displacement
-        if not setup_type:
-            in_ote = base.get("in_ote_zone_short", 0)
-            is_premium = base.get("is_premium_zone", 0)
-            has_disp = base.get("recent_displacement_bear", 0)
-            has_choch = base.get("choch_down", 0)
-            if in_ote > 0 and is_premium > 0 and bearish_tf_count >= 1:
-                if (has_disp > 0 or has_choch > 0) and is_bear_rejection and has_vol_confirm:
-                    setup_type = "IOTA_SHORT"
-                    logic_desc = "ICT OTE zone entry (62-79% retrace) + displacement + trend."
+        # IOTA_SHORT: ICT OTE
+        in_ote = base.get("in_ote_zone_short", 0)
+        is_premium = base.get("is_premium_zone", 0)
+        has_disp = base.get("recent_displacement_bear", 0)
+        has_choch = base.get("choch_down", 0)
+        if in_ote > 0 and is_premium > 0 and bearish_tf_count >= 1:
+            if (has_disp > 0 or has_choch > 0) and is_bear_rejection and has_vol_confirm:
+                candidates.append(("IOTA_SHORT", "short", "ICT OTE zone entry (62-79% retrace) + displacement + trend.", bear_struct_score))
 
-        # KAPPA_SHORT: Distribution Upthrust — Wyckoff distribution + upthrust
-        if not setup_type:
-            has_distrib = base.get("wyckoff_distrib", 0)
-            if has_distrib > 0 and has_upthrust and has_vol_confirm:
-                setup_type = "KAPPA_SHORT"
-                logic_desc = "Wyckoff distribution phase + upthrust + volume confirmation."
+        # KAPPA_SHORT: Distribution Upthrust
+        has_distrib = base.get("wyckoff_distrib", 0)
+        if has_distrib > 0 and has_upthrust and has_vol_confirm:
+            candidates.append(("KAPPA_SHORT", "short", "Wyckoff distribution phase + upthrust + volume confirmation.", bear_struct_score))
 
-        # LAMBDA_SHORT: ORB Breakdown — Asian range breakdown during London/NY
-        if not setup_type:
-            orb_br = base.get("orb_bear", 0) if "orb_bear" in base else 0
-            if orb_br > 0 and bearish_tf_count >= 1 and has_vol_confirm:
-                setup_type = "LAMBDA_SHORT"
-                logic_desc = "Asian range breakdown (ORB) during active session + volume."
+        # LAMBDA_SHORT: ORB Breakdown
+        orb_br = base.get("orb_bear", 0) if "orb_bear" in base else 0
+        if orb_br > 0 and bearish_tf_count >= 1 and has_vol_confirm:
+            candidates.append(("LAMBDA_SHORT", "short", "Asian range breakdown (ORB) during active session + volume.", bear_struct_score))
+
+    if not candidates: return None
+
+    # Pick the candidate with the highest confluence score.
+    # On ties, structural setups (ALPHA/GAMMA/DELTA) rank higher than momentum setups.
+    _struct_priority = {"ALPHA": 10, "GAMMA": 9, "IOTA": 8, "DELTA": 7, "KAPPA": 6,
+                        "EPSILON": 5, "BETA": 4, "ETA": 3, "ZETA": 2, "THETA": 1, "LAMBDA": 0}
+    candidates.sort(key=lambda c: (c[3], _struct_priority.get(c[0].split("_")[0], 0)), reverse=True)
+    setup_type, side, logic_desc, confluence = candidates[0]
+
+    # Enrich the logic description with confluence info
+    conf_reasons = bull_struct_reasons if side == "long" else bear_struct_reasons
+    if confluence >= 2:
+        logic_desc += f" CONFLUENCE {confluence:.0f}× [{'+'.join(conf_reasons)}]."
 
     if not setup_type: return None
 

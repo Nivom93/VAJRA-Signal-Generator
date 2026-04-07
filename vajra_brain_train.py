@@ -84,7 +84,11 @@ def is_feature_column(df: pd.DataFrame, col: str, extra_exclude: Set[str]) -> bo
         "rolling_vwap_20",
 
         # --- ABSOLUTE DERIVATIVES (Scale with price — use normalized versions instead) ---
-        "atr14_L", "atr7_L", "cvd"
+        "atr14_L", "atr7_L", "cvd",
+
+        # --- STRING/NON-NUMERIC FIELDS ---
+        "bull_confluence_reasons", "bear_confluence_reasons",
+        "market_regime"
     }
     EXCLUDE_SUFFIXES = {"_dt", "_ts"}
 
