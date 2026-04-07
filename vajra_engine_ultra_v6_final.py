@@ -141,35 +141,59 @@ def _ewo_np(close):
 
 @njit(cache=True)
 def _strict_divergence_np(close, indicator, last_sl, last_sh):
+    """Fixed divergence detection: captures indicator value at the bar where
+    swing was confirmed (accounting for right=3 confirmation delay), and
+    tracks previous swing indicator value for proper comparison."""
     n = len(close)
     div_bull = np.zeros(n, dtype=np.float64)
     div_bear = np.zeros(n, dtype=np.float64)
-    # Track indicator value at the most recent swing low/high
+    # Track indicator value at swing confirmation points
     ind_at_sl = np.zeros(n, dtype=np.float64)
     ind_at_sh = np.zeros(n, dtype=np.float64)
+    # Track PREVIOUS swing indicator values (for comparing two swing points)
+    prev_ind_at_sl = 0.0
+    prev_ind_at_sh = 0.0
     prev_sl_price = 0.0
     prev_sh_price = 0.0
+
     for i in range(1, n):
         # Detect when swing low changes (new swing low confirmed)
         if last_sl[i] != last_sl[i-1] and last_sl[i] > 0:
-            ind_at_sl[i] = indicator[i]
-            prev_sl_price = last_sl[i]
+            # Save previous swing's indicator value before overwriting
+            prev_ind_at_sl = ind_at_sl[i-1]
+            prev_sl_price = last_sl[i-1]
+            # Capture indicator at the actual swing low bar (i-3 due to right=3 confirmation)
+            swing_bar = max(0, i - 3)
+            ind_at_sl[i] = indicator[swing_bar]
         else:
             ind_at_sl[i] = ind_at_sl[i-1]
         # Detect when swing high changes
         if last_sh[i] != last_sh[i-1] and last_sh[i] > 0:
-            ind_at_sh[i] = indicator[i]
-            prev_sh_price = last_sh[i]
+            prev_ind_at_sh = ind_at_sh[i-1]
+            prev_sh_price = last_sh[i-1]
+            swing_bar = max(0, i - 3)
+            ind_at_sh[i] = indicator[swing_bar]
         else:
             ind_at_sh[i] = ind_at_sh[i-1]
 
     for i in range(10, n):
-        # Bullish Div: Price makes lower low vs last swing, indicator makes higher low
+        # Bullish Div: Price makes lower low, indicator makes higher low
+        # Compare current swing low vs previous swing low
         if close[i] < last_sl[i] and ind_at_sl[i] > 0 and indicator[i] > ind_at_sl[i]:
             div_bull[i] = 1.0
-        # Bearish Div: Price makes higher high vs last swing, indicator makes lower high
+        # Also check proximity: price within 0.5% of swing low with indicator divergence
+        elif last_sl[i] > 0 and close[i] > 0:
+            dist_pct = abs(close[i] - last_sl[i]) / close[i]
+            if dist_pct < 0.005 and ind_at_sl[i] > 0 and indicator[i] > ind_at_sl[i] * 1.05:
+                div_bull[i] = 1.0
+
+        # Bearish Div: Price makes higher high, indicator makes lower high
         if close[i] > last_sh[i] and ind_at_sh[i] != 0 and indicator[i] < ind_at_sh[i]:
             div_bear[i] = 1.0
+        elif last_sh[i] > 0 and close[i] > 0:
+            dist_pct = abs(close[i] - last_sh[i]) / close[i]
+            if dist_pct < 0.005 and ind_at_sh[i] != 0 and indicator[i] < ind_at_sh[i] * 0.95:
+                div_bear[i] = 1.0
     return div_bull, div_bear
 
 # ==============================================================================
@@ -316,6 +340,7 @@ def _rvol_np(vol, n=20):
 
 @njit(cache=True)
 def _adx_np(high, low, close, n=14):
+    """ADX using proper Wilder's smoothing: smoothed = (prev * (n-1) + current) / n"""
     sz = len(close)
     if sz < n * 2: return np.zeros(sz)
     tr = np.zeros(sz); dm_plus = np.zeros(sz); dm_minus = np.zeros(sz)
@@ -327,22 +352,34 @@ def _adx_np(high, low, close, n=14):
         else: dm_plus[i] = 0.0
         if (down > up) and (down > 0): dm_minus[i] = down
         else: dm_minus[i] = 0.0
-    alpha = 1.0 / n 
+    # Wilder's smoothing: first n periods = simple sum, then recursive
     tr_s = np.zeros(sz); dm_plus_s = np.zeros(sz); dm_minus_s = np.zeros(sz)
-    tr_s[0]=tr[0]; dm_plus_s[0]=dm_plus[0]; dm_minus_s[0]=dm_minus[0]
-    for i in range(1, sz):
-        tr_s[i] = alpha * tr[i] + (1 - alpha) * tr_s[i-1]
-        dm_plus_s[i] = alpha * dm_plus[i] + (1 - alpha) * dm_plus_s[i-1]
-        dm_minus_s[i] = alpha * dm_minus[i] + (1 - alpha) * dm_minus_s[i-1]
+    # Seed: sum of first n periods
+    for i in range(1, min(n + 1, sz)):
+        tr_s[n] += tr[i]
+        dm_plus_s[n] += dm_plus[i]
+        dm_minus_s[n] += dm_minus[i]
+    # Wilder's recursive: smoothed = (prev * (n-1) + current) / n
+    for i in range(n + 1, sz):
+        tr_s[i] = (tr_s[i-1] * (n - 1) + tr[i]) / n
+        dm_plus_s[i] = (dm_plus_s[i-1] * (n - 1) + dm_plus[i]) / n
+        dm_minus_s[i] = (dm_minus_s[i-1] * (n - 1) + dm_minus[i]) / n
     dx = np.zeros(sz)
-    for i in range(sz):
-        di_plus = 100 * _safe_divide(dm_plus_s[i], tr_s[i])
-        di_minus = 100 * _safe_divide(dm_minus_s[i], tr_s[i])
+    for i in range(n, sz):
+        di_plus = 100.0 * _safe_divide(dm_plus_s[i], tr_s[i])
+        di_minus = 100.0 * _safe_divide(dm_minus_s[i], tr_s[i])
         sum_di = di_plus + di_minus
-        dx[i] = 100 * _safe_divide(abs(di_plus - di_minus), sum_di)
-    adx = np.zeros(sz); adx[0] = dx[0]
-    for i in range(1, sz):
-        adx[i] = alpha * dx[i] + (1 - alpha) * adx[i-1]
+        dx[i] = 100.0 * _safe_divide(abs(di_plus - di_minus), sum_di)
+    # ADX = Wilder's smoothed DX
+    adx = np.zeros(sz)
+    # Seed ADX: average of first n DX values after n
+    if sz > 2 * n:
+        dx_sum = 0.0
+        for i in range(n, 2 * n):
+            dx_sum += dx[i]
+        adx[2 * n - 1] = dx_sum / n
+        for i in range(2 * n, sz):
+            adx[i] = (adx[i-1] * (n - 1) + dx[i]) / n
     return adx
 
 @njit(cache=True)
@@ -851,14 +888,20 @@ def _detect_wyckoff(h, l, c, vol_spike, cvd_div_bull, cvd_div_bear, last_sl, las
     n = len(c)
     spring = np.zeros(n)
     upthrust = np.zeros(n)
-    for i in range(5, n):
+    # Accumulation/Distribution phase detection
+    accum_phase = np.zeros(n)
+    distrib_phase = np.zeros(n)
+
+    for i in range(10, n):
+        # Extended lookback (10 bars) for volume/CVD confirmation
+        vol_lookback = 7
+
         # Spring: Sweeps last_sl, closes back above it
-        # Requires: volume confirmation OR CVD divergence (within 3-bar window)
         curr_sl = last_sl[i-1]
         if curr_sl > 0 and l[i] < curr_sl and c[i] > curr_sl:
             has_vol = False
             has_cvd = False
-            for k in range(max(0, i-2), i+1):
+            for k in range(max(0, i - vol_lookback), i + 1):
                 if vol_spike[k] > 0: has_vol = True
                 if cvd_div_bull[k] > 0: has_cvd = True
             if has_vol or has_cvd:
@@ -869,12 +912,111 @@ def _detect_wyckoff(h, l, c, vol_spike, cvd_div_bull, cvd_div_bear, last_sl, las
         if curr_sh > 0 and h[i] > curr_sh and c[i] < curr_sh:
             has_vol = False
             has_cvd = False
-            for k in range(max(0, i-2), i+1):
+            for k in range(max(0, i - vol_lookback), i + 1):
                 if vol_spike[k] > 0: has_vol = True
                 if cvd_div_bear[k] > 0: has_cvd = True
             if has_vol or has_cvd:
                 upthrust[i] = 1.0
-    return spring, upthrust
+
+        # ---- ACCUMULATION PHASE DETECTION (Wyckoff Phase C/D) ----
+        # Accumulation = price consolidates near support + volume absorption
+        # (small bodies, high volume = selling being absorbed by smart money)
+        if i >= 20:
+            # Check if price has been ranging near swing low for 10+ bars
+            range_count = 0
+            absorption_count = 0
+            atr_local = 0.0
+            for ab in range(i - 20, i):
+                atr_local += (h[ab] - l[ab])
+            atr_local /= 20.0
+            if atr_local < 1e-9:
+                atr_local = 1e-9
+
+            for ab in range(i - 10, i):
+                dist_to_sl = abs(c[ab] - curr_sl) / atr_local if curr_sl > 0 else 99.0
+                if dist_to_sl < 2.0:
+                    range_count += 1
+                # Absorption: high volume + small body (selling absorbed)
+                body = abs(c[ab] - c[ab - 1]) if ab > 0 else 0.0
+                rng_bar = h[ab] - l[ab]
+                if rng_bar > 1e-9 and vol_spike[ab] > 0 and (body / rng_bar) < 0.3:
+                    absorption_count += 1
+
+            if range_count >= 6 and absorption_count >= 1:
+                accum_phase[i] = 1.0
+
+        # ---- DISTRIBUTION PHASE DETECTION ----
+        if i >= 20:
+            range_count = 0
+            absorption_count = 0
+            atr_local_d = 0.0
+            for db in range(i - 20, i):
+                atr_local_d += (h[db] - l[db])
+            atr_local_d /= 20.0
+            if atr_local_d < 1e-9:
+                atr_local_d = 1e-9
+
+            for db in range(i - 10, i):
+                dist_to_sh = abs(c[db] - curr_sh) / atr_local_d if curr_sh > 0 else 99.0
+                if dist_to_sh < 2.0:
+                    range_count += 1
+                body = abs(c[db] - c[db - 1]) if db > 0 else 0.0
+                rng_bar = h[db] - l[db]
+                if rng_bar > 1e-9 and vol_spike[db] > 0 and (body / rng_bar) < 0.3:
+                    absorption_count += 1
+
+            if range_count >= 6 and absorption_count >= 1:
+                distrib_phase[i] = 1.0
+
+    return spring, upthrust, accum_phase, distrib_phase
+
+@njit(cache=True)
+def _multi_swing_fractal_range(high, low, swing_hi, swing_lo, lookback_swings=3):
+    """Track the highest/lowest from the last N confirmed swing points.
+    This gives a proper major fractal range for Fibonacci anchoring instead of
+    just using the last single swing high/low."""
+    n = len(high)
+    frac_high = np.zeros(n)
+    frac_low = np.zeros(n)
+
+    # Circular buffers for recent swing highs and lows
+    recent_sh = np.zeros(lookback_swings)
+    recent_sl = np.zeros(lookback_swings)
+    sh_idx = 0; sl_idx = 0
+    sh_count = 0; sl_count = 0
+
+    for i in range(n):
+        if swing_hi[i] == 1 and i >= 3:
+            recent_sh[sh_idx % lookback_swings] = high[i - 3]  # right=3 confirmation
+            sh_idx += 1
+            sh_count = min(sh_count + 1, lookback_swings)
+
+        if swing_lo[i] == 1 and i >= 3:
+            recent_sl[sl_idx % lookback_swings] = low[i - 3]
+            sl_idx += 1
+            sl_count = min(sl_count + 1, lookback_swings)
+
+        # Find max of recent swing highs and min of recent swing lows
+        if sh_count > 0:
+            max_val = recent_sh[0]
+            for j in range(1, sh_count):
+                if recent_sh[j] > max_val:
+                    max_val = recent_sh[j]
+            frac_high[i] = max_val
+        else:
+            frac_high[i] = high[i]
+
+        if sl_count > 0:
+            min_val = recent_sl[0]
+            for j in range(1, sl_count):
+                if recent_sl[j] < min_val and recent_sl[j] > 0:
+                    min_val = recent_sl[j]
+            frac_low[i] = min_val
+        else:
+            frac_low[i] = low[i]
+
+    return frac_high, frac_low
+
 
 class Precomp:
     def __init__(self, df):
@@ -933,7 +1075,7 @@ class Precomp:
 
         # ADVANCED STRUCTURE PATTERNS
         self.qm_bull, self.qm_bear = _detect_qm(self.h, self.l, self.c, self.swing_hi, self.swing_lo)
-        self.spring, self.upthrust = _detect_wyckoff(self.h, self.l, self.c, self.vol_spike, self.cvd_div_bull, self.cvd_div_bear, self.last_sl, self.last_sh)
+        self.spring, self.upthrust, self.accum_phase, self.distrib_phase = _detect_wyckoff(self.h, self.l, self.c, self.vol_spike, self.cvd_div_bull, self.cvd_div_bear, self.last_sl, self.last_sh)
 
         hours = pd.to_datetime(df.timestamp, unit='ms', utc=True).dt.hour.values
         days = pd.to_datetime(df.timestamp, unit='ms', utc=True).dt.dayofyear.values
@@ -942,6 +1084,15 @@ class Precomp:
         self.atr_percentile_100 = _rolling_percentile_np(self.atr14, 100)
         self.rolling_vwap_20 = _rolling_vwap_np((self.h + self.l + self.c) / 3.0, self.v, 20)
         self.dc_high_20, self.dc_low_20 = _donchian_channels_np(self.h, self.l, 20)
+
+        # Cache EMA100 for performance (avoid recalculation in confluence_features)
+        self.ema100 = _ema_np(self.c, 100)
+
+        # Multi-swing fractal range: track the highest high and lowest low
+        # from the last 3 confirmed swing points (major structure)
+        self.fractal_high, self.fractal_low = _multi_swing_fractal_range(
+            self.h, self.l, self.swing_hi, self.swing_lo, lookback_swings=3
+        )
 
 def _trend_flags(e50, e200): return (1.0, 0.0) if e50>e200 else ((0.0, 1.0) if e50<e200 else (0.0, 0.0))
 def _ensure_precomp(df, pre): return pre if isinstance(pre, Precomp) else Precomp(df)
@@ -999,8 +1150,47 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
     f["sweep_high"] = float(pExec.sweep_up[idx_Exec])
     f["sweep_low"] = float(pExec.sweep_dn[idx_Exec])
     
-    f["choch_up"]=float(1.0 if pExec.bos_up[idx_Exec] and idx_Exec>=5 and pExec.bos_down[idx_Exec-5] else 0.0)
-    f["choch_down"]=float(1.0 if pExec.bos_down[idx_Exec] and idx_Exec>=5 and pExec.bos_up[idx_Exec-5] else 0.0)
+    # ---- PROPER ChoCH DETECTION (Change of Character) ----
+    # ChoCH = BOS in current direction + prior established trend in opposite direction
+    # Scan a 20-bar window: if prior trend had 2+ BOS in one direction,
+    # and now we get a BOS in the opposite direction = genuine character change
+    choch_up_val = 0.0
+    choch_down_val = 0.0
+    if pExec.bos_up[idx_Exec]:
+        prior_bear_count = 0
+        for cb in range(max(0, idx_Exec - 20), idx_Exec):
+            if pExec.bos_down[cb]: prior_bear_count += 1
+        # Need at least 2 prior bearish BOS = established downtrend, then bullish BOS = ChoCH
+        if prior_bear_count >= 2:
+            choch_up_val = 1.0
+    if pExec.bos_down[idx_Exec]:
+        prior_bull_count = 0
+        for cb in range(max(0, idx_Exec - 20), idx_Exec):
+            if pExec.bos_up[cb]: prior_bull_count += 1
+        if prior_bull_count >= 2:
+            choch_down_val = 1.0
+    f["choch_up"] = choch_up_val
+    f["choch_down"] = choch_down_val
+
+    # ---- DISPLACEMENT SEQUENCE DETECTION ----
+    # Displacement = large body candle (>1.5x ATR) that breaks structure
+    curr_atr_cf = pExec.atr14[idx_Exec] if idx_Exec < len(pExec.atr14) else px * 0.01
+    # Count displacement candles in recent window (institutional activity)
+    disp_bull_count = 0
+    disp_bear_count = 0
+    for db in range(max(0, idx_Exec - 10), idx_Exec + 1):
+        if db < len(pExec.c):
+            db_body = abs(pExec.c[db] - pExec.o[db])
+            db_atr = pExec.atr14[db] if db < len(pExec.atr14) else px * 0.01
+            if db_body > db_atr * 1.5:
+                if pExec.c[db] > pExec.o[db]: disp_bull_count += 1
+                else: disp_bear_count += 1
+    f["displacement_bull_count"] = float(disp_bull_count)
+    f["displacement_bear_count"] = float(disp_bear_count)
+    # Displacement + BOS = institutional intent confirmed
+    f["displacement_bos_bull"] = 1.0 if disp_bull_count > 0 and pExec.bos_up[idx_Exec] else 0.0
+    f["displacement_bos_bear"] = 1.0 if disp_bear_count > 0 and pExec.bos_down[idx_Exec] else 0.0
+
     f["bars_since_ob_bull"] = float(pExec.bars_since_ob_bull[idx_Exec])
     f["bars_since_ob_bear"] = float(pExec.bars_since_ob_bear[idx_Exec])
 
@@ -1063,6 +1253,43 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
     f["qm_bear"] = float(pExec.qm_bear[idx_Exec])
     f["wyckoff_spring"] = float(pExec.spring[idx_Exec])
     f["wyckoff_upthrust"] = float(pExec.upthrust[idx_Exec])
+    f["wyckoff_accum"] = float(pExec.accum_phase[idx_Exec])
+    f["wyckoff_distrib"] = float(pExec.distrib_phase[idx_Exec])
+
+    # QM quality scoring — reward QMs with displacement confirmation
+    qm_bull_quality = 0.0
+    if f["qm_bull"] > 0:
+        qm_bull_quality = 1.0
+        # Bonus: if displacement BOS preceded the QM setup
+        if f.get("displacement_bos_bull", 0) > 0: qm_bull_quality = 2.0
+        # Bonus: if accumulation phase detected near QM level
+        if f["wyckoff_accum"] > 0: qm_bull_quality += 1.0
+    qm_bear_quality = 0.0
+    if f["qm_bear"] > 0:
+        qm_bear_quality = 1.0
+        if f.get("displacement_bos_bear", 0) > 0: qm_bear_quality = 2.0
+        if f["wyckoff_distrib"] > 0: qm_bear_quality += 1.0
+    f["qm_bull_quality"] = qm_bull_quality
+    f["qm_bear_quality"] = qm_bear_quality
+
+    # ---- LIQUIDITY POOL TRACKING ----
+    # Equal highs/lows = stacked liquidity (stop losses clustered)
+    eq_high_count = 0
+    eq_low_count = 0
+    if idx_Exec >= 20:
+        tol_liq = curr_atr_cf * 0.15  # Tolerance = 15% of ATR
+        for lp in range(max(0, idx_Exec - 20), idx_Exec):
+            if lp < len(pExec.last_sh):
+                # Equal highs within tolerance
+                if abs(pExec.last_sh[lp] - pExec.last_sh[idx_Exec]) < tol_liq and pExec.last_sh[lp] > 0:
+                    eq_high_count += 1
+                if abs(pExec.last_sl[lp] - pExec.last_sl[idx_Exec]) < tol_liq and pExec.last_sl[lp] > 0:
+                    eq_low_count += 1
+    f["equal_highs_count"] = float(eq_high_count)
+    f["equal_lows_count"] = float(eq_low_count)
+    # Distance to nearest liquidity pool
+    f["dist_to_liq_high_atr"] = (pExec.last_sh[idx_Exec] - px) / (curr_atr_cf + 1e-12) if pExec.last_sh[idx_Exec] > px else 0.0
+    f["dist_to_liq_low_atr"] = (px - pExec.last_sl[idx_Exec]) / (curr_atr_cf + 1e-12) if pExec.last_sl[idx_Exec] < px else 0.0
 
     f["asian_high"] = float(pExec.asian_high[idx_Exec])
     f["asian_low"] = float(pExec.asian_low[idx_Exec])
@@ -1072,9 +1299,17 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
     f["dist_asian_high_pct"] = (px - f["asian_high"]) / px_safe * 100
     f["dist_asian_low_pct"] = (px - f["asian_low"]) / px_safe * 100
 
+    # Rolling VWAP for base dict access (used by TP targeting in plan_trade_with_brain)
+    f["rolling_vwap_20"] = float(pExec.rolling_vwap_20[idx_Exec])
+
     # SMC & Fibonacci Deep Wick Geometry (EXPANDED: Full Fib Suite + OTE Zone)
-    macro_high = max(f["last_swing_high"], f["last_swing_low"])
-    macro_low = min(f["last_swing_high"], f["last_swing_low"])
+    # Use multi-swing fractal range for proper major structure Fibonacci anchoring
+    macro_high = float(pExec.fractal_high[idx_Exec])
+    macro_low = float(pExec.fractal_low[idx_Exec])
+    # Fallback to single swing if fractal range is invalid
+    if macro_high <= macro_low or macro_high <= 0:
+        macro_high = max(f["last_swing_high"], f["last_swing_low"])
+        macro_low = min(f["last_swing_high"], f["last_swing_low"])
     fractal_range = macro_high - macro_low
 
     if fractal_range > 0:
@@ -1179,7 +1414,7 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
     # FIX FEATURE LEAK: Generate Interaction features in the core dictionary so they export correctly
     f["inter_htf_bos_up"] = f.get("htf_up",0) * f.get("bos_up",0)
     f["inter_swing_down_sweep_high"] = f.get("swing_down",0) * f.get("sweep_high",0)
-    ema20_gt = 1.0 if (pExec.ema20[idx_Exec] > _ema_np(pExec.c, 100)[idx_Exec] if hasattr(pExec, 'ema20') else 0) else 0.0
+    ema20_gt = 1.0 if (pExec.ema20[idx_Exec] > pExec.ema100[idx_Exec] if hasattr(pExec, 'ema100') else 0) else 0.0
     f["trend_align_up_3tf"] = f.get("macro_up",0) + f.get("swing_up",0) + f.get("htf_up",0) + ema20_gt
     f["trend_align_down_3tf"] = f.get("macro_down",0) + f.get("swing_down",0) + f.get("htf_down",0) + (1.0 - ema20_gt)
 
@@ -1353,11 +1588,33 @@ def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, b
     f['upper_wick_pct'] = (pExec.h - body_top) / total_range_safe
     f['lower_wick_pct'] = (body_bottom - pExec.l) / total_range_safe
 
-    # Killzone Session Flags
+    # Killzone Session Flags (EXPANDED)
     hours = pd.to_datetime(exec_tf.timestamp, unit='ms', utc=True).dt.hour.values
     f['is_london_killzone'] = np.where((hours >= 7) & (hours <= 10), 1.0, 0.0)
     f['is_ny_killzone'] = np.where((hours >= 13) & (hours <= 16), 1.0, 0.0)
     f['is_asian_range'] = np.where((hours >= 0) & (hours <= 6), 1.0, 0.0)
+    # London-NY overlap = highest liquidity period (13:00-16:00 UTC)
+    f['is_london_ny_overlap'] = np.where((hours >= 13) & (hours <= 16), 1.0, 0.0)
+    # Pre-market / post-market dead zones (low liquidity = bad for entries)
+    f['is_low_liquidity'] = np.where((hours >= 22) | (hours <= 1), 1.0, 0.0)
+
+    # Opening Range Breakout (ORB) — detect break of Asian range high/low
+    asian_high_arr = pExec.asian_high
+    asian_low_arr = pExec.asian_low
+    # ORB signals: first break of Asian range during London/NY sessions
+    orb_bull = np.zeros(n)
+    orb_bear = np.zeros(n)
+    for orb_i in range(1, n):
+        if hours[orb_i] >= 7 and hours[orb_i] <= 16:  # Active sessions only
+            if asian_high_arr[orb_i] > 0 and cl[orb_i] > asian_high_arr[orb_i]:
+                # Confirm: was below Asian high in previous bar
+                if orb_i > 0 and cl[orb_i - 1] <= asian_high_arr[orb_i]:
+                    orb_bull[orb_i] = 1.0
+            if asian_low_arr[orb_i] > 0 and cl[orb_i] < asian_low_arr[orb_i]:
+                if orb_i > 0 and cl[orb_i - 1] >= asian_low_arr[orb_i]:
+                    orb_bear[orb_i] = 1.0
+    f['orb_bull'] = orb_bull
+    f['orb_bear'] = orb_bear
 
     # Wyckoff Volume Absorption (Directive 3)
     candle_spread = pExec.h - pExec.l
@@ -2068,6 +2325,31 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
                 setup_type = "THETA_LONG"
                 logic_desc = "Mean reversion from Keltner lower band + VWAP extreme."
 
+        # IOTA_LONG: ICT Optimal Trade Entry — price in OTE zone (62-79% retrace) + displacement
+        if not setup_type:
+            in_ote = base.get("in_ote_zone_long", 0)
+            is_discount = base.get("is_discount_zone", 0)
+            has_disp = base.get("recent_displacement_bull", 0)
+            has_choch = base.get("choch_up", 0)
+            if in_ote > 0 and is_discount > 0 and bullish_tf_count >= 1:
+                if (has_disp > 0 or has_choch > 0) and is_bull_rejection and has_vol_confirm:
+                    setup_type = "IOTA_LONG"
+                    logic_desc = "ICT OTE zone entry (62-79% retrace) + displacement + trend."
+
+        # KAPPA_LONG: Accumulation Spring — Wyckoff accumulation + spring pattern
+        if not setup_type:
+            has_accum = base.get("wyckoff_accum", 0)
+            if has_accum > 0 and has_spring and has_vol_confirm:
+                setup_type = "KAPPA_LONG"
+                logic_desc = "Wyckoff accumulation phase + spring + volume confirmation."
+
+        # LAMBDA_LONG: ORB Breakout — Asian range breakout during London/NY
+        if not setup_type:
+            orb_b = base.get("orb_bull", 0) if "orb_bull" in base else 0
+            if orb_b > 0 and bullish_tf_count >= 1 and has_vol_confirm:
+                setup_type = "LAMBDA_LONG"
+                logic_desc = "Asian range breakout (ORB) during active session + volume."
+
     # ---- SHORT SETUPS ----
     if not setup_type and can_short:
         side = 'short'
@@ -2130,6 +2412,31 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             if kc_upper_dist > 0.5 and vwap_z > 1.5 and is_bear_rejection and has_vol_confirm:
                 setup_type = "THETA_SHORT"
                 logic_desc = "Mean reversion from Keltner upper band + VWAP extreme."
+
+        # IOTA_SHORT: ICT Optimal Trade Entry — price in OTE zone (62-79% retrace) + displacement
+        if not setup_type:
+            in_ote = base.get("in_ote_zone_short", 0)
+            is_premium = base.get("is_premium_zone", 0)
+            has_disp = base.get("recent_displacement_bear", 0)
+            has_choch = base.get("choch_down", 0)
+            if in_ote > 0 and is_premium > 0 and bearish_tf_count >= 1:
+                if (has_disp > 0 or has_choch > 0) and is_bear_rejection and has_vol_confirm:
+                    setup_type = "IOTA_SHORT"
+                    logic_desc = "ICT OTE zone entry (62-79% retrace) + displacement + trend."
+
+        # KAPPA_SHORT: Distribution Upthrust — Wyckoff distribution + upthrust
+        if not setup_type:
+            has_distrib = base.get("wyckoff_distrib", 0)
+            if has_distrib > 0 and has_upthrust and has_vol_confirm:
+                setup_type = "KAPPA_SHORT"
+                logic_desc = "Wyckoff distribution phase + upthrust + volume confirmation."
+
+        # LAMBDA_SHORT: ORB Breakdown — Asian range breakdown during London/NY
+        if not setup_type:
+            orb_br = base.get("orb_bear", 0) if "orb_bear" in base else 0
+            if orb_br > 0 and bearish_tf_count >= 1 and has_vol_confirm:
+                setup_type = "LAMBDA_SHORT"
+                logic_desc = "Asian range breakdown (ORB) during active session + volume."
 
     if not setup_type: return None
 
