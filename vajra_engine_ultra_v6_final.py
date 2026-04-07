@@ -141,35 +141,59 @@ def _ewo_np(close):
 
 @njit(cache=True)
 def _strict_divergence_np(close, indicator, last_sl, last_sh):
+    """Fixed divergence detection: captures indicator value at the bar where
+    swing was confirmed (accounting for right=3 confirmation delay), and
+    tracks previous swing indicator value for proper comparison."""
     n = len(close)
     div_bull = np.zeros(n, dtype=np.float64)
     div_bear = np.zeros(n, dtype=np.float64)
-    # Track indicator value at the most recent swing low/high
+    # Track indicator value at swing confirmation points
     ind_at_sl = np.zeros(n, dtype=np.float64)
     ind_at_sh = np.zeros(n, dtype=np.float64)
+    # Track PREVIOUS swing indicator values (for comparing two swing points)
+    prev_ind_at_sl = 0.0
+    prev_ind_at_sh = 0.0
     prev_sl_price = 0.0
     prev_sh_price = 0.0
+
     for i in range(1, n):
         # Detect when swing low changes (new swing low confirmed)
         if last_sl[i] != last_sl[i-1] and last_sl[i] > 0:
-            ind_at_sl[i] = indicator[i]
-            prev_sl_price = last_sl[i]
+            # Save previous swing's indicator value before overwriting
+            prev_ind_at_sl = ind_at_sl[i-1]
+            prev_sl_price = last_sl[i-1]
+            # Capture indicator at the actual swing low bar (i-3 due to right=3 confirmation)
+            swing_bar = max(0, i - 3)
+            ind_at_sl[i] = indicator[swing_bar]
         else:
             ind_at_sl[i] = ind_at_sl[i-1]
         # Detect when swing high changes
         if last_sh[i] != last_sh[i-1] and last_sh[i] > 0:
-            ind_at_sh[i] = indicator[i]
-            prev_sh_price = last_sh[i]
+            prev_ind_at_sh = ind_at_sh[i-1]
+            prev_sh_price = last_sh[i-1]
+            swing_bar = max(0, i - 3)
+            ind_at_sh[i] = indicator[swing_bar]
         else:
             ind_at_sh[i] = ind_at_sh[i-1]
 
     for i in range(10, n):
-        # Bullish Div: Price makes lower low vs last swing, indicator makes higher low
+        # Bullish Div: Price makes lower low, indicator makes higher low
+        # Compare current swing low vs previous swing low
         if close[i] < last_sl[i] and ind_at_sl[i] > 0 and indicator[i] > ind_at_sl[i]:
             div_bull[i] = 1.0
-        # Bearish Div: Price makes higher high vs last swing, indicator makes lower high
+        # Also check proximity: price within 0.5% of swing low with indicator divergence
+        elif last_sl[i] > 0 and close[i] > 0:
+            dist_pct = abs(close[i] - last_sl[i]) / close[i]
+            if dist_pct < 0.005 and ind_at_sl[i] > 0 and indicator[i] > ind_at_sl[i] * 1.05:
+                div_bull[i] = 1.0
+
+        # Bearish Div: Price makes higher high, indicator makes lower high
         if close[i] > last_sh[i] and ind_at_sh[i] != 0 and indicator[i] < ind_at_sh[i]:
             div_bear[i] = 1.0
+        elif last_sh[i] > 0 and close[i] > 0:
+            dist_pct = abs(close[i] - last_sh[i]) / close[i]
+            if dist_pct < 0.005 and ind_at_sh[i] != 0 and indicator[i] < ind_at_sh[i] * 0.95:
+                div_bear[i] = 1.0
     return div_bull, div_bear
 
 # ==============================================================================
@@ -316,6 +340,7 @@ def _rvol_np(vol, n=20):
 
 @njit(cache=True)
 def _adx_np(high, low, close, n=14):
+    """ADX using proper Wilder's smoothing: smoothed = (prev * (n-1) + current) / n"""
     sz = len(close)
     if sz < n * 2: return np.zeros(sz)
     tr = np.zeros(sz); dm_plus = np.zeros(sz); dm_minus = np.zeros(sz)
@@ -327,22 +352,34 @@ def _adx_np(high, low, close, n=14):
         else: dm_plus[i] = 0.0
         if (down > up) and (down > 0): dm_minus[i] = down
         else: dm_minus[i] = 0.0
-    alpha = 1.0 / n 
+    # Wilder's smoothing: first n periods = simple sum, then recursive
     tr_s = np.zeros(sz); dm_plus_s = np.zeros(sz); dm_minus_s = np.zeros(sz)
-    tr_s[0]=tr[0]; dm_plus_s[0]=dm_plus[0]; dm_minus_s[0]=dm_minus[0]
-    for i in range(1, sz):
-        tr_s[i] = alpha * tr[i] + (1 - alpha) * tr_s[i-1]
-        dm_plus_s[i] = alpha * dm_plus[i] + (1 - alpha) * dm_plus_s[i-1]
-        dm_minus_s[i] = alpha * dm_minus[i] + (1 - alpha) * dm_minus_s[i-1]
+    # Seed: sum of first n periods
+    for i in range(1, min(n + 1, sz)):
+        tr_s[n] += tr[i]
+        dm_plus_s[n] += dm_plus[i]
+        dm_minus_s[n] += dm_minus[i]
+    # Wilder's recursive: smoothed = (prev * (n-1) + current) / n
+    for i in range(n + 1, sz):
+        tr_s[i] = (tr_s[i-1] * (n - 1) + tr[i]) / n
+        dm_plus_s[i] = (dm_plus_s[i-1] * (n - 1) + dm_plus[i]) / n
+        dm_minus_s[i] = (dm_minus_s[i-1] * (n - 1) + dm_minus[i]) / n
     dx = np.zeros(sz)
-    for i in range(sz):
-        di_plus = 100 * _safe_divide(dm_plus_s[i], tr_s[i])
-        di_minus = 100 * _safe_divide(dm_minus_s[i], tr_s[i])
+    for i in range(n, sz):
+        di_plus = 100.0 * _safe_divide(dm_plus_s[i], tr_s[i])
+        di_minus = 100.0 * _safe_divide(dm_minus_s[i], tr_s[i])
         sum_di = di_plus + di_minus
-        dx[i] = 100 * _safe_divide(abs(di_plus - di_minus), sum_di)
-    adx = np.zeros(sz); adx[0] = dx[0]
-    for i in range(1, sz):
-        adx[i] = alpha * dx[i] + (1 - alpha) * adx[i-1]
+        dx[i] = 100.0 * _safe_divide(abs(di_plus - di_minus), sum_di)
+    # ADX = Wilder's smoothed DX
+    adx = np.zeros(sz)
+    # Seed ADX: average of first n DX values after n
+    if sz > 2 * n:
+        dx_sum = 0.0
+        for i in range(n, 2 * n):
+            dx_sum += dx[i]
+        adx[2 * n - 1] = dx_sum / n
+        for i in range(2 * n, sz):
+            adx[i] = (adx[i-1] * (n - 1) + dx[i]) / n
     return adx
 
 @njit(cache=True)
@@ -468,7 +505,7 @@ def _rsi14_np(close):
     if close.size < 2: return np.full_like(close, 50.0)
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta>0, delta, 0.0); loss = np.where(delta<0, -delta, 0.0)
-    avg_gain = _ema_np(gain, 27); avg_loss = _ema_np(loss, 27)
+    avg_gain = _ema_np(gain, 14); avg_loss = _ema_np(loss, 14)
     with np.errstate(divide='ignore', invalid='ignore'): rsi = 100.0 - (100.0 / (1.0 + (avg_gain/(avg_loss+1e-12))))
     return np.nan_to_num(rsi, nan=50.0)
 
@@ -851,14 +888,20 @@ def _detect_wyckoff(h, l, c, vol_spike, cvd_div_bull, cvd_div_bear, last_sl, las
     n = len(c)
     spring = np.zeros(n)
     upthrust = np.zeros(n)
-    for i in range(5, n):
+    # Accumulation/Distribution phase detection
+    accum_phase = np.zeros(n)
+    distrib_phase = np.zeros(n)
+
+    for i in range(10, n):
+        # Extended lookback (10 bars) for volume/CVD confirmation
+        vol_lookback = 7
+
         # Spring: Sweeps last_sl, closes back above it
-        # Requires: volume confirmation OR CVD divergence (within 3-bar window)
         curr_sl = last_sl[i-1]
         if curr_sl > 0 and l[i] < curr_sl and c[i] > curr_sl:
             has_vol = False
             has_cvd = False
-            for k in range(max(0, i-2), i+1):
+            for k in range(max(0, i - vol_lookback), i + 1):
                 if vol_spike[k] > 0: has_vol = True
                 if cvd_div_bull[k] > 0: has_cvd = True
             if has_vol or has_cvd:
@@ -869,12 +912,111 @@ def _detect_wyckoff(h, l, c, vol_spike, cvd_div_bull, cvd_div_bear, last_sl, las
         if curr_sh > 0 and h[i] > curr_sh and c[i] < curr_sh:
             has_vol = False
             has_cvd = False
-            for k in range(max(0, i-2), i+1):
+            for k in range(max(0, i - vol_lookback), i + 1):
                 if vol_spike[k] > 0: has_vol = True
                 if cvd_div_bear[k] > 0: has_cvd = True
             if has_vol or has_cvd:
                 upthrust[i] = 1.0
-    return spring, upthrust
+
+        # ---- ACCUMULATION PHASE DETECTION (Wyckoff Phase C/D) ----
+        # Accumulation = price consolidates near support + volume absorption
+        # (small bodies, high volume = selling being absorbed by smart money)
+        if i >= 20:
+            # Check if price has been ranging near swing low for 10+ bars
+            range_count = 0
+            absorption_count = 0
+            atr_local = 0.0
+            for ab in range(i - 20, i):
+                atr_local += (h[ab] - l[ab])
+            atr_local /= 20.0
+            if atr_local < 1e-9:
+                atr_local = 1e-9
+
+            for ab in range(i - 10, i):
+                dist_to_sl = abs(c[ab] - curr_sl) / atr_local if curr_sl > 0 else 99.0
+                if dist_to_sl < 2.0:
+                    range_count += 1
+                # Absorption: high volume + small body (selling absorbed)
+                body = abs(c[ab] - c[ab - 1]) if ab > 0 else 0.0
+                rng_bar = h[ab] - l[ab]
+                if rng_bar > 1e-9 and vol_spike[ab] > 0 and (body / rng_bar) < 0.3:
+                    absorption_count += 1
+
+            if range_count >= 6 and absorption_count >= 1:
+                accum_phase[i] = 1.0
+
+        # ---- DISTRIBUTION PHASE DETECTION ----
+        if i >= 20:
+            range_count = 0
+            absorption_count = 0
+            atr_local_d = 0.0
+            for db in range(i - 20, i):
+                atr_local_d += (h[db] - l[db])
+            atr_local_d /= 20.0
+            if atr_local_d < 1e-9:
+                atr_local_d = 1e-9
+
+            for db in range(i - 10, i):
+                dist_to_sh = abs(c[db] - curr_sh) / atr_local_d if curr_sh > 0 else 99.0
+                if dist_to_sh < 2.0:
+                    range_count += 1
+                body = abs(c[db] - c[db - 1]) if db > 0 else 0.0
+                rng_bar = h[db] - l[db]
+                if rng_bar > 1e-9 and vol_spike[db] > 0 and (body / rng_bar) < 0.3:
+                    absorption_count += 1
+
+            if range_count >= 6 and absorption_count >= 1:
+                distrib_phase[i] = 1.0
+
+    return spring, upthrust, accum_phase, distrib_phase
+
+@njit(cache=True)
+def _multi_swing_fractal_range(high, low, swing_hi, swing_lo, lookback_swings=3):
+    """Track the highest/lowest from the last N confirmed swing points.
+    This gives a proper major fractal range for Fibonacci anchoring instead of
+    just using the last single swing high/low."""
+    n = len(high)
+    frac_high = np.zeros(n)
+    frac_low = np.zeros(n)
+
+    # Circular buffers for recent swing highs and lows
+    recent_sh = np.zeros(lookback_swings)
+    recent_sl = np.zeros(lookback_swings)
+    sh_idx = 0; sl_idx = 0
+    sh_count = 0; sl_count = 0
+
+    for i in range(n):
+        if swing_hi[i] == 1 and i >= 3:
+            recent_sh[sh_idx % lookback_swings] = high[i - 3]  # right=3 confirmation
+            sh_idx += 1
+            sh_count = min(sh_count + 1, lookback_swings)
+
+        if swing_lo[i] == 1 and i >= 3:
+            recent_sl[sl_idx % lookback_swings] = low[i - 3]
+            sl_idx += 1
+            sl_count = min(sl_count + 1, lookback_swings)
+
+        # Find max of recent swing highs and min of recent swing lows
+        if sh_count > 0:
+            max_val = recent_sh[0]
+            for j in range(1, sh_count):
+                if recent_sh[j] > max_val:
+                    max_val = recent_sh[j]
+            frac_high[i] = max_val
+        else:
+            frac_high[i] = high[i]
+
+        if sl_count > 0:
+            min_val = recent_sl[0]
+            for j in range(1, sl_count):
+                if recent_sl[j] < min_val and recent_sl[j] > 0:
+                    min_val = recent_sl[j]
+            frac_low[i] = min_val
+        else:
+            frac_low[i] = low[i]
+
+    return frac_high, frac_low
+
 
 class Precomp:
     def __init__(self, df):
@@ -933,7 +1075,7 @@ class Precomp:
 
         # ADVANCED STRUCTURE PATTERNS
         self.qm_bull, self.qm_bear = _detect_qm(self.h, self.l, self.c, self.swing_hi, self.swing_lo)
-        self.spring, self.upthrust = _detect_wyckoff(self.h, self.l, self.c, self.vol_spike, self.cvd_div_bull, self.cvd_div_bear, self.last_sl, self.last_sh)
+        self.spring, self.upthrust, self.accum_phase, self.distrib_phase = _detect_wyckoff(self.h, self.l, self.c, self.vol_spike, self.cvd_div_bull, self.cvd_div_bear, self.last_sl, self.last_sh)
 
         hours = pd.to_datetime(df.timestamp, unit='ms', utc=True).dt.hour.values
         days = pd.to_datetime(df.timestamp, unit='ms', utc=True).dt.dayofyear.values
@@ -942,6 +1084,15 @@ class Precomp:
         self.atr_percentile_100 = _rolling_percentile_np(self.atr14, 100)
         self.rolling_vwap_20 = _rolling_vwap_np((self.h + self.l + self.c) / 3.0, self.v, 20)
         self.dc_high_20, self.dc_low_20 = _donchian_channels_np(self.h, self.l, 20)
+
+        # Cache EMA100 for performance (avoid recalculation in confluence_features)
+        self.ema100 = _ema_np(self.c, 100)
+
+        # Multi-swing fractal range: track the highest high and lowest low
+        # from the last 3 confirmed swing points (major structure)
+        self.fractal_high, self.fractal_low = _multi_swing_fractal_range(
+            self.h, self.l, self.swing_hi, self.swing_lo, lookback_swings=3
+        )
 
 def _trend_flags(e50, e200): return (1.0, 0.0) if e50>e200 else ((0.0, 1.0) if e50<e200 else (0.0, 0.0))
 def _ensure_precomp(df, pre): return pre if isinstance(pre, Precomp) else Precomp(df)
@@ -999,8 +1150,47 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
     f["sweep_high"] = float(pExec.sweep_up[idx_Exec])
     f["sweep_low"] = float(pExec.sweep_dn[idx_Exec])
     
-    f["choch_up"]=float(1.0 if pExec.bos_up[idx_Exec] and idx_Exec>=5 and pExec.bos_down[idx_Exec-5] else 0.0)
-    f["choch_down"]=float(1.0 if pExec.bos_down[idx_Exec] and idx_Exec>=5 and pExec.bos_up[idx_Exec-5] else 0.0)
+    # ---- PROPER ChoCH DETECTION (Change of Character) ----
+    # ChoCH = BOS in current direction + prior established trend in opposite direction
+    # Scan a 20-bar window: if prior trend had 2+ BOS in one direction,
+    # and now we get a BOS in the opposite direction = genuine character change
+    choch_up_val = 0.0
+    choch_down_val = 0.0
+    if pExec.bos_up[idx_Exec]:
+        prior_bear_count = 0
+        for cb in range(max(0, idx_Exec - 20), idx_Exec):
+            if pExec.bos_down[cb]: prior_bear_count += 1
+        # Need at least 2 prior bearish BOS = established downtrend, then bullish BOS = ChoCH
+        if prior_bear_count >= 2:
+            choch_up_val = 1.0
+    if pExec.bos_down[idx_Exec]:
+        prior_bull_count = 0
+        for cb in range(max(0, idx_Exec - 20), idx_Exec):
+            if pExec.bos_up[cb]: prior_bull_count += 1
+        if prior_bull_count >= 2:
+            choch_down_val = 1.0
+    f["choch_up"] = choch_up_val
+    f["choch_down"] = choch_down_val
+
+    # ---- DISPLACEMENT SEQUENCE DETECTION ----
+    # Displacement = large body candle (>1.5x ATR) that breaks structure
+    curr_atr_cf = pExec.atr14[idx_Exec] if idx_Exec < len(pExec.atr14) else px * 0.01
+    # Count displacement candles in recent window (institutional activity)
+    disp_bull_count = 0
+    disp_bear_count = 0
+    for db in range(max(0, idx_Exec - 10), idx_Exec + 1):
+        if db < len(pExec.c):
+            db_body = abs(pExec.c[db] - pExec.o[db])
+            db_atr = pExec.atr14[db] if db < len(pExec.atr14) else px * 0.01
+            if db_body > db_atr * 1.5:
+                if pExec.c[db] > pExec.o[db]: disp_bull_count += 1
+                else: disp_bear_count += 1
+    f["displacement_bull_count"] = float(disp_bull_count)
+    f["displacement_bear_count"] = float(disp_bear_count)
+    # Displacement + BOS = institutional intent confirmed
+    f["displacement_bos_bull"] = 1.0 if disp_bull_count > 0 and pExec.bos_up[idx_Exec] else 0.0
+    f["displacement_bos_bear"] = 1.0 if disp_bear_count > 0 and pExec.bos_down[idx_Exec] else 0.0
+
     f["bars_since_ob_bull"] = float(pExec.bars_since_ob_bull[idx_Exec])
     f["bars_since_ob_bear"] = float(pExec.bars_since_ob_bear[idx_Exec])
 
@@ -1063,6 +1253,43 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
     f["qm_bear"] = float(pExec.qm_bear[idx_Exec])
     f["wyckoff_spring"] = float(pExec.spring[idx_Exec])
     f["wyckoff_upthrust"] = float(pExec.upthrust[idx_Exec])
+    f["wyckoff_accum"] = float(pExec.accum_phase[idx_Exec])
+    f["wyckoff_distrib"] = float(pExec.distrib_phase[idx_Exec])
+
+    # QM quality scoring — reward QMs with displacement confirmation
+    qm_bull_quality = 0.0
+    if f["qm_bull"] > 0:
+        qm_bull_quality = 1.0
+        # Bonus: if displacement BOS preceded the QM setup
+        if f.get("displacement_bos_bull", 0) > 0: qm_bull_quality = 2.0
+        # Bonus: if accumulation phase detected near QM level
+        if f["wyckoff_accum"] > 0: qm_bull_quality += 1.0
+    qm_bear_quality = 0.0
+    if f["qm_bear"] > 0:
+        qm_bear_quality = 1.0
+        if f.get("displacement_bos_bear", 0) > 0: qm_bear_quality = 2.0
+        if f["wyckoff_distrib"] > 0: qm_bear_quality += 1.0
+    f["qm_bull_quality"] = qm_bull_quality
+    f["qm_bear_quality"] = qm_bear_quality
+
+    # ---- LIQUIDITY POOL TRACKING ----
+    # Equal highs/lows = stacked liquidity (stop losses clustered)
+    eq_high_count = 0
+    eq_low_count = 0
+    if idx_Exec >= 20:
+        tol_liq = curr_atr_cf * 0.15  # Tolerance = 15% of ATR
+        for lp in range(max(0, idx_Exec - 20), idx_Exec):
+            if lp < len(pExec.last_sh):
+                # Equal highs within tolerance
+                if abs(pExec.last_sh[lp] - pExec.last_sh[idx_Exec]) < tol_liq and pExec.last_sh[lp] > 0:
+                    eq_high_count += 1
+                if abs(pExec.last_sl[lp] - pExec.last_sl[idx_Exec]) < tol_liq and pExec.last_sl[lp] > 0:
+                    eq_low_count += 1
+    f["equal_highs_count"] = float(eq_high_count)
+    f["equal_lows_count"] = float(eq_low_count)
+    # Distance to nearest liquidity pool
+    f["dist_to_liq_high_atr"] = (pExec.last_sh[idx_Exec] - px) / (curr_atr_cf + 1e-12) if pExec.last_sh[idx_Exec] > px else 0.0
+    f["dist_to_liq_low_atr"] = (px - pExec.last_sl[idx_Exec]) / (curr_atr_cf + 1e-12) if pExec.last_sl[idx_Exec] < px else 0.0
 
     f["asian_high"] = float(pExec.asian_high[idx_Exec])
     f["asian_low"] = float(pExec.asian_low[idx_Exec])
@@ -1072,23 +1299,93 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
     f["dist_asian_high_pct"] = (px - f["asian_high"]) / px_safe * 100
     f["dist_asian_low_pct"] = (px - f["asian_low"]) / px_safe * 100
 
-    # SMC & Fibonacci Deep Wick Geometry
-    macro_high = max(f["last_swing_high"], f["last_swing_low"])
-    macro_low = min(f["last_swing_high"], f["last_swing_low"])
+    # Rolling VWAP for base dict access (used by TP targeting in plan_trade_with_brain)
+    f["rolling_vwap_20"] = float(pExec.rolling_vwap_20[idx_Exec])
+
+    # SMC & Fibonacci Deep Wick Geometry (EXPANDED: Full Fib Suite + OTE Zone)
+    # Use multi-swing fractal range for proper major structure Fibonacci anchoring
+    macro_high = float(pExec.fractal_high[idx_Exec])
+    macro_low = float(pExec.fractal_low[idx_Exec])
+    # Fallback to single swing if fractal range is invalid
+    if macro_high <= macro_low or macro_high <= 0:
+        macro_high = max(f["last_swing_high"], f["last_swing_low"])
+        macro_low = min(f["last_swing_high"], f["last_swing_low"])
     fractal_range = macro_high - macro_low
 
     if fractal_range > 0:
-        f["fib_786_long"] = macro_low + (fractal_range * 0.214)
-        f["fib_886_long"] = macro_low + (fractal_range * 0.114)
+        # Standard Fibonacci retracements
+        f["fib_382_long"] = macro_low + (fractal_range * 0.618)    # 38.2% retrace for longs
+        f["fib_500_long"] = macro_low + (fractal_range * 0.500)    # 50% retrace (equilibrium)
+        f["fib_618_long"] = macro_low + (fractal_range * 0.382)    # 61.8% retrace (golden ratio)
+        f["fib_786_long"] = macro_low + (fractal_range * 0.214)    # 78.6% retrace (deep)
+        f["fib_886_long"] = macro_low + (fractal_range * 0.114)    # 88.6% retrace (extreme)
+        f["fib_382_short"] = macro_high - (fractal_range * 0.618)
+        f["fib_500_short"] = macro_high - (fractal_range * 0.500)
+        f["fib_618_short"] = macro_high - (fractal_range * 0.382)
         f["fib_786_short"] = macro_high - (fractal_range * 0.214)
         f["fib_886_short"] = macro_high - (fractal_range * 0.114)
-    else:
-        f["fib_786_long"] = f["fib_886_long"] = f["fib_786_short"] = f["fib_886_short"] = px
 
+        # ICT Optimal Trade Entry (OTE) Zone: 62-79% retracement
+        ote_top_long = macro_low + (fractal_range * 0.382)   # 61.8% retrace
+        ote_bot_long = macro_low + (fractal_range * 0.214)   # 78.6% retrace
+        f["in_ote_zone_long"] = 1.0 if ote_bot_long <= px <= ote_top_long else 0.0
+        ote_top_short = macro_high - (fractal_range * 0.214)
+        ote_bot_short = macro_high - (fractal_range * 0.382)
+        f["in_ote_zone_short"] = 1.0 if ote_bot_short <= px <= ote_top_short else 0.0
+
+        # Premium/Discount zone (above/below 50% = premium/discount)
+        f["fib_position_pct"] = (px - macro_low) / fractal_range * 100.0  # 0-100 scale
+        f["is_discount_zone"] = 1.0 if px < (macro_low + fractal_range * 0.5) else 0.0
+        f["is_premium_zone"] = 1.0 if px > (macro_low + fractal_range * 0.5) else 0.0
+
+        # Fibonacci extensions (for TP targeting)
+        f["fib_ext_1272"] = macro_high + (fractal_range * 0.272)
+        f["fib_ext_1618"] = macro_high + (fractal_range * 0.618)
+    else:
+        f["fib_382_long"] = f["fib_500_long"] = f["fib_618_long"] = px
+        f["fib_786_long"] = f["fib_886_long"] = px
+        f["fib_382_short"] = f["fib_500_short"] = f["fib_618_short"] = px
+        f["fib_786_short"] = f["fib_886_short"] = px
+        f["in_ote_zone_long"] = 0.0; f["in_ote_zone_short"] = 0.0
+        f["fib_position_pct"] = 50.0
+        f["is_discount_zone"] = 0.0; f["is_premium_zone"] = 0.0
+        f["fib_ext_1272"] = f["fib_ext_1618"] = px
+
+    f["dist_fib_618_long_pct"] = (px - f["fib_618_long"]) / px_safe * 100
     f["dist_fib_786_long_pct"] = (px - f["fib_786_long"]) / px_safe * 100
     f["dist_fib_886_long_pct"] = (px - f["fib_886_long"]) / px_safe * 100
+    f["dist_fib_618_short_pct"] = (px - f["fib_618_short"]) / px_safe * 100
     f["dist_fib_786_short_pct"] = (px - f["fib_786_short"]) / px_safe * 100
     f["dist_fib_886_short_pct"] = (px - f["fib_886_short"]) / px_safe * 100
+
+    # Displacement detection: large body candle (>2x ATR) = institutional commitment
+    curr_atr = pExec.atr14[idx_Exec] if idx_Exec < len(pExec.atr14) else px * 0.01
+    curr_body = abs(pExec.c[idx_Exec] - pExec.o[idx_Exec])
+    f["is_displacement"] = 1.0 if curr_body > curr_atr * 1.5 else 0.0
+    f["displacement_ratio"] = curr_body / (curr_atr + 1e-12)
+
+    # Recent displacement lookback (any displacement in last 5 bars)
+    recent_disp_bull = 0.0
+    recent_disp_bear = 0.0
+    for rb in range(max(0, idx_Exec - 4), idx_Exec + 1):
+        if rb < len(pExec.c):
+            rb_body = abs(pExec.c[rb] - pExec.o[rb])
+            rb_atr = pExec.atr14[rb] if rb < len(pExec.atr14) else px * 0.01
+            if rb_body > rb_atr * 1.5:
+                if pExec.c[rb] > pExec.o[rb]: recent_disp_bull = 1.0
+                else: recent_disp_bear = 1.0
+    f["recent_displacement_bull"] = recent_disp_bull
+    f["recent_displacement_bear"] = recent_disp_bear
+
+    # Liquidity void detection: gap between current bar low and prior bar high (or vice versa)
+    if idx_Exec > 0:
+        gap_up = pExec.l[idx_Exec] - pExec.h[idx_Exec - 1]
+        gap_dn = pExec.l[idx_Exec - 1] - pExec.h[idx_Exec]
+        f["liquidity_void_up"] = max(0, gap_up) / (curr_atr + 1e-12)
+        f["liquidity_void_dn"] = max(0, gap_dn) / (curr_atr + 1e-12)
+    else:
+        f["liquidity_void_up"] = 0.0
+        f["liquidity_void_dn"] = 0.0
 
     # Check if Asian Range was just swept
     f["asian_range_swept_up"] = 1.0 if pExec.h[idx_Exec] > pExec.asian_high[idx_Exec] and pExec.c[idx_Exec] < pExec.asian_high[idx_Exec] else 0.0
@@ -1117,7 +1414,7 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
     # FIX FEATURE LEAK: Generate Interaction features in the core dictionary so they export correctly
     f["inter_htf_bos_up"] = f.get("htf_up",0) * f.get("bos_up",0)
     f["inter_swing_down_sweep_high"] = f.get("swing_down",0) * f.get("sweep_high",0)
-    ema20_gt = 1.0 if (pExec.ema20[idx_Exec] > _ema_np(pExec.c, 100)[idx_Exec] if hasattr(pExec, 'ema20') else 0) else 0.0
+    ema20_gt = 1.0 if (pExec.ema20[idx_Exec] > pExec.ema100[idx_Exec] if hasattr(pExec, 'ema100') else 0) else 0.0
     f["trend_align_up_3tf"] = f.get("macro_up",0) + f.get("swing_up",0) + f.get("htf_up",0) + ema20_gt
     f["trend_align_down_3tf"] = f.get("macro_down",0) + f.get("swing_down",0) + f.get("htf_down",0) + (1.0 - ema20_gt)
 
@@ -1291,11 +1588,33 @@ def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, b
     f['upper_wick_pct'] = (pExec.h - body_top) / total_range_safe
     f['lower_wick_pct'] = (body_bottom - pExec.l) / total_range_safe
 
-    # Killzone Session Flags
+    # Killzone Session Flags (EXPANDED)
     hours = pd.to_datetime(exec_tf.timestamp, unit='ms', utc=True).dt.hour.values
     f['is_london_killzone'] = np.where((hours >= 7) & (hours <= 10), 1.0, 0.0)
     f['is_ny_killzone'] = np.where((hours >= 13) & (hours <= 16), 1.0, 0.0)
     f['is_asian_range'] = np.where((hours >= 0) & (hours <= 6), 1.0, 0.0)
+    # London-NY overlap = highest liquidity period (13:00-16:00 UTC)
+    f['is_london_ny_overlap'] = np.where((hours >= 13) & (hours <= 16), 1.0, 0.0)
+    # Pre-market / post-market dead zones (low liquidity = bad for entries)
+    f['is_low_liquidity'] = np.where((hours >= 22) | (hours <= 1), 1.0, 0.0)
+
+    # Opening Range Breakout (ORB) — detect break of Asian range high/low
+    asian_high_arr = pExec.asian_high
+    asian_low_arr = pExec.asian_low
+    # ORB signals: first break of Asian range during London/NY sessions
+    orb_bull = np.zeros(n)
+    orb_bear = np.zeros(n)
+    for orb_i in range(1, n):
+        if hours[orb_i] >= 7 and hours[orb_i] <= 16:  # Active sessions only
+            if asian_high_arr[orb_i] > 0 and cl[orb_i] > asian_high_arr[orb_i]:
+                # Confirm: was below Asian high in previous bar
+                if orb_i > 0 and cl[orb_i - 1] <= asian_high_arr[orb_i]:
+                    orb_bull[orb_i] = 1.0
+            if asian_low_arr[orb_i] > 0 and cl[orb_i] < asian_low_arr[orb_i]:
+                if orb_i > 0 and cl[orb_i - 1] >= asian_low_arr[orb_i]:
+                    orb_bear[orb_i] = 1.0
+    f['orb_bull'] = orb_bull
+    f['orb_bear'] = orb_bear
 
     # Wyckoff Volume Absorption (Directive 3)
     candle_spread = pExec.h - pExec.l
@@ -1350,6 +1669,104 @@ def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, b
     f['dist_to_kc_lower_pct'] = np.where(kc_lower_arr > 0, (cl - kc_lower_arr) / kc_lower_arr * 100.0, 0.0)
 
     # ---------------------------------------------------------
+    # DIRECTIVE 5: MOMENTUM PERSISTENCE & ACCELERATION FEATURES
+    # ---------------------------------------------------------
+    # RSI Rate of Change — captures momentum acceleration/deceleration
+    f['rsi_roc_5'] = _roc(pExec.rsi14, 5)
+    f['rsi_roc_10'] = _roc(pExec.rsi14, 10)
+
+    # MACD Histogram slope — momentum persistence indicator
+    macd_hist = pExec.macd - pExec.macd_sig
+    f['macd_hist_slope_3'] = _roc(macd_hist, 3)
+    f['macd_hist_slope_5'] = _roc(macd_hist, 5)
+
+    # Stochastic %K/%D proxy via RSI normalization
+    rsi_min_14 = pd.Series(pExec.rsi14).rolling(14, min_periods=1).min().to_numpy()
+    rsi_max_14 = pd.Series(pExec.rsi14).rolling(14, min_periods=1).max().to_numpy()
+    rsi_range = rsi_max_14 - rsi_min_14
+    f['stoch_rsi_k'] = np.where(rsi_range > 1e-9, (pExec.rsi14 - rsi_min_14) / rsi_range * 100.0, 50.0)
+    f['stoch_rsi_d'] = _ema_np(f['stoch_rsi_k'], 3)
+
+    # ---------------------------------------------------------
+    # DIRECTIVE 6: CANDLE PATTERN FEATURES (numeric for brain)
+    # ---------------------------------------------------------
+    body_size_arr = np.abs(cl - pExec.o)
+    total_range_arr = pExec.h - pExec.l
+    safe_range = np.where(total_range_arr > 1e-9, total_range_arr, 1e-9)
+
+    # Engulfing pattern detection
+    prev_body = np.abs(np.roll(cl, 1) - np.roll(pExec.o, 1))
+    curr_body = body_size_arr
+    bullish_close = cl > pExec.o
+    bearish_close = cl < pExec.o
+    prev_bearish = np.roll(cl, 1) < np.roll(pExec.o, 1)
+    prev_bullish = np.roll(cl, 1) > np.roll(pExec.o, 1)
+    f['engulf_bull_signal'] = np.where(bullish_close & prev_bearish & (curr_body > prev_body * 1.1), 1.0, 0.0)
+    f['engulf_bear_signal'] = np.where(bearish_close & prev_bullish & (curr_body > prev_body * 1.1), 1.0, 0.0)
+    f['engulf_bull_signal'][0] = 0.0
+    f['engulf_bear_signal'][0] = 0.0
+
+    # Pin bar strength (normalized wick dominance)
+    f['pin_bull_strength'] = (np.minimum(pExec.o, cl) - pExec.l) / safe_range
+    f['pin_bear_strength'] = (pExec.h - np.maximum(pExec.o, cl)) / safe_range
+
+    # Inside bar (contraction) — prior bar engulfs current
+    prev_high = np.roll(pExec.h, 1)
+    prev_low = np.roll(pExec.l, 1)
+    f['is_inside_bar'] = np.where((pExec.h <= prev_high) & (pExec.l >= prev_low), 1.0, 0.0)
+    f['is_inside_bar'][0] = 0.0
+
+    # Body-to-range ratio (doji detection when low)
+    f['body_range_ratio'] = body_size_arr / safe_range
+
+    # ---------------------------------------------------------
+    # DIRECTIVE 7: ROLLING HURST EXPONENT (Mean Reversion vs Trend)
+    # ---------------------------------------------------------
+    n = len(cl)
+    hurst_arr = np.full(n, 0.5)
+    hurst_window = 100
+    for i in range(hurst_window, n):
+        chunk = cl[i - hurst_window:i]
+        if np.std(chunk) < 1e-9:
+            continue
+        # Simplified R/S method
+        mean_c = np.mean(chunk)
+        deviations = np.cumsum(chunk - mean_c)
+        r_val = np.max(deviations) - np.min(deviations)
+        s_val = np.std(chunk, ddof=1)
+        if s_val > 1e-9 and r_val > 1e-9:
+            # H = log(R/S) / log(n)
+            hurst_arr[i] = np.log(r_val / s_val) / np.log(hurst_window)
+    f['rolling_hurst'] = np.clip(hurst_arr, 0.0, 1.0)
+
+    # ---------------------------------------------------------
+    # DIRECTIVE 8: INTER-TIMEFRAME DIVERGENCE SCORING
+    # ---------------------------------------------------------
+    # HTF bullish + LTF bearish = bullish divergence setup, and vice versa
+    ltf_momentum = np.where(pExec.rsi14 > 50, 1.0, -1.0)
+    mtf_rsi_s = pd.Series(pSwing.rsi14, index=swing_tf.timestamp).shift(1).reindex(exec_tf.timestamp, method='ffill').fillna(50).values
+    htf_rsi_s = pd.Series(pMacro.rsi14, index=macro_tf.timestamp).shift(1).reindex(exec_tf.timestamp, method='ffill').fillna(50).values
+    mtf_momentum = np.where(mtf_rsi_s > 50, 1.0, -1.0)
+    htf_momentum = np.where(htf_rsi_s > 50, 1.0, -1.0)
+
+    # Cross-TF divergence: when LTF diverges from HTF, potential reversal
+    f['ltf_htf_momentum_div'] = ltf_momentum - htf_momentum  # +2 = LTF bull/HTF bear, -2 = opposite
+    f['ltf_mtf_momentum_div'] = ltf_momentum - mtf_momentum
+
+    # ---------------------------------------------------------
+    # DIRECTIVE 9: ADAPTIVE VOLATILITY FEATURES
+    # ---------------------------------------------------------
+    # Volatility of volatility (vol-of-vol) — regime change detector
+    atr_pct = pExec.atr14 / (np.abs(cl) + 1e-12) * 100
+    f['vol_of_vol_20'] = _rolling_std(atr_pct, 20)
+
+    # ATR expansion/contraction rate
+    f['atr_expansion_rate'] = _roc(atr_pct, 10)
+
+    # Normalized ATR percentile change (acceleration of volatility)
+    f['atr_pctl_roc_10'] = _roc(pExec.atr_percentile_100 * 100.0, 10)
+
+    # ---------------------------------------------------------
     # DIRECTIVE 4: STRIP COLLINEAR NOISE
     # ---------------------------------------------------------
     keys_to_drop = [
@@ -1364,6 +1781,21 @@ def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, b
     return f
 
 class BrainLearningManager:
+    # ── Canonical list of all specialist brain keys the Meta-Brain expects ──
+    ALL_SPECIALIST_KEYS = [
+        ("ALPHA", "long"), ("ALPHA", "short"),
+        ("BETA", "long"), ("BETA", "short"),
+        ("GAMMA", "long"), ("GAMMA", "short"),
+        ("DELTA", "long"), ("DELTA", "short"),
+        ("EPSILON", "long"), ("EPSILON", "short"),
+        ("ZETA", "long"), ("ZETA", "short"),
+        ("ETA", "long"), ("ETA", "short"),
+        ("THETA", "long"), ("THETA", "short"),
+        ("IOTA", "long"), ("IOTA", "short"),
+        ("KAPPA", "long"), ("KAPPA", "short"),
+        ("LAMBDA", "long"), ("LAMBDA", "short"),
+    ]
+
     def __init__(self, cfg, brains_dir=None):
         global log
         if 'log' not in globals() or not log:
@@ -1375,6 +1807,7 @@ class BrainLearningManager:
                 log.addHandler(h)
         self.cfg = cfg
         self.brains = {} # Format: {(strategy, side): model}
+        self.meta_brain = None  # Unified Meta-Brain
         if not joblib: return
         self.load_brains(brains_dir)
 
@@ -1386,8 +1819,11 @@ class BrainLearningManager:
         loaded = 0
         for model_file in p.glob("brain_*.joblib"):
             try:
-                # brain_{STRATEGY}_{SIDE}.joblib
                 parts = model_file.stem.split("_")
+                # Skip the meta-brain file during specialist loading
+                if len(parts) >= 3 and parts[1] == "META":
+                    continue
+                # brain_{STRATEGY}_{SIDE}.joblib
                 if len(parts) >= 3:
                     strat = parts[1]
                     side = parts[2]
@@ -1413,6 +1849,25 @@ class BrainLearningManager:
         if loaded > 0:
             log.info(f"Loaded {loaded} localized brain models from {brains_dir}")
 
+        # ── Load Meta-Brain (unified decision maker) ──
+        meta_file = p / "brain_META_unified.joblib"
+        if meta_file.exists():
+            try:
+                meta_data = joblib.load(str(meta_file))
+                if "xgb_model_file" in meta_data:
+                    import xgboost as xgb
+                    booster = xgb.Booster()
+                    xgb_path = p / meta_data["xgb_model_file"]
+                    if not xgb_path.exists():
+                        alt = xgb_path.with_suffix(".json") if xgb_path.suffix == ".xgb" else xgb_path.with_suffix(".xgb")
+                        if alt.exists(): xgb_path = alt
+                    booster.load_model(str(xgb_path))
+                    meta_data["booster"] = booster
+                self.meta_brain = meta_data
+                log.info(f"Loaded Meta-Brain (unified) with {len(meta_data.get('feature_names', []))} features")
+            except Exception as e:
+                log.error(f"Meta-Brain load error: {e}")
+
     def predict_probability(self, strategy, side, base, adv, iExec, px, pExec):
         b = self.brains.get((strategy, side))
         if not b: return None # Strict fallback block
@@ -1430,8 +1885,100 @@ class BrainLearningManager:
             log.error(f"Brain Prediction Failed: {e}\n{traceback.format_exc()}")
             return None
 
+    def predict_meta_probability(self, strategy, side, base, adv, iExec, px, pExec):
+        """Query ALL specialist brains + market context → Meta-Brain final decision.
+
+        Returns (meta_prob, specialist_prob) tuple.
+        meta_prob is the unified decision; specialist_prob is the setup-specific one.
+        If no meta-brain is loaded, falls back to specialist-only.
+        """
+        # Step 1: Get the specialist probability for the selected setup
+        specialist_prob = self.predict_probability(strategy, side, base, adv, iExec, px, pExec)
+        if specialist_prob is None:
+            return None, None
+
+        # If no meta-brain loaded, fall back to specialist-only
+        if self.meta_brain is None:
+            return specialist_prob, specialist_prob
+
+        try:
+            # Step 2: Query ALL specialist brains to build the full probability landscape
+            specialist_probs = {}
+            for (strat_key, side_key) in self.ALL_SPECIALIST_KEYS:
+                prob = self.predict_probability(strat_key, side_key, base, adv, iExec, px, pExec)
+                specialist_probs[f"brain_{strat_key}_{side_key}"] = prob if prob is not None else -1.0
+
+            # Step 3: Build meta-brain feature vector
+            meta_features = {}
+
+            # 3a: All specialist probabilities (22 features)
+            meta_features.update(specialist_probs)
+
+            # 3b: Count how many specialists are active (have loaded brains)
+            active_probs = [v for v in specialist_probs.values() if v >= 0.0]
+            meta_features["n_active_specialists"] = float(len(active_probs))
+            meta_features["mean_specialist_prob"] = float(np.mean(active_probs)) if active_probs else 0.0
+            meta_features["max_specialist_prob"] = float(np.max(active_probs)) if active_probs else 0.0
+            meta_features["std_specialist_prob"] = float(np.std(active_probs)) if len(active_probs) > 1 else 0.0
+
+            # 3c: The selected setup's identity
+            meta_features["selected_specialist_prob"] = specialist_prob
+            meta_features["selected_side"] = 1.0 if side == "long" else 0.0
+
+            # 3d: Market context from confluence_features (base dict)
+            context_keys = [
+                "bull_confluence_score", "bear_confluence_score",
+                "adx_14", "rsi_14", "atr_pct",
+                "btc_bullish", "funding_rate", "delta_oi",
+                "dxy_trend", "spx_trend", "btcd_trend",
+                "rvol", "vol_zscore",
+                "ob_bull_near", "ob_bear_near",
+                "fvg_bull_near", "fvg_bear_near",
+                "bos_bull", "bos_bear",
+                "choch_bull", "choch_bear",
+                "displacement_bull_count", "displacement_bear_count",
+                "spring", "upthrust",
+                "accum_phase", "distrib_phase",
+                "qm_bull", "qm_bear",
+                "in_ote_zone_bull", "in_ote_zone_short",
+                "in_discount_zone", "in_premium_zone",
+                "equal_highs_count", "equal_lows_count",
+                "hurst_exponent",
+                "macro_sentiment",
+            ]
+            for k in context_keys:
+                val = base.get(k, 0.0)
+                meta_features[k] = float(val) if isinstance(val, (int, float, np.floating, np.integer)) and np.isfinite(val) else 0.0
+
+            # Step 4: Build vector and predict
+            meta_fnames = self.meta_brain['feature_names']
+            vec = np.array([meta_features.get(n, 0.0) for n in meta_fnames]).reshape(1, -1)
+            vec = np.clip(np.nan_to_num(vec, nan=0.0), -1e10, 1e10).astype(np.float32)
+
+            if "booster" in self.meta_brain:
+                import xgboost as xgb
+                dmat = xgb.DMatrix(vec, feature_names=meta_fnames)
+                meta_prob = float(self.meta_brain['booster'].predict(dmat)[0])
+            else:
+                meta_prob = self.meta_brain['classifier'].predict_proba(vec)[0][1]
+
+            return meta_prob, specialist_prob
+
+        except Exception as e:
+            log.error(f"Meta-Brain prediction failed: {e}\n{traceback.format_exc()}")
+            # Fallback to specialist-only
+            return specialist_prob, specialist_prob
+
+    def get_all_specialist_probs(self, side, base, adv, iExec, px, pExec):
+        """Get probabilities from ALL specialist brains. Used during export for meta-brain training."""
+        probs = {}
+        for (strat_key, side_key) in self.ALL_SPECIALIST_KEYS:
+            prob = self.predict_probability(strat_key, side_key, base, adv, iExec, px, pExec)
+            probs[f"brain_{strat_key}_{side_key}"] = prob if prob is not None else -1.0
+        return probs
+
     def _build_vec(self, side, b, a, iExec, px, pExec, fnames):
-        d = {**b} 
+        d = {**b}
         for k, v in a.items():
             if hasattr(v, '__getitem__') and len(v) > iExec:
                 val = v[iExec]
@@ -1696,17 +2243,19 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     bullish_tf_count = int(macro_up > 0) + int(swing_up > 0) + int(htf_up > 0)
     bearish_tf_count = int(macro_down > 0) + int(swing_down > 0) + int(htf_down > 0)
 
-    # HARD REGIME GATE: Block counter-trend trades in strong unidirectional trends
+    # REGIME GATE: Block counter-trend trades when strong unidirectional trend
     can_long = True
     can_short = True
     is_reversal_context = False
 
+    # Relaxed gate: block only when ALL 3 TFs agree AND momentum confirms
     if bearish_tf_count == 3:
-        # All 3 higher TFs bearish — block longs unless reversal evidence
         can_long = False
     if bullish_tf_count == 3:
-        # All 3 higher TFs bullish — block shorts unless reversal evidence
         can_short = False
+    # Partial regime bias: when 2/3 TFs agree, allow but flag as weaker conviction
+    is_weak_long = (bearish_tf_count >= 2 and bullish_tf_count == 0)
+    is_weak_short = (bullish_tf_count >= 2 and bearish_tf_count == 0)
 
     # ==========================================================
     # PHASE 2: REVERSAL DETECTION (Override regime gate when evidence is overwhelming)
@@ -1729,11 +2278,19 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     bull_reversal_evidence = int(bull_obv) + int(bull_ewo) + int(bull_cvd) + int(bull_rsi_div) + int(has_spring)
     bear_reversal_evidence = int(bear_obv) + int(bear_ewo) + int(bear_cvd) + int(bear_rsi_div) + int(has_upthrust)
 
-    # Unlock counter-trend if 4+ reversal signals converge (stricter — reversals are lower win rate)
-    if not can_long and bull_reversal_evidence >= 4:
+    # Unlock counter-trend when reversal evidence converges (configurable threshold)
+    reversal_min = getattr(cfg, 'reversal_evidence_min', 2)
+    if not can_long and bull_reversal_evidence >= reversal_min:
         can_long = True
         is_reversal_context = True
-    if not can_short and bear_reversal_evidence >= 4:
+    if not can_short and bear_reversal_evidence >= reversal_min:
+        can_short = True
+        is_reversal_context = True
+    # Also unlock on strong single-signal reversals (Wyckoff spring/upthrust are high-conviction)
+    if not can_long and has_spring and bull_reversal_evidence >= 1:
+        can_long = True
+        is_reversal_context = True
+    if not can_short and has_upthrust and bear_reversal_evidence >= 1:
         can_short = True
         is_reversal_context = True
 
@@ -1744,20 +2301,20 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     btc_bullish = base.get("btc_bullish", 1.0)
     bid_ask_imbalance = base.get("bid_ask_imbalance", 0.5)
 
-    # Oracle hard veto: deeply negative sentiment blocks longs, deeply positive blocks shorts
-    if oracle_sentiment < -0.6 and not is_reversal_context:
+    # Oracle hard veto: only block on extreme sentiment (widened from ±0.6 to ±0.8)
+    if oracle_sentiment < -0.8 and not is_reversal_context:
         can_long = False
-    if oracle_sentiment > 0.6 and not is_reversal_context:
+    if oracle_sentiment > 0.8 and not is_reversal_context:
         can_short = False
 
-    # BTC regime: if BTC is bearish and this isn't BTC, reduce long conviction
-    if btc_bullish < 0.5 and not is_reversal_context:
-        if bearish_tf_count >= 2:
+    # BTC regime: only block longs when BTC is deeply bearish AND all TFs confirm
+    if btc_bullish < 0.3 and not is_reversal_context:
+        if bearish_tf_count >= 3:
             can_long = False
 
-    # Spoofing defense
-    if bid_ask_imbalance > 0.80: can_long = False
-    if bid_ask_imbalance < 0.20: can_short = False
+    # Spoofing defense (widened from 0.80/0.20 to 0.90/0.10 — less false positives)
+    if bid_ask_imbalance > 0.90: can_long = False
+    if bid_ask_imbalance < 0.10: can_short = False
 
     if not can_long and not can_short: return None
 
@@ -1766,16 +2323,18 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # ==========================================================
     adx_val = base.get("adx", 25.0)
 
-    # Choppy market filter: ADX < 15 means no directional conviction — skip
-    if adx_val < 15.0 and not is_reversal_context:
+    # Choppy market filter — respects config (default threshold lowered to 10)
+    adx_threshold = getattr(cfg, 'adx_chop_threshold', 10.0)
+    if getattr(cfg, 'filter_adx_chop', True) and adx_val < adx_threshold and not is_reversal_context:
         return None
 
-    # Multi-TF alignment: require at least 2 TF agreement for trend trades
+    # Multi-TF alignment: configurable minimum (default 1 TF agreement)
+    mtf_min = getattr(cfg, 'mtf_alignment_min', 1)
     if not is_reversal_context:
-        if can_long and not can_short and bullish_tf_count < 2:
-            return None  # Not enough TF support for a long-only context
-        if can_short and not can_long and bearish_tf_count < 2:
-            return None  # Not enough TF support for a short-only context
+        if can_long and not can_short and bullish_tf_count < mtf_min:
+            return None
+        if can_short and not can_long and bearish_tf_count < mtf_min:
+            return None
 
     # ==========================================================
     # PHASE 4: PRECISE STRUCTURAL ENTRY DETECTION
@@ -1791,33 +2350,38 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     ob_bull_ce = (ob_bull_top + ob_bull_bot) / 2 if ob_bull_top > 0 else 0
     ob_bear_ce = (ob_bear_top + ob_bear_bot) / 2 if ob_bear_bot > 0 else 0
 
-    ob_bull_fresh = 0 < base.get("bars_since_ob_bull", 999) <= 40
-    ob_bear_fresh = 0 < base.get("bars_since_ob_bear", 999) <= 40
+    ob_max_age = getattr(cfg, 'ob_freshness_bars', 192)
+    ob_bull_fresh = 0 < base.get("bars_since_ob_bull", 999) <= ob_max_age
+    ob_bear_fresh = 0 < base.get("bars_since_ob_bear", 999) <= ob_max_age
 
     fvg_bull = base.get("fvg_bull", 0)
     fvg_bear = base.get("fvg_bear", 0)
-    fvg_tol = px * 0.002  # Widen FVG tolerance to 0.2%
-    qm_zone = current_atr * 0.5  # Widen QM zone to 0.5 ATR
+    fvg_tol_atr = getattr(cfg, 'fvg_tolerance_atr', 0.5)
+    fvg_tol = current_atr * fvg_tol_atr  # FVG zone = 0.5 ATR (was 0.2% of price)
+    qm_zone = current_atr * 0.75  # Widen QM zone to 0.75 ATR (was 0.5)
 
     sweep_bull = base.get("sweep_bull_p", 0.0)
     sweep_bear = base.get("sweep_bear_p", 0.0)
 
-    # Wick rejection detection (3-bar window)
+    # Wick rejection detection (5-bar window, configurable threshold)
+    wick_threshold = getattr(cfg, 'wick_rejection_pct', 0.15)
     is_bull_rejection = False
     is_bear_rejection = False
-    for idx in range(max(0, iExec - 2), iExec + 1):
+    for idx in range(max(0, iExec - 4), iExec + 1):
         if idx >= len(pExec.h): continue
         c_range = pExec.h[idx] - pExec.l[idx]
         if c_range > 1e-9:
             body_top = max(pExec.o[idx], pExec.c[idx])
             body_bot = min(pExec.o[idx], pExec.c[idx])
-            if (body_bot - pExec.l[idx]) / c_range > 0.25: is_bull_rejection = True
-            if (pExec.h[idx] - body_top) / c_range > 0.25: is_bear_rejection = True
+            if (body_bot - pExec.l[idx]) / c_range > wick_threshold: is_bull_rejection = True
+            if (pExec.h[idx] - body_top) / c_range > wick_threshold: is_bear_rejection = True
 
-    # Volume confirmation (current or recent bar)
-    has_volume = any(pExec.vol_spike[max(0, iExec-2):iExec+1] > 0) if hasattr(pExec, 'vol_spike') else False
+    # Volume confirmation (configurable lookback and threshold)
+    vol_lookback = getattr(cfg, 'vol_spike_lookback', 5)
+    has_volume = any(pExec.vol_spike[max(0, iExec-vol_lookback+1):iExec+1] > 0) if hasattr(pExec, 'vol_spike') else False
     rvol = base.get("rvol", 1.0)
-    has_elevated_vol = rvol > 1.2
+    rvol_threshold = getattr(cfg, 'vol_confirm_rvol', 0.8)
+    has_elevated_vol = rvol > rvol_threshold
 
     setup_type = None
     logic_desc = ""
@@ -1826,85 +2390,220 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # Volume confirmation gate — require elevated volume or spike for valid entries
     has_vol_confirm = has_volume or has_elevated_vol
 
-    # ---- LONG SETUPS ----
-    if can_long:
-        side = 'long'
+    # ==========================================================
+    # PHASE 4A: STRUCTURAL CONFLUENCE SCORING
+    # ==========================================================
+    # Count how many independent structural signals are active RIGHT NOW.
+    # This score is passed to the brain as a feature AND used to pick the
+    # best setup when multiple could fire on the same bar.
 
-        # ALPHA_LONG: OB CE — REQUIRE rejection wick confirmation + volume
+    # ---- Bullish confluence ----
+    bull_struct_score = 0.0
+    bull_struct_reasons = []
+    if ob_bull_ce > 0 and ob_bull_fresh and low <= ob_bull_ce:
+        bull_struct_score += 1.0; bull_struct_reasons.append("OB")
+    if fvg_bull > 0 and low <= (fvg_bull + fvg_tol) and px > (fvg_bull - fvg_tol):
+        bull_struct_score += 1.0; bull_struct_reasons.append("FVG")
+    if base.get("qm_bull", 0) > 0 and low <= (base.get("qm_bull", 0) + qm_zone):
+        bull_struct_score += 1.0; bull_struct_reasons.append("QM")
+    if has_spring:
+        bull_struct_score += 1.0; bull_struct_reasons.append("SPRING")
+    if sweep_bull > 0:
+        bull_struct_score += 1.0; bull_struct_reasons.append("SWEEP")
+    if base.get("in_ote_zone_long", 0) > 0:
+        bull_struct_score += 1.0; bull_struct_reasons.append("OTE")
+    if base.get("is_discount_zone", 0) > 0:
+        bull_struct_score += 0.5; bull_struct_reasons.append("DISCOUNT")
+    if base.get("wyckoff_accum", 0) > 0:
+        bull_struct_score += 1.0; bull_struct_reasons.append("ACCUM")
+    if base.get("choch_up", 0) > 0:
+        bull_struct_score += 1.0; bull_struct_reasons.append("CHOCH")
+    if base.get("displacement_bos_bull", 0) > 0:
+        bull_struct_score += 1.0; bull_struct_reasons.append("DISP+BOS")
+    div_count_bull = int(bull_ewo) + int(bull_obv) + int(bull_cvd) + int(bull_rsi_div)
+    if div_count_bull >= 2:
+        bull_struct_score += 1.0; bull_struct_reasons.append(f"DIV×{div_count_bull}")
+    if is_bull_rejection:
+        bull_struct_score += 0.5; bull_struct_reasons.append("WICK")
+
+    # ---- Bearish confluence ----
+    bear_struct_score = 0.0
+    bear_struct_reasons = []
+    if ob_bear_ce > 0 and ob_bear_fresh and high >= ob_bear_ce:
+        bear_struct_score += 1.0; bear_struct_reasons.append("OB")
+    if fvg_bear > 0 and high >= (fvg_bear - fvg_tol) and px < (fvg_bear + fvg_tol):
+        bear_struct_score += 1.0; bear_struct_reasons.append("FVG")
+    if base.get("qm_bear", 0) > 0 and high >= (base.get("qm_bear", 0) - qm_zone):
+        bear_struct_score += 1.0; bear_struct_reasons.append("QM")
+    if has_upthrust:
+        bear_struct_score += 1.0; bear_struct_reasons.append("UPTHRUST")
+    if sweep_bear > 0:
+        bear_struct_score += 1.0; bear_struct_reasons.append("SWEEP")
+    if base.get("in_ote_zone_short", 0) > 0:
+        bear_struct_score += 1.0; bear_struct_reasons.append("OTE")
+    if base.get("is_premium_zone", 0) > 0:
+        bear_struct_score += 0.5; bear_struct_reasons.append("PREMIUM")
+    if base.get("wyckoff_distrib", 0) > 0:
+        bear_struct_score += 1.0; bear_struct_reasons.append("DISTRIB")
+    if base.get("choch_down", 0) > 0:
+        bear_struct_score += 1.0; bear_struct_reasons.append("CHOCH")
+    if base.get("displacement_bos_bear", 0) > 0:
+        bear_struct_score += 1.0; bear_struct_reasons.append("DISP+BOS")
+    div_count_bear = int(bear_ewo) + int(bear_obv) + int(bear_cvd) + int(bear_rsi_div)
+    if div_count_bear >= 2:
+        bear_struct_score += 1.0; bear_struct_reasons.append(f"DIV×{div_count_bear}")
+    if is_bear_rejection:
+        bear_struct_score += 0.5; bear_struct_reasons.append("WICK")
+
+    # Inject confluence scores into base features so the brain can see them
+    base["bull_confluence_score"] = bull_struct_score
+    base["bear_confluence_score"] = bear_struct_score
+    base["bull_confluence_reasons"] = "+".join(bull_struct_reasons) if bull_struct_reasons else ""
+    base["bear_confluence_reasons"] = "+".join(bear_struct_reasons) if bear_struct_reasons else ""
+
+    # ==========================================================
+    # PHASE 4B: SETUP DETECTION (highest confluence wins)
+    # ==========================================================
+    # Collect ALL qualifying setups, then pick the one with highest confluence.
+    candidates = []
+
+    # ---- LONG CANDIDATES ----
+    if can_long:
+        # ALPHA_LONG: OB CE
         if ob_bull_ce > 0 and ob_bull_fresh and low <= ob_bull_ce and px > ob_bull_bot:
             if is_bull_rejection and has_vol_confirm:
-                setup_type = "ALPHA_LONG"
-                logic_desc = "OB CE mitigation + rejection wick + volume confirmed."
+                candidates.append(("ALPHA_LONG", "long", "OB CE mitigation + rejection wick + volume.", bull_struct_score))
 
-        # BETA_LONG: Divergence + BOS (BOS is the confirmation itself; require 2+ divs)
-        if not setup_type:
-            div_count = int(bull_ewo) + int(bull_obv) + int(bull_cvd) + int(bull_rsi_div)
-            if div_count >= 2 and base.get("bos_up", 0) > 0 and has_vol_confirm:
-                setup_type = "BETA_LONG"
-                logic_desc = f"Divergence confluence ({div_count} divs) + structural BOS + volume."
+        # BETA_LONG: Divergence + BOS
+        div_count = int(bull_ewo) + int(bull_obv) + int(bull_cvd) + int(bull_rsi_div)
+        if div_count >= 2 and base.get("bos_up", 0) > 0 and has_vol_confirm:
+            candidates.append(("BETA_LONG", "long", f"Divergence confluence ({div_count} divs) + structural BOS + volume.", bull_struct_score))
 
-        # GAMMA_LONG: QM retest — REQUIRE rejection wick
-        if not setup_type:
-            if (base.get("qm_bull", 0) > 0
-                    and low <= (base.get("qm_bull", 0) + qm_zone)
-                    and px > base.get("qm_bull", 0)
-                    and is_bull_rejection and has_vol_confirm):
-                setup_type = "GAMMA_LONG"
-                logic_desc = "QM structural retest + rejection wick + volume."
+        # GAMMA_LONG: QM retest
+        if (base.get("qm_bull", 0) > 0 and low <= (base.get("qm_bull", 0) + qm_zone)
+                and px > base.get("qm_bull", 0) and is_bull_rejection and has_vol_confirm):
+            candidates.append(("GAMMA_LONG", "long", "QM structural retest + rejection wick + volume.", bull_struct_score))
 
-        # DELTA_LONG: FVG mitigation — REQUIRE rejection wick + volume
-        if not setup_type:
-            if (fvg_bull > 0 and low <= (fvg_bull + fvg_tol)
-                    and px > (fvg_bull - fvg_tol)
-                    and is_bull_rejection and has_vol_confirm):
-                setup_type = "DELTA_LONG"
-                logic_desc = "FVG CE mitigation + rejection wick + volume."
+        # DELTA_LONG: FVG mitigation
+        if (fvg_bull > 0 and low <= (fvg_bull + fvg_tol)
+                and px > (fvg_bull - fvg_tol) and is_bull_rejection and has_vol_confirm):
+            candidates.append(("DELTA_LONG", "long", "FVG CE mitigation + rejection wick + volume.", bull_struct_score))
 
-        # EPSILON_LONG: Wyckoff Spring (spring already has volume built in)
-        if not setup_type:
-            if has_spring and has_vol_confirm:
-                setup_type = "EPSILON_LONG"
-                logic_desc = "Wyckoff spring: liquidity sweep + reclaim + volume."
+        # EPSILON_LONG: Wyckoff Spring
+        if has_spring and has_vol_confirm:
+            candidates.append(("EPSILON_LONG", "long", "Wyckoff spring: liquidity sweep + reclaim + volume.", bull_struct_score))
 
-    # ---- SHORT SETUPS ----
-    if not setup_type and can_short:
-        side = 'short'
+        # ZETA_LONG: EMA Pullback
+        ema20_val = base.get("ema20_dist_pct", 0)
+        htf_bullish = base.get("htf_up", 0) > 0
+        if htf_bullish and bullish_tf_count >= 2:
+            if -0.5 < ema20_val < 0.3 and is_bull_rejection and has_vol_confirm:
+                candidates.append(("ZETA_LONG", "long", "EMA pullback entry in confirmed uptrend + rejection wick.", bull_struct_score))
 
-        # ALPHA_SHORT: OB CE — REQUIRE rejection wick + volume
+        # ETA_LONG: Liquidity Sweep + Reclaim
+        if sweep_bull > 0 and is_bull_rejection and has_vol_confirm:
+            candidates.append(("ETA_LONG", "long", "Liquidity sweep below support + price reclaim + volume.", bull_struct_score))
+
+        # THETA_LONG: Keltner/BB Mean Reversion
+        kc_lower_dist = base.get("dist_to_kc_lower_pct", 0)
+        vwap_z = base.get("vwap_z_score", 0)
+        if kc_lower_dist < -0.5 and vwap_z < -1.5 and is_bull_rejection and has_vol_confirm:
+            candidates.append(("THETA_LONG", "long", "Mean reversion from Keltner lower band + VWAP extreme.", bull_struct_score))
+
+        # IOTA_LONG: ICT OTE
+        in_ote = base.get("in_ote_zone_long", 0)
+        is_discount = base.get("is_discount_zone", 0)
+        has_disp = base.get("recent_displacement_bull", 0)
+        has_choch = base.get("choch_up", 0)
+        if in_ote > 0 and is_discount > 0 and bullish_tf_count >= 1:
+            if (has_disp > 0 or has_choch > 0) and is_bull_rejection and has_vol_confirm:
+                candidates.append(("IOTA_LONG", "long", "ICT OTE zone entry (62-79% retrace) + displacement + trend.", bull_struct_score))
+
+        # KAPPA_LONG: Accumulation Spring
+        has_accum = base.get("wyckoff_accum", 0)
+        if has_accum > 0 and has_spring and has_vol_confirm:
+            candidates.append(("KAPPA_LONG", "long", "Wyckoff accumulation phase + spring + volume confirmation.", bull_struct_score))
+
+        # LAMBDA_LONG: ORB Breakout
+        orb_b = base.get("orb_bull", 0) if "orb_bull" in base else 0
+        if orb_b > 0 and bullish_tf_count >= 1 and has_vol_confirm:
+            candidates.append(("LAMBDA_LONG", "long", "Asian range breakout (ORB) during active session + volume.", bull_struct_score))
+
+    # ---- SHORT CANDIDATES ----
+    if can_short:
+        # ALPHA_SHORT: OB CE
         if ob_bear_ce > 0 and ob_bear_fresh and high >= ob_bear_ce and px < ob_bear_top:
             if is_bear_rejection and has_vol_confirm:
-                setup_type = "ALPHA_SHORT"
-                logic_desc = "OB CE mitigation + rejection wick + volume confirmed."
+                candidates.append(("ALPHA_SHORT", "short", "OB CE mitigation + rejection wick + volume.", bear_struct_score))
 
-        # BETA_SHORT: Divergence + BOS — require 2+ divergences
-        if not setup_type:
-            div_count = int(bear_ewo) + int(bear_obv) + int(bear_cvd) + int(bear_rsi_div)
-            if div_count >= 2 and base.get("bos_down", 0) > 0 and has_vol_confirm:
-                setup_type = "BETA_SHORT"
-                logic_desc = f"Divergence confluence ({div_count} divs) + structural BOS + volume."
+        # BETA_SHORT: Divergence + BOS
+        div_count = int(bear_ewo) + int(bear_obv) + int(bear_cvd) + int(bear_rsi_div)
+        if div_count >= 2 and base.get("bos_down", 0) > 0 and has_vol_confirm:
+            candidates.append(("BETA_SHORT", "short", f"Divergence confluence ({div_count} divs) + structural BOS + volume.", bear_struct_score))
 
-        # GAMMA_SHORT: QM retest — REQUIRE rejection wick
-        if not setup_type:
-            if (base.get("qm_bear", 0) > 0
-                    and high >= (base.get("qm_bear", 0) - qm_zone)
-                    and px < base.get("qm_bear", 0)
-                    and is_bear_rejection and has_vol_confirm):
-                setup_type = "GAMMA_SHORT"
-                logic_desc = "QM structural retest + rejection wick + volume."
+        # GAMMA_SHORT: QM retest
+        if (base.get("qm_bear", 0) > 0 and high >= (base.get("qm_bear", 0) - qm_zone)
+                and px < base.get("qm_bear", 0) and is_bear_rejection and has_vol_confirm):
+            candidates.append(("GAMMA_SHORT", "short", "QM structural retest + rejection wick + volume.", bear_struct_score))
 
-        # DELTA_SHORT: FVG mitigation — REQUIRE rejection wick + volume
-        if not setup_type:
-            if (fvg_bear > 0 and high >= (fvg_bear - fvg_tol)
-                    and px < (fvg_bear + fvg_tol)
-                    and is_bear_rejection and has_vol_confirm):
-                setup_type = "DELTA_SHORT"
-                logic_desc = "FVG CE mitigation + rejection wick + volume."
+        # DELTA_SHORT: FVG mitigation
+        if (fvg_bear > 0 and high >= (fvg_bear - fvg_tol)
+                and px < (fvg_bear + fvg_tol) and is_bear_rejection and has_vol_confirm):
+            candidates.append(("DELTA_SHORT", "short", "FVG CE mitigation + rejection wick + volume.", bear_struct_score))
 
         # EPSILON_SHORT: Wyckoff Upthrust
-        if not setup_type:
-            if has_upthrust and has_vol_confirm:
-                setup_type = "EPSILON_SHORT"
-                logic_desc = "Wyckoff upthrust: liquidity sweep + reclaim + volume."
+        if has_upthrust and has_vol_confirm:
+            candidates.append(("EPSILON_SHORT", "short", "Wyckoff upthrust: liquidity sweep + reclaim + volume.", bear_struct_score))
+
+        # ZETA_SHORT: EMA Pullback
+        ema20_val = base.get("ema20_dist_pct", 0)
+        htf_bearish = base.get("htf_down", 0) > 0
+        if htf_bearish and bearish_tf_count >= 2:
+            if -0.3 < ema20_val < 0.5 and is_bear_rejection and has_vol_confirm:
+                candidates.append(("ZETA_SHORT", "short", "EMA pullback entry in confirmed downtrend + rejection wick.", bear_struct_score))
+
+        # ETA_SHORT: Liquidity Sweep + Rejection
+        if sweep_bear > 0 and is_bear_rejection and has_vol_confirm:
+            candidates.append(("ETA_SHORT", "short", "Liquidity sweep above resistance + price rejection + volume.", bear_struct_score))
+
+        # THETA_SHORT: Keltner/BB Mean Reversion
+        kc_upper_dist = base.get("dist_to_kc_upper_pct", 0)
+        vwap_z = base.get("vwap_z_score", 0)
+        if kc_upper_dist > 0.5 and vwap_z > 1.5 and is_bear_rejection and has_vol_confirm:
+            candidates.append(("THETA_SHORT", "short", "Mean reversion from Keltner upper band + VWAP extreme.", bear_struct_score))
+
+        # IOTA_SHORT: ICT OTE
+        in_ote = base.get("in_ote_zone_short", 0)
+        is_premium = base.get("is_premium_zone", 0)
+        has_disp = base.get("recent_displacement_bear", 0)
+        has_choch = base.get("choch_down", 0)
+        if in_ote > 0 and is_premium > 0 and bearish_tf_count >= 1:
+            if (has_disp > 0 or has_choch > 0) and is_bear_rejection and has_vol_confirm:
+                candidates.append(("IOTA_SHORT", "short", "ICT OTE zone entry (62-79% retrace) + displacement + trend.", bear_struct_score))
+
+        # KAPPA_SHORT: Distribution Upthrust
+        has_distrib = base.get("wyckoff_distrib", 0)
+        if has_distrib > 0 and has_upthrust and has_vol_confirm:
+            candidates.append(("KAPPA_SHORT", "short", "Wyckoff distribution phase + upthrust + volume confirmation.", bear_struct_score))
+
+        # LAMBDA_SHORT: ORB Breakdown
+        orb_br = base.get("orb_bear", 0) if "orb_bear" in base else 0
+        if orb_br > 0 and bearish_tf_count >= 1 and has_vol_confirm:
+            candidates.append(("LAMBDA_SHORT", "short", "Asian range breakdown (ORB) during active session + volume.", bear_struct_score))
+
+    if not candidates: return None
+
+    # Pick the candidate with the highest confluence score.
+    # On ties, structural setups (ALPHA/GAMMA/DELTA) rank higher than momentum setups.
+    _struct_priority = {"ALPHA": 10, "GAMMA": 9, "IOTA": 8, "DELTA": 7, "KAPPA": 6,
+                        "EPSILON": 5, "BETA": 4, "ETA": 3, "ZETA": 2, "THETA": 1, "LAMBDA": 0}
+    candidates.sort(key=lambda c: (c[3], _struct_priority.get(c[0].split("_")[0], 0)), reverse=True)
+    setup_type, side, logic_desc, confluence = candidates[0]
+
+    # Enrich the logic description with confluence info
+    conf_reasons = bull_struct_reasons if side == "long" else bear_struct_reasons
+    if confluence >= 2:
+        logic_desc += f" CONFLUENCE {confluence:.0f}× [{'+'.join(conf_reasons)}]."
 
     if not setup_type: return None
 
@@ -1931,24 +2630,28 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     if side == 'long':
         # Setup-specific SL: use the tightest structural invalidation
         if strat_base == "ALPHA" and ob_bull_bot > 0:
-            sl = ob_bull_bot - sl_buffer  # Below OB body = OB invalidated
+            sl = ob_bull_bot - sl_buffer
         elif strat_base == "GAMMA" and base.get("qm_bull", 0) > 0:
-            sl = base.get("qm_bull", 0) - sl_buffer  # Below QM pivot
+            sl = base.get("qm_bull", 0) - sl_buffer
         elif strat_base == "DELTA" and fvg_bull > 0:
-            # Below FVG low boundary
             fvg_low = fvg_bull - fvg_tol
             sl = fvg_low - sl_buffer
+        elif strat_base == "THETA":
+            # Mean reversion: SL below Keltner lower - 1 ATR
+            sl = low - current_atr - sl_buffer
         else:
             sl = min(swing_low, low) - sl_buffer
 
         if sl >= entry_target: return None
         risk_distance = entry_target - sl
 
-        # Structural TP targets
-        possible_tps = [t for t in [ob_bear_bot, base.get("vah", 0), htf_sh_val, mtf_sh_val] if t > entry_target]
+        # Structural TP targets (expanded: include VWAP, Keltner bands, POC)
+        vwap_val = base.get("rolling_vwap_20", 0)
+        poc_val = base.get("poc", 0)
+        possible_tps = [t for t in [ob_bear_bot, base.get("vah", 0), htf_sh_val, mtf_sh_val, vwap_val, poc_val] if t > entry_target]
         possible_tps.sort()
         if not possible_tps:
-            possible_tps = [entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 3.0))]
+            possible_tps = [entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 4.0))]
 
         selected_tp = None
         for t in possible_tps:
@@ -1972,16 +2675,21 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         elif strat_base == "DELTA" and fvg_bear > 0:
             fvg_high = fvg_bear + fvg_tol
             sl = fvg_high + sl_buffer
+        elif strat_base == "THETA":
+            # Mean reversion: SL above Keltner upper + 1 ATR
+            sl = high + current_atr + sl_buffer
         else:
             sl = max(swing_high, high) + sl_buffer
 
         if sl <= entry_target: return None
         risk_distance = sl - entry_target
 
-        possible_tps = [t for t in [ob_bull_top, base.get("val", 0), htf_sl_val, mtf_sl_val] if 0 < t < entry_target]
+        vwap_val = base.get("rolling_vwap_20", 0)
+        poc_val = base.get("poc", 0)
+        possible_tps = [t for t in [ob_bull_top, base.get("val", 0), htf_sl_val, mtf_sl_val, vwap_val, poc_val] if 0 < t < entry_target]
         possible_tps.sort(reverse=True)
         if not possible_tps:
-            possible_tps = [entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 3.5))]
+            possible_tps = [entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 4.0))]
 
         selected_tp = None
         for t in possible_tps:
@@ -2013,9 +2721,15 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     analysis_str = f"SETUP: {setup_type}. {logic_desc}"
 
     if brain:
-        prob = brain.predict_probability(strat, side, base, adv, iExec, px, pExec)
-        if prob is None: return None
-        win_prob = prob
+        # ── Meta-Brain: Two-tier decision system ──
+        # Tier 1: Specialist brain for setup-specific pattern recognition
+        # Tier 2: Meta-Brain fuses ALL specialist views + market context for final go/no-go
+        meta_prob, specialist_prob = brain.predict_meta_probability(
+            strat, side, base, adv, iExec, px, pExec
+        )
+        if meta_prob is None:
+            return None
+        win_prob = meta_prob
 
         min_prob = getattr(cfg, 'min_prob_long', 0.50) if side == 'long' else getattr(cfg, 'min_prob_short', 0.50)
         if win_prob < min_prob:
@@ -2029,9 +2743,12 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
         regime = "REVERSAL" if is_reversal_context else "TREND"
         confidence = "HIGH" if win_prob > 0.60 else "MODERATE"
+        meta_tag = ""
+        if brain.meta_brain is not None and specialist_prob is not None:
+            meta_tag = f" Meta: {win_prob*100:.1f}% | Specialist: {specialist_prob*100:.1f}%."
         analysis_str = (
             f"SETUP: {setup_type} [{regime}]. {logic_desc} "
-            f"AI: {win_prob*100:.1f}% ({confidence}, EV: {ev:.2f}R). "
+            f"AI: {win_prob*100:.1f}% ({confidence}, EV: {ev:.2f}R).{meta_tag} "
             f"R:R {rr:.1f}. TF alignment: {bullish_tf_count}B/{bearish_tf_count}S. "
             f"Invalidation: {rev_warn:.2f}."
         )

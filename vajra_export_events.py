@@ -20,9 +20,10 @@ import pandas as pd
 from vajra_engine_ultra_v6_final import (
     AadhiraayanEngineConfig as EngineConfig,
     ExchangeWrapper, MemoryManager, Precomp, TradeManager,
+    BrainLearningManager,
     confluence_features,
     precompute_v6_features,
-    plan_trade_with_brain,  
+    plan_trade_with_brain,
     _ema_np,
     _roc
 )
@@ -209,7 +210,10 @@ def main():
     p.add_argument("--exec-tf", default="15m")
     p.add_argument("--out", required=True)
     p.add_argument("--min-rr", type=float, default=2.2)
-    
+    p.add_argument("--brains-dir", default=None,
+                   help="Path to trained specialist brains. When set, exports specialist "
+                        "probabilities alongside events for Meta-Brain training.")
+
     args = p.parse_args()
 
     cfg = EngineConfig()
@@ -316,6 +320,17 @@ def main():
         )
         
         mem = MemoryManager(cfg, db=None)
+
+        # ── Load specialist brains for probability export (Meta-Brain training data) ──
+        specialist_brain = None
+        if args.brains_dir:
+            specialist_brain = BrainLearningManager(cfg, brains_dir=args.brains_dir)
+            if specialist_brain.brains:
+                log.info(f"Loaded {len(specialist_brain.brains)} specialist brains for probability export")
+            else:
+                log.warning("--brains-dir specified but no specialist brains found")
+                specialist_brain = None
+
         tm = TradeManager(cfg, exw, mem, brain=None)
         
         open_meta = []
@@ -349,13 +364,16 @@ def main():
                         bars_open = cl.get("bars_open", 0)
                         pnl_r = cl["pnl_r"]
 
-                        # Soft meta-label: reward profitable trades proportionally,
-                        # with bonus for hitting structural TP quickly
+                        # Improved meta-label: graduated reward system
+                        # - TP hit within time = perfect signal (1.0)
+                        # - Any profit > 0 = positive signal (scaled)
+                        # - Loss = negative signal (0.0)
                         if cl.get("exit_reason") == "tp" and bars_open <= 192:
                             meta_label = 1.0
-                        elif pnl_r > 0.5:
-                            # Profitable trades that didn't hit exact TP still have edge
-                            meta_label = min(pnl_r / meta.get("rr", 2.0), 0.9)
+                        elif pnl_r > 0:
+                            # Any profitable trade is a positive label (scaled by quality)
+                            rr_target = meta.get("rr", 2.0)
+                            meta_label = max(0.3, min(pnl_r / rr_target, 0.95))
                         else:
                             meta_label = 0.0
 
@@ -402,6 +420,14 @@ def main():
                     base, adv_features, iMacro, iSwing, iHtf, iExec, len_macro, len_swing, len_htf, len_exec, ts, pExec
                 )
                 full_feats["side"] = 1.0 if plan["side"] == "long" else 0.0
+
+                # ── Inject specialist brain probabilities for Meta-Brain training ──
+                if specialist_brain is not None:
+                    px = plan.get("entry", pExec.c[iExec])
+                    spec_probs = specialist_brain.get_all_specialist_probs(
+                        plan["side"], base, adv_features, iExec, px, pExec
+                    )
+                    full_feats.update(spec_probs)
 
                 if tm.submit_plan(plan, bar):
                     open_meta.append({
