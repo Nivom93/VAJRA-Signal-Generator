@@ -1781,6 +1781,21 @@ def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, b
     return f
 
 class BrainLearningManager:
+    # ── Canonical list of all specialist brain keys the Meta-Brain expects ──
+    ALL_SPECIALIST_KEYS = [
+        ("ALPHA", "long"), ("ALPHA", "short"),
+        ("BETA", "long"), ("BETA", "short"),
+        ("GAMMA", "long"), ("GAMMA", "short"),
+        ("DELTA", "long"), ("DELTA", "short"),
+        ("EPSILON", "long"), ("EPSILON", "short"),
+        ("ZETA", "long"), ("ZETA", "short"),
+        ("ETA", "long"), ("ETA", "short"),
+        ("THETA", "long"), ("THETA", "short"),
+        ("IOTA", "long"), ("IOTA", "short"),
+        ("KAPPA", "long"), ("KAPPA", "short"),
+        ("LAMBDA", "long"), ("LAMBDA", "short"),
+    ]
+
     def __init__(self, cfg, brains_dir=None):
         global log
         if 'log' not in globals() or not log:
@@ -1792,6 +1807,7 @@ class BrainLearningManager:
                 log.addHandler(h)
         self.cfg = cfg
         self.brains = {} # Format: {(strategy, side): model}
+        self.meta_brain = None  # Unified Meta-Brain
         if not joblib: return
         self.load_brains(brains_dir)
 
@@ -1803,8 +1819,11 @@ class BrainLearningManager:
         loaded = 0
         for model_file in p.glob("brain_*.joblib"):
             try:
-                # brain_{STRATEGY}_{SIDE}.joblib
                 parts = model_file.stem.split("_")
+                # Skip the meta-brain file during specialist loading
+                if len(parts) >= 3 and parts[1] == "META":
+                    continue
+                # brain_{STRATEGY}_{SIDE}.joblib
                 if len(parts) >= 3:
                     strat = parts[1]
                     side = parts[2]
@@ -1830,6 +1849,25 @@ class BrainLearningManager:
         if loaded > 0:
             log.info(f"Loaded {loaded} localized brain models from {brains_dir}")
 
+        # ── Load Meta-Brain (unified decision maker) ──
+        meta_file = p / "brain_META_unified.joblib"
+        if meta_file.exists():
+            try:
+                meta_data = joblib.load(str(meta_file))
+                if "xgb_model_file" in meta_data:
+                    import xgboost as xgb
+                    booster = xgb.Booster()
+                    xgb_path = p / meta_data["xgb_model_file"]
+                    if not xgb_path.exists():
+                        alt = xgb_path.with_suffix(".json") if xgb_path.suffix == ".xgb" else xgb_path.with_suffix(".xgb")
+                        if alt.exists(): xgb_path = alt
+                    booster.load_model(str(xgb_path))
+                    meta_data["booster"] = booster
+                self.meta_brain = meta_data
+                log.info(f"Loaded Meta-Brain (unified) with {len(meta_data.get('feature_names', []))} features")
+            except Exception as e:
+                log.error(f"Meta-Brain load error: {e}")
+
     def predict_probability(self, strategy, side, base, adv, iExec, px, pExec):
         b = self.brains.get((strategy, side))
         if not b: return None # Strict fallback block
@@ -1847,8 +1885,100 @@ class BrainLearningManager:
             log.error(f"Brain Prediction Failed: {e}\n{traceback.format_exc()}")
             return None
 
+    def predict_meta_probability(self, strategy, side, base, adv, iExec, px, pExec):
+        """Query ALL specialist brains + market context → Meta-Brain final decision.
+
+        Returns (meta_prob, specialist_prob) tuple.
+        meta_prob is the unified decision; specialist_prob is the setup-specific one.
+        If no meta-brain is loaded, falls back to specialist-only.
+        """
+        # Step 1: Get the specialist probability for the selected setup
+        specialist_prob = self.predict_probability(strategy, side, base, adv, iExec, px, pExec)
+        if specialist_prob is None:
+            return None, None
+
+        # If no meta-brain loaded, fall back to specialist-only
+        if self.meta_brain is None:
+            return specialist_prob, specialist_prob
+
+        try:
+            # Step 2: Query ALL specialist brains to build the full probability landscape
+            specialist_probs = {}
+            for (strat_key, side_key) in self.ALL_SPECIALIST_KEYS:
+                prob = self.predict_probability(strat_key, side_key, base, adv, iExec, px, pExec)
+                specialist_probs[f"brain_{strat_key}_{side_key}"] = prob if prob is not None else -1.0
+
+            # Step 3: Build meta-brain feature vector
+            meta_features = {}
+
+            # 3a: All specialist probabilities (22 features)
+            meta_features.update(specialist_probs)
+
+            # 3b: Count how many specialists are active (have loaded brains)
+            active_probs = [v for v in specialist_probs.values() if v >= 0.0]
+            meta_features["n_active_specialists"] = float(len(active_probs))
+            meta_features["mean_specialist_prob"] = float(np.mean(active_probs)) if active_probs else 0.0
+            meta_features["max_specialist_prob"] = float(np.max(active_probs)) if active_probs else 0.0
+            meta_features["std_specialist_prob"] = float(np.std(active_probs)) if len(active_probs) > 1 else 0.0
+
+            # 3c: The selected setup's identity
+            meta_features["selected_specialist_prob"] = specialist_prob
+            meta_features["selected_side"] = 1.0 if side == "long" else 0.0
+
+            # 3d: Market context from confluence_features (base dict)
+            context_keys = [
+                "bull_confluence_score", "bear_confluence_score",
+                "adx_14", "rsi_14", "atr_pct",
+                "btc_bullish", "funding_rate", "delta_oi",
+                "dxy_trend", "spx_trend", "btcd_trend",
+                "rvol", "vol_zscore",
+                "ob_bull_near", "ob_bear_near",
+                "fvg_bull_near", "fvg_bear_near",
+                "bos_bull", "bos_bear",
+                "choch_bull", "choch_bear",
+                "displacement_bull_count", "displacement_bear_count",
+                "spring", "upthrust",
+                "accum_phase", "distrib_phase",
+                "qm_bull", "qm_bear",
+                "in_ote_zone_bull", "in_ote_zone_short",
+                "in_discount_zone", "in_premium_zone",
+                "equal_highs_count", "equal_lows_count",
+                "hurst_exponent",
+                "macro_sentiment",
+            ]
+            for k in context_keys:
+                val = base.get(k, 0.0)
+                meta_features[k] = float(val) if isinstance(val, (int, float, np.floating, np.integer)) and np.isfinite(val) else 0.0
+
+            # Step 4: Build vector and predict
+            meta_fnames = self.meta_brain['feature_names']
+            vec = np.array([meta_features.get(n, 0.0) for n in meta_fnames]).reshape(1, -1)
+            vec = np.clip(np.nan_to_num(vec, nan=0.0), -1e10, 1e10).astype(np.float32)
+
+            if "booster" in self.meta_brain:
+                import xgboost as xgb
+                dmat = xgb.DMatrix(vec, feature_names=meta_fnames)
+                meta_prob = float(self.meta_brain['booster'].predict(dmat)[0])
+            else:
+                meta_prob = self.meta_brain['classifier'].predict_proba(vec)[0][1]
+
+            return meta_prob, specialist_prob
+
+        except Exception as e:
+            log.error(f"Meta-Brain prediction failed: {e}\n{traceback.format_exc()}")
+            # Fallback to specialist-only
+            return specialist_prob, specialist_prob
+
+    def get_all_specialist_probs(self, side, base, adv, iExec, px, pExec):
+        """Get probabilities from ALL specialist brains. Used during export for meta-brain training."""
+        probs = {}
+        for (strat_key, side_key) in self.ALL_SPECIALIST_KEYS:
+            prob = self.predict_probability(strat_key, side_key, base, adv, iExec, px, pExec)
+            probs[f"brain_{strat_key}_{side_key}"] = prob if prob is not None else -1.0
+        return probs
+
     def _build_vec(self, side, b, a, iExec, px, pExec, fnames):
-        d = {**b} 
+        d = {**b}
         for k, v in a.items():
             if hasattr(v, '__getitem__') and len(v) > iExec:
                 val = v[iExec]
@@ -2591,9 +2721,15 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     analysis_str = f"SETUP: {setup_type}. {logic_desc}"
 
     if brain:
-        prob = brain.predict_probability(strat, side, base, adv, iExec, px, pExec)
-        if prob is None: return None
-        win_prob = prob
+        # ── Meta-Brain: Two-tier decision system ──
+        # Tier 1: Specialist brain for setup-specific pattern recognition
+        # Tier 2: Meta-Brain fuses ALL specialist views + market context for final go/no-go
+        meta_prob, specialist_prob = brain.predict_meta_probability(
+            strat, side, base, adv, iExec, px, pExec
+        )
+        if meta_prob is None:
+            return None
+        win_prob = meta_prob
 
         min_prob = getattr(cfg, 'min_prob_long', 0.50) if side == 'long' else getattr(cfg, 'min_prob_short', 0.50)
         if win_prob < min_prob:
@@ -2607,9 +2743,12 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
         regime = "REVERSAL" if is_reversal_context else "TREND"
         confidence = "HIGH" if win_prob > 0.60 else "MODERATE"
+        meta_tag = ""
+        if brain.meta_brain is not None and specialist_prob is not None:
+            meta_tag = f" Meta: {win_prob*100:.1f}% | Specialist: {specialist_prob*100:.1f}%."
         analysis_str = (
             f"SETUP: {setup_type} [{regime}]. {logic_desc} "
-            f"AI: {win_prob*100:.1f}% ({confidence}, EV: {ev:.2f}R). "
+            f"AI: {win_prob*100:.1f}% ({confidence}, EV: {ev:.2f}R).{meta_tag} "
             f"R:R {rr:.1f}. TF alignment: {bullish_tf_count}B/{bearish_tf_count}S. "
             f"Invalidation: {rev_warn:.2f}."
         )

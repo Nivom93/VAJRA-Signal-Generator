@@ -207,6 +207,9 @@ def main(argv=None):
     ap.add_argument("--wfa-folds", type=int, default=5)
     ap.add_argument("--tune", action="store_true", help="Enable RandomizedSearchCV for hyperparameter tuning.")
     ap.add_argument("--no-smote", action="store_true", help="Disable SMOTE oversampling.")
+    ap.add_argument("--meta-brain", action="store_true",
+                    help="Train a unified Meta-Brain after specialist brains. "
+                         "Requires events exported with --brains-dir (specialist probabilities).")
 
     args = ap.parse_args(argv)
 
@@ -444,6 +447,242 @@ def main(argv=None):
             out_file = out_dir / f"brain_{strat_clean}_{side}.joblib"
             joblib.dump(pipeline, out_file)
             log.info(f"Saved Apex Predator XGBoost Brain to {out_file}\n")
+
+    # ══════════════════════════════════════════════════════════════
+    # META-BRAIN: Unified decision maker trained on ALL events
+    # ══════════════════════════════════════════════════════════════
+    if getattr(args, 'meta_brain', False):
+        _train_meta_brain(df, base_feature_names, args, out_dir)
+
+
+def _train_meta_brain(df: pd.DataFrame, base_feature_names: list, args, out_dir: Path):
+    """Train a unified Meta-Brain that fuses all specialist probabilities + market context.
+
+    The Meta-Brain sees:
+    1. All 22 specialist brain probabilities (brain_ALPHA_long, brain_ALPHA_short, ...)
+    2. Aggregate specialist statistics (mean, max, std, count)
+    3. Key market context features (confluence scores, regime indicators, macro)
+
+    This gives the Meta-Brain full market awareness across ALL setup types,
+    solving the problem of independent brains making isolated decisions.
+    """
+    log.info("=" * 60)
+    log.info("  META-BRAIN TRAINING: Unified Decision Maker")
+    log.info("=" * 60)
+
+    # ── Specialist probability columns (exported by vajra_export_events.py --brains-dir) ──
+    SPECIALIST_KEYS = [
+        ("ALPHA", "long"), ("ALPHA", "short"),
+        ("BETA", "long"), ("BETA", "short"),
+        ("GAMMA", "long"), ("GAMMA", "short"),
+        ("DELTA", "long"), ("DELTA", "short"),
+        ("EPSILON", "long"), ("EPSILON", "short"),
+        ("ZETA", "long"), ("ZETA", "short"),
+        ("ETA", "long"), ("ETA", "short"),
+        ("THETA", "long"), ("THETA", "short"),
+        ("IOTA", "long"), ("IOTA", "short"),
+        ("KAPPA", "long"), ("KAPPA", "short"),
+        ("LAMBDA", "long"), ("LAMBDA", "short"),
+    ]
+    specialist_cols = [f"brain_{s}_{sd}" for s, sd in SPECIALIST_KEYS]
+
+    # Check if specialist probability columns exist in the data
+    found_spec = [c for c in specialist_cols if c in df.columns]
+    if len(found_spec) < 2:
+        log.warning(f"Meta-Brain: Only {len(found_spec)} specialist probability columns found in events. "
+                    f"Re-export events with --brains-dir to include specialist probabilities.")
+        log.warning("Meta-Brain training SKIPPED.")
+        return
+
+    log.info(f"Meta-Brain: Found {len(found_spec)}/{len(specialist_cols)} specialist probability columns")
+
+    # ── Market context features for Meta-Brain ──
+    CONTEXT_FEATURES = [
+        "bull_confluence_score", "bear_confluence_score",
+        "adx_14", "rsi_14", "atr_pct",
+        "btc_bullish", "funding_rate", "delta_oi",
+        "dxy_trend", "spx_trend", "btcd_trend",
+        "rvol", "vol_zscore",
+        "ob_bull_near", "ob_bear_near",
+        "fvg_bull_near", "fvg_bear_near",
+        "bos_bull", "bos_bear",
+        "choch_bull", "choch_bear",
+        "displacement_bull_count", "displacement_bear_count",
+        "spring", "upthrust",
+        "accum_phase", "distrib_phase",
+        "qm_bull", "qm_bear",
+        "in_ote_zone_bull", "in_ote_zone_short",
+        "in_discount_zone", "in_premium_zone",
+        "equal_highs_count", "equal_lows_count",
+        "hurst_exponent",
+        "macro_sentiment",
+    ]
+    found_ctx = [c for c in CONTEXT_FEATURES if c in df.columns]
+
+    # ── Build aggregate specialist features ──
+    spec_df = df[found_spec].copy()
+    for c in found_spec:
+        spec_df[c] = pd.to_numeric(spec_df[c], errors='coerce').fillna(-1.0)
+
+    # Active = probability >= 0 (not -1.0 which means "no brain loaded")
+    active_mask = spec_df[found_spec] >= 0.0
+    df["n_active_specialists"] = active_mask.sum(axis=1).astype(float)
+    active_vals = spec_df[found_spec].where(active_mask)
+    df["mean_specialist_prob"] = active_vals.mean(axis=1).fillna(0.0)
+    df["max_specialist_prob"] = active_vals.max(axis=1).fillna(0.0)
+    df["std_specialist_prob"] = active_vals.std(axis=1).fillna(0.0)
+
+    # The side of the actual selected setup
+    if "side" in df.columns:
+        df["selected_side"] = pd.to_numeric(df["side"], errors='coerce').fillna(0.0)
+    else:
+        df["selected_side"] = 0.0
+
+    # ── Assemble Meta-Brain feature set ──
+    meta_feature_cols = (
+        found_spec
+        + ["n_active_specialists", "mean_specialist_prob", "max_specialist_prob", "std_specialist_prob",
+           "selected_side"]
+        + found_ctx
+    )
+
+    # Ensure all columns are numeric
+    for c in meta_feature_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
+
+    # Drop any columns that ended up being constant
+    keep_meta = []
+    for c in meta_feature_cols:
+        if c in df.columns and df[c].nunique() > 1:
+            keep_meta.append(c)
+
+    log.info(f"Meta-Brain feature set: {len(keep_meta)} features "
+             f"({len(found_spec)} specialist + {len(keep_meta) - len(found_spec)} context/aggregate)")
+
+    if len(keep_meta) < 5:
+        log.error("Meta-Brain: Too few valid features. Aborting.")
+        return
+
+    X_all = df[keep_meta].values.astype(np.float32)
+    y_all = df["label"].values
+    X_all = _sanitize_data(X_all)
+
+    n_samples = len(X_all)
+    if n_samples < 30:
+        log.error(f"Meta-Brain: Only {n_samples} samples — need at least 30. Aborting.")
+        return
+
+    pos_cases = int(np.sum(y_all == 1))
+    neg_cases = int(np.sum(y_all == 0))
+    scale_weight = min(float(neg_cases) / max(1.0, float(pos_cases)), 20.0)
+
+    log.info(f"Meta-Brain: {n_samples} samples ({pos_cases} pos / {neg_cases} neg)")
+
+    # ── Walk-Forward Analysis ──
+    actual_folds = min(args.wfa_folds, max(2, n_samples // 25))
+    actual_gap = max(3, min(15, n_samples // 10))
+    tscv = TimeSeriesSplit(n_splits=actual_folds, gap=actual_gap)
+
+    acc_scores, prec_scores, roc_auc_scores, f1_scores = [], [], [], []
+
+    for i, (train_idx, test_idx) in enumerate(tscv.split(X_all)):
+        X_tr, y_tr = X_all[train_idx], y_all[train_idx]
+        X_te, y_te = X_all[test_idx], y_all[test_idx]
+
+        if not args.no_smote:
+            X_tr, y_tr = _apply_smote(X_tr, y_tr, random_state=42 + i)
+
+        neg_f = np.sum(y_tr == 0)
+        pos_f = np.sum(y_tr == 1)
+        sw = min(float(neg_f) / max(1.0, float(pos_f)), 20.0)
+
+        clf = xgb.XGBClassifier(
+            n_estimators=args.n_estimators,
+            learning_rate=args.learning_rate,
+            max_depth=min(args.max_depth, 6),  # Slightly shallower for meta-brain to avoid overfitting
+            reg_alpha=args.reg_alpha,
+            reg_lambda=args.reg_lambda,
+            colsample_bytree=0.7,
+            subsample=0.8,
+            random_state=42,
+            objective='binary:logistic',
+            eval_metric='logloss',
+            scale_pos_weight=sw
+        )
+        clf.fit(X_tr, y_tr)
+
+        preds = clf.predict(X_te)
+        probs = clf.predict_proba(X_te)[:, 1] if len(np.unique(y_te)) > 1 else np.zeros_like(preds, dtype=float)
+
+        acc = accuracy_score(y_te, preds)
+        prec = precision_score(y_te, preds, zero_division=0)
+        roc = roc_auc_score(y_te, probs) if len(np.unique(y_te)) > 1 else 0.5
+        f1 = f1_score(y_te, preds, zero_division=0)
+
+        acc_scores.append(acc); prec_scores.append(prec)
+        roc_auc_scores.append(roc); f1_scores.append(f1)
+        log.info(f"  Meta Fold {i+1}: Acc={acc:.4f} | Prec={prec:.4f} | ROC={roc:.4f} | F1={f1:.4f}")
+
+    avg_acc = np.mean(acc_scores); avg_prec = np.mean(prec_scores)
+    avg_roc = np.mean(roc_auc_scores); avg_f1 = np.mean(f1_scores)
+    log.info(f"META-BRAIN WFA: Avg Acc={avg_acc:.4f} | Prec={avg_prec:.4f} | ROC={avg_roc:.4f} | F1={avg_f1:.4f}")
+
+    # ── Train final production Meta-Brain on ALL data ──
+    X_final, y_final = X_all, y_all
+    if not args.no_smote:
+        X_final, y_final = _apply_smote(X_all, y_all, random_state=99)
+
+    final_pos = np.sum(y_final == 1)
+    final_neg = np.sum(y_final == 0)
+    final_weight = min(float(final_neg) / max(1.0, float(final_pos)), 20.0)
+
+    meta_model = xgb.XGBClassifier(
+        n_estimators=args.n_estimators,
+        learning_rate=args.learning_rate,
+        max_depth=min(args.max_depth, 6),
+        reg_alpha=args.reg_alpha,
+        reg_lambda=args.reg_lambda,
+        colsample_bytree=0.7,
+        subsample=0.8,
+        random_state=42,
+        objective='binary:logistic',
+        eval_metric='logloss',
+        scale_pos_weight=final_weight
+    )
+    meta_model.fit(X_final, y_final)
+
+    valid_edge = bool(avg_roc > 0.50 and avg_prec > 0.10)
+
+    # Save XGBoost model natively
+    xgb_model_file = out_dir / "brain_META_unified.json"
+    meta_model.get_booster().save_model(str(xgb_model_file))
+
+    pipeline = {
+        "xgb_model_file": str(xgb_model_file.name),
+        "feature_names": keep_meta,
+        "training_args": vars(args),
+        "model": "xgboost_native_meta",
+        "wfa_acc": avg_acc,
+        "wfa_prec": avg_prec,
+        "wfa_roc_auc": avg_roc,
+        "wfa_f1": avg_f1,
+        "valid_edge": valid_edge,
+        "smote_enabled": HAS_SMOTE and not args.no_smote,
+        "n_features": len(keep_meta),
+        "n_specialist_features": len(found_spec),
+        "n_context_features": len(found_ctx),
+        "n_samples_total": n_samples,
+        "pos_neg_ratio": f"{pos_cases}/{neg_cases}"
+    }
+
+    out_file = out_dir / "brain_META_unified.joblib"
+    joblib.dump(pipeline, out_file)
+    log.info(f"Saved Meta-Brain (unified) to {out_file}")
+    log.info(f"Meta-Brain: {len(keep_meta)} features = "
+             f"{len(found_spec)} specialist probs + "
+             f"4 aggregates + 1 side + {len(found_ctx)} market context")
+
 
 if __name__ == "__main__":
     main()
