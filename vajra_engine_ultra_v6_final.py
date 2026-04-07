@@ -2927,11 +2927,32 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         )
         if meta_prob is None:
             return None
-        win_prob = meta_prob
 
+        # Use SPECIALIST probability for the calibrated threshold check,
+        # because specialists are trained per-setup with SMOTE-balanced classes.
+        # The Meta-Brain serves as an additional filter: it must agree the trade is viable.
+        # Meta-Brain probabilities have a different distribution (lower base rate)
+        # so we use a separate, lower threshold for its go/no-go decision.
         min_prob = getattr(cfg, 'min_prob_long', 0.50) if side == 'long' else getattr(cfg, 'min_prob_short', 0.50)
-        if win_prob < min_prob:
-            return None
+
+        if brain.meta_brain is not None and specialist_prob is not None:
+            # Two-gate system: specialist must clear its threshold AND meta must clear its own
+            if specialist_prob < min_prob:
+                return None
+            meta_threshold = getattr(cfg, 'min_meta_prob', 0.22)
+            if meta_prob < meta_threshold:
+                return None
+            # Blend: specialist drives the probability estimate, meta scales confidence
+            # meta_prob > base_rate means meta agrees; < base_rate means meta disagrees
+            meta_base_rate = 0.25  # approximate positive rate in training
+            meta_confidence = meta_prob / max(meta_base_rate, 0.01)  # >1 = agree, <1 = disagree
+            win_prob = specialist_prob * min(meta_confidence, 1.5)  # Cap the boost at 1.5x
+            win_prob = min(win_prob, 0.95)  # Safety cap
+        else:
+            # Specialist-only mode (no meta-brain loaded)
+            win_prob = meta_prob  # meta_prob == specialist_prob in fallback mode
+            if win_prob < min_prob:
+                return None
 
         ev = (win_prob * rr) - ((1.0 - win_prob) * 1.0)
         if ev <= getattr(cfg, 'min_ev', 0.0): return None
