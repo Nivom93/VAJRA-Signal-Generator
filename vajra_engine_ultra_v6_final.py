@@ -3105,15 +3105,6 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         if sl >= entry_target: return None
         risk_distance = entry_target - sl
 
-        # ── Structure-blocking filter ──
-        # Only block when nearest resistance makes the trade truly impossible (< 1.0 R:R).
-        # Using min_rr here was too aggressive — it killed valid trades in congestion zones.
-        if resistance_above:
-            nearest_res_price = resistance_above[0][1]
-            blocked_rr = (nearest_res_price - entry_target) / risk_distance
-            if blocked_rr < 1.0:
-                return None  # Resistance too close — impossible R:R
-
         # ── Structure-aware TP targeting ──
         # Use the full S/R level book as TP candidates.
         # Pick the nearest structural level above entry that gives >= min_rr.
@@ -3152,13 +3143,6 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
         if sl <= entry_target: return None
         risk_distance = sl - entry_target
-
-        # ── Structure-blocking filter ──
-        if support_below:
-            nearest_sup_price = support_below[0][1]
-            blocked_rr = (entry_target - nearest_sup_price) / risk_distance
-            if blocked_rr < 1.0:
-                return None  # Support too close — impossible R:R
 
         # ── Structure-aware TP targeting ──
         possible_tps = [lvl for _, lvl in support_below]
