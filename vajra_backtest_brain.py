@@ -87,7 +87,7 @@ def run_backtest_with_brain(args, preloaded=None):
     btc_aligned = btc_bull_arr[btc_idx_lagged]
 
     # Load Brains (pass directory containing brain_*.joblib files)
-    brain = BrainLearningManager(cfg, args.brain_long_path)
+    brain = BrainLearningManager(cfg, args.brains_dir)
     
     log.info("Generating V7 FEATURES via Engine...")
     pMacro, pSwing, pHtf, pExec = Precomp(macro_tf), Precomp(swing_tf), Precomp(htf), Precomp(exec_tf)
