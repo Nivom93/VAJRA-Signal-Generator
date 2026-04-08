@@ -205,8 +205,8 @@ def run_backtest_with_brain(args, preloaded=None):
 
 def main():
     p = bt_helpers.build_arg_parser()
-    p.add_argument("--brain-long-path", required=True)
-    p.add_argument("--brain-short-path", required=True)
+    p.add_argument("--brain-long-path", required=False, default=None, help="(Deprecated) Use --brains-dir instead")
+    p.add_argument("--brain-short-path", required=False, default=None, help="(Deprecated) Use --brains-dir instead")
     p.add_argument("--min-prob-long", type=float, default=-1.0)
     p.add_argument("--min-prob-short", type=float, default=-1.0)
     args = p.parse_args()
