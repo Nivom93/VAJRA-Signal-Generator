@@ -2658,8 +2658,9 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     logic_desc = ""
     side = None
 
-    # Volume confirmation gate — require elevated volume or spike for valid entries
-    has_vol_confirm = has_volume or has_elevated_vol
+    # Volume confirmation gate — require BOTH spike AND elevated rvol for valid entries.
+    # OR gate was too permissive: rvol > 0.8 fires on every other bar in crypto.
+    has_vol_confirm = has_volume and has_elevated_vol
 
     # ==========================================================
     # PHASE 4A: STRUCTURAL CONFLUENCE SCORING

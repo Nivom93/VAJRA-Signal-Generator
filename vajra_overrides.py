@@ -19,10 +19,10 @@ def _strategy_overrides(cfg):
     cfg.dynamic_tp_enabled = False         # Enforce strict structural targets
     cfg.time_in_force_decay = 0            # No time decay — let signal resolve to TP or SL
 
-    # Structural Geometry (balanced precision + frequency)
-    cfg.min_rr = 1.5            # 1.5R minimum — captures many valid setups missed at 2.2
-    cfg.atr_mult_sl = 0.20      # 0.20 ATR buffer — enough room for normal wicks
-    cfg.atr_mult_tp = 4.0       # Max TP cap at 4.0R — let winners run further
+    # Structural Geometry — calibrated for BTC 15m volatility
+    cfg.min_rr = 2.0            # 2.0R minimum — balanced between frequency and expectancy
+    cfg.atr_mult_sl = 0.40      # 0.40 ATR buffer — crypto wicks routinely exceed 0.20
+    cfg.atr_mult_tp = 6.0       # Max TP cap at 6.0R — allow realistic structural targets
 
     # Risk & Concurrency
     cfg.risk_per_trade = 0.01
@@ -48,10 +48,10 @@ def _strategy_overrides(cfg):
     cfg.filter_adx_chop = True          # Enable ADX filter but with lower threshold
     cfg.adx_chop_threshold = 10.0       # ADX < 10 = no direction (was hardcoded 15)
     cfg.reversal_evidence_min = 2       # 2/5 reversal signals to unlock counter-trend (was 4)
-    cfg.wick_rejection_pct = 0.15       # 15% wick ratio threshold (was hardcoded 0.25)
-    cfg.vol_confirm_rvol = 0.8          # rvol > 0.8 for volume confirmation (was 1.2)
+    cfg.wick_rejection_pct = 0.30       # 30% wick ratio — real rejections, not noise (was 0.15)
+    cfg.vol_confirm_rvol = 1.2          # rvol > 1.2 for volume confirmation (was 0.8)
     cfg.vol_spike_lookback = 5          # 5-bar lookback for vol spikes (was 3)
-    cfg.ob_freshness_bars = 192         # OB valid for 192 bars / 48h on 15m (was 40)
+    cfg.ob_freshness_bars = 64          # OB valid for 64 bars / 16h on 15m (was 192 / 48h)
     cfg.fvg_tolerance_atr = 0.5         # FVG zone tolerance = 0.5 ATR (was 0.2% of price)
     cfg.mtf_alignment_min = 1           # Only 1 TF agreement needed for trend trades (was 2)
 
