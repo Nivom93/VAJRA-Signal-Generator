@@ -93,8 +93,22 @@ def _fetch_ohlcv_paged(exw: ExchangeWrapper, symbol: str, timeframe: str, since_
     tf_ms = timeframe_to_ms(timeframe)
     frames: List[pd.DataFrame] = []
     cur = since_ms; last_guard = 0
+    page = 0
     while cur < until_ms:
-        df = exw.fetch_ohlcv_df(symbol, timeframe, limit=1000, since=cur)
+        # Rate-limit: Bybit allows ~5 req/s on public endpoints.
+        # Sleep every request to stay safely under the limit.
+        if page > 0:
+            time.sleep(0.25)
+        page += 1
+        try:
+            df = exw.fetch_ohlcv_df(symbol, timeframe, limit=1000, since=cur)
+        except Exception as e:
+            err_str = str(e).lower()
+            if "rate" in err_str or "10006" in err_str or "too many" in err_str:
+                log.warning(f"Rate limited on page {page}, backing off 5s...")
+                time.sleep(5)
+                continue  # retry same cursor
+            raise
         if df is None or len(df) == 0:
             break
         df = _ensure_ms_int(df)
