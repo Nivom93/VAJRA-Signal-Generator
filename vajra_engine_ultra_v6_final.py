@@ -2497,6 +2497,105 @@ def plan_trade(cfg, f):
     # Backward compatibility stub
     return None
 
+def _build_sr_levels(side, entry, base, pExec, iExec, htf_sh_val, htf_sl_val, mtf_sh_val, mtf_sl_val, current_atr):
+    """Build sorted lists of structural resistance & support levels from ALL known structure.
+
+    For LONG trades: resistance_above = TP targets, support_below = SL anchors.
+    For SHORT trades: support_below = TP targets, resistance_above = SL anchors.
+
+    Each level is (label, price) so the engine can log which structure drove the decision.
+    """
+    all_levels = []
+
+    # Swing highs/lows (execution TF)
+    sh = pExec.last_sh[iExec] if iExec < len(pExec.last_sh) else 0
+    sl_val = pExec.last_sl[iExec] if iExec < len(pExec.last_sl) else 0
+    if sh > 0: all_levels.append(("SWING_H", sh))
+    if sl_val > 0: all_levels.append(("SWING_L", sl_val))
+
+    # HTF / MTF swing levels
+    if htf_sh_val > 0: all_levels.append(("HTF_SH", htf_sh_val))
+    if htf_sl_val > 0: all_levels.append(("HTF_SL", htf_sl_val))
+    if mtf_sh_val > 0: all_levels.append(("MTF_SH", mtf_sh_val))
+    if mtf_sl_val > 0: all_levels.append(("MTF_SL", mtf_sl_val))
+
+    # Order block zones — bearish OBs act as resistance, bullish OBs as support
+    ob_bear_bot = base.get("ob_bear_bot", 0)
+    ob_bear_top = base.get("ob_bear_top", 0)
+    ob_bull_top = base.get("ob_bull_top", 0)
+    ob_bull_bot = base.get("ob_bull_bot", 0)
+    if ob_bear_bot > 0: all_levels.append(("OB_BEAR", ob_bear_bot))
+    if ob_bull_top > 0: all_levels.append(("OB_BULL", ob_bull_top))
+
+    # FVG centers — unfilled gaps act as magnets / S/R
+    fvg_bear = base.get("fvg_bear", 0)
+    fvg_bull = base.get("fvg_bull", 0)
+    if fvg_bear > 0: all_levels.append(("FVG_BEAR", fvg_bear))
+    if fvg_bull > 0: all_levels.append(("FVG_BULL", fvg_bull))
+
+    # QM levels
+    qm_bear = base.get("qm_bear", 0)
+    qm_bull = base.get("qm_bull", 0)
+    if qm_bear > 0: all_levels.append(("QM_BEAR", qm_bear))
+    if qm_bull > 0: all_levels.append(("QM_BULL", qm_bull))
+
+    # Volume profile: POC, VAH, VAL
+    poc = base.get("poc", 0)
+    vah = base.get("vah", 0)
+    val_lvl = base.get("val", 0)
+    if poc > 0: all_levels.append(("POC", poc))
+    if vah > 0: all_levels.append(("VAH", vah))
+    if val_lvl > 0: all_levels.append(("VAL", val_lvl))
+
+    # VWAP
+    vwap = base.get("rolling_vwap_20", 0)
+    if vwap > 0: all_levels.append(("VWAP", vwap))
+
+    # Equal highs/lows = liquidity pools (use swing values as proxy)
+    eq_high_count = base.get("equal_highs_count", 0)
+    eq_low_count = base.get("equal_lows_count", 0)
+    if eq_high_count >= 2 and sh > 0: all_levels.append(("EQ_HIGH", sh))
+    if eq_low_count >= 2 and sl_val > 0: all_levels.append(("EQ_LOW", sl_val))
+
+    # Asian range
+    asian_h = base.get("asian_high", 0)
+    asian_l = base.get("asian_low", 0)
+    if asian_h > 0: all_levels.append(("ASIAN_H", asian_h))
+    if asian_l > 0: all_levels.append(("ASIAN_L", asian_l))
+
+    # Donchian channel
+    dc_h = base.get("dc_high_20", 0)
+    dc_l = base.get("dc_low_20", 0)
+    if dc_h > 0: all_levels.append(("DC_HIGH", dc_h))
+    if dc_l > 0: all_levels.append(("DC_LOW", dc_l))
+
+    # Fibonacci extensions (from fractal range)
+    fractal_h = float(pExec.fractal_high[iExec]) if iExec < len(pExec.fractal_high) else 0
+    fractal_l = float(pExec.fractal_low[iExec]) if iExec < len(pExec.fractal_low) else 0
+    frac_range = fractal_h - fractal_l
+    if frac_range > 0:
+        all_levels.append(("FIB_EXT_1272", fractal_h + frac_range * 0.272))
+        all_levels.append(("FIB_EXT_1618", fractal_h + frac_range * 0.618))
+        all_levels.append(("FIB_EXT_N1272", fractal_l - frac_range * 0.272))
+        all_levels.append(("FIB_EXT_N1618", fractal_l - frac_range * 0.618))
+
+    # Deduplicate levels that are within 0.1 ATR of each other (keep first)
+    tol = current_atr * 0.1
+    unique = []
+    for lbl, lvl in sorted(all_levels, key=lambda x: x[1]):
+        if lvl <= 0:
+            continue
+        if not unique or abs(lvl - unique[-1][1]) > tol:
+            unique.append((lbl, lvl))
+
+    # Split into resistance (above entry) and support (below entry)
+    resistance_above = [(lbl, lvl) for lbl, lvl in unique if lvl > entry + tol]
+    support_below = [(lbl, lvl) for lbl, lvl in unique if lvl < entry - tol]
+    support_below.reverse()  # Closest support first
+
+    return resistance_above, support_below
+
+
 def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     px = base.get("price")
     if not px or not pExec: return None
@@ -2898,6 +2997,50 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
     if not candidates: return None
 
+    # ==========================================================
+    # PHASE 4C: MARKET STRUCTURE TREND ALIGNMENT FILTER
+    # ==========================================================
+    # Trend-following setups must align with the exec-TF structural trend.
+    # Reversal setups (ALPHA, GAMMA, EPSILON, KAPPA, ETA) are allowed against
+    # structure only when they have strong confluence (>= 3) to confirm the reversal.
+    # This prevents taking trend trades into opposing market structure.
+    struct_trend = base.get("struct_trend", 0)  # +1 bullish, -1 bearish, 0 ranging
+    htf_struct = base.get("htf_struct_trend", 0)
+
+    _REVERSAL_SETUPS = {"ALPHA", "GAMMA", "EPSILON", "KAPPA", "ETA", "IOTA", "BETA"}
+    _TREND_SETUPS = {"ZETA", "LAMBDA", "THETA"}
+    min_reversal_confluence = getattr(cfg, 'min_reversal_confluence', 3.0)
+
+    filtered = []
+    for cand in candidates:
+        cand_name, cand_side, cand_desc, cand_conf = cand
+        cand_strat = cand_name.split("_")[0]
+
+        # Check structural alignment
+        if cand_side == "long" and struct_trend < 0:
+            # Long trade against bearish structure
+            if cand_strat in _TREND_SETUPS:
+                continue  # Drop trend-following longs in bearish structure
+            if cand_strat in _REVERSAL_SETUPS and cand_conf < min_reversal_confluence:
+                continue  # Reversal needs strong confluence to fight structure
+        elif cand_side == "short" and struct_trend > 0:
+            # Short trade against bullish structure
+            if cand_strat in _TREND_SETUPS:
+                continue
+            if cand_strat in _REVERSAL_SETUPS and cand_conf < min_reversal_confluence:
+                continue
+
+        # HTF structure disagreement: require extra confluence for any counter-HTF trade
+        if cand_side == "long" and htf_struct < 0 and cand_conf < 2:
+            continue
+        if cand_side == "short" and htf_struct > 0 and cand_conf < 2:
+            continue
+
+        filtered.append(cand)
+
+    if not filtered: return None
+    candidates = filtered
+
     # Pick the candidate with the highest confluence score.
     # On ties, structural setups (ALPHA/GAMMA/DELTA) rank higher than momentum setups.
     _struct_priority = {"ALPHA": 10, "GAMMA": 9, "IOTA": 8, "DELTA": 7, "KAPPA": 6,
@@ -2907,6 +3050,8 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
     # Enrich the logic description with confluence info
     conf_reasons = bull_struct_reasons if side == "long" else bear_struct_reasons
+    struct_label = "BULLISH" if struct_trend > 0 else ("BEARISH" if struct_trend < 0 else "RANGING")
+    logic_desc += f" STRUCT={struct_label}."
     if confluence >= 2:
         logic_desc += f" CONFLUENCE {confluence:.0f}× [{'+'.join(conf_reasons)}]."
 
@@ -2932,6 +3077,12 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
     strat_base = setup_type.split("_")[0]
 
+    # Build the full structural S/R level book from ALL known market structure
+    resistance_above, support_below = _build_sr_levels(
+        side, entry_target, base, pExec, iExec,
+        htf_sh_val, htf_sl_val, mtf_sh_val, mtf_sl_val, current_atr
+    )
+
     if side == 'long':
         # Setup-specific SL: use the tightest structural invalidation
         if strat_base == "ALPHA" and ob_bull_bot > 0:
@@ -2942,7 +3093,6 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             fvg_low = fvg_bull - fvg_tol
             sl = fvg_low - sl_buffer
         elif strat_base == "THETA":
-            # Mean reversion: SL below Keltner lower - 1 ATR
             sl = low - current_atr - sl_buffer
         else:
             sl = min(swing_low, low) - sl_buffer
@@ -2950,11 +3100,21 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         if sl >= entry_target: return None
         risk_distance = entry_target - sl
 
-        # Structural TP targets (expanded: include VWAP, Keltner bands, POC)
-        vwap_val = base.get("rolling_vwap_20", 0)
-        poc_val = base.get("poc", 0)
-        possible_tps = [t for t in [ob_bear_bot, base.get("vah", 0), htf_sh_val, mtf_sh_val, vwap_val, poc_val] if t > entry_target]
-        possible_tps.sort()
+        # ── Structure-blocking filter ──
+        # If resistance is within 1 ATR above entry, the trade has no room to run.
+        sr_block_dist = current_atr * getattr(cfg, 'sr_block_atr', 1.0)
+        if resistance_above:
+            nearest_res_price = resistance_above[0][1]
+            if nearest_res_price - entry_target < sr_block_dist:
+                # Check if we can still achieve min R:R despite the nearby resistance
+                blocked_rr = (nearest_res_price - entry_target) / risk_distance
+                if blocked_rr < getattr(cfg, 'min_rr', 2.0):
+                    return None  # Structure blocks the trade
+
+        # ── Structure-aware TP targeting ──
+        # Use the full S/R level book as TP candidates instead of a hardcoded list.
+        # Pick the nearest structural level above entry that gives >= min_rr.
+        possible_tps = [lvl for _, lvl in resistance_above]
         if not possible_tps:
             possible_tps = [entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 4.0))]
 
@@ -2981,7 +3141,6 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             fvg_high = fvg_bear + fvg_tol
             sl = fvg_high + sl_buffer
         elif strat_base == "THETA":
-            # Mean reversion: SL above Keltner upper + 1 ATR
             sl = high + current_atr + sl_buffer
         else:
             sl = max(swing_high, high) + sl_buffer
@@ -2989,10 +3148,17 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         if sl <= entry_target: return None
         risk_distance = sl - entry_target
 
-        vwap_val = base.get("rolling_vwap_20", 0)
-        poc_val = base.get("poc", 0)
-        possible_tps = [t for t in [ob_bull_top, base.get("val", 0), htf_sl_val, mtf_sl_val, vwap_val, poc_val] if 0 < t < entry_target]
-        possible_tps.sort(reverse=True)
+        # ── Structure-blocking filter ──
+        sr_block_dist = current_atr * getattr(cfg, 'sr_block_atr', 1.0)
+        if support_below:
+            nearest_sup_price = support_below[0][1]
+            if entry_target - nearest_sup_price < sr_block_dist:
+                blocked_rr = (entry_target - nearest_sup_price) / risk_distance
+                if blocked_rr < getattr(cfg, 'min_rr', 2.0):
+                    return None  # Structure blocks the trade
+
+        # ── Structure-aware TP targeting ──
+        possible_tps = [lvl for _, lvl in support_below]
         if not possible_tps:
             possible_tps = [entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 4.0))]
 
