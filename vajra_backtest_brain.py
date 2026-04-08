@@ -12,7 +12,7 @@ import argparse, time, json, logging
 from pathlib import Path
 import pandas as pd
 import numpy as np
-from vajra_export_events import fetch_macro_trend, fetch_delta_oi
+from vajra_export_events import fetch_macro_trend, fetch_delta_oi, fetch_historical_funding_rates
 
 # IMPORT FROM ENGINE
 from vajra_engine_ultra_v6_final import (
@@ -114,10 +114,36 @@ def run_backtest_with_brain(args, preloaded=None):
     until_ms = bt_helpers.parse_time(args.until)
     exec_iter = exec_tf[(exec_tf["timestamp"] >= since_ms) & (exec_tf["timestamp"] < until_ms)]
 
+    # Fetch ALL macro context unconditionally — must match export pipeline for feature parity.
+    # The export (training data) always fetches these; if backtest doesn't, the model sees
+    # all-zeros for features it trained on real data, producing ~3% probability output.
     log.info("Downloading Macro Context for Backtester...")
-    dxy_aligned = fetch_macro_trend("DX=F", exec_tf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(exec_tf))
-    spx_aligned = fetch_macro_trend("ES=F", exec_tf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(exec_tf))
-    oi_aligned = fetch_delta_oi(ExchangeWrapper(cfg), cfg.symbol, cfg.exec_tf, exec_tf["timestamp"]) if getattr(cfg, 'use_macro_data', False) else np.zeros(len(exec_tf))
+    exw_bt = ExchangeWrapper(cfg)
+    dxy_aligned = fetch_macro_trend("DX=F", exec_tf["timestamp"])
+    spx_aligned = fetch_macro_trend("ES=F", exec_tf["timestamp"])
+    oi_aligned = fetch_delta_oi(exw_bt, cfg.symbol, cfg.exec_tf, exec_tf["timestamp"])
+    funding_aligned = fetch_historical_funding_rates(exw_bt, cfg.symbol, exec_tf["timestamp"])
+
+    # BTC Dominance trend (same logic as export pipeline)
+    try:
+        import ccxt
+        binance_ex = ccxt.binance({'options': {'defaultType': 'swap'}})
+        btcd_raw = binance_ex.fetch_ohlcv("BTCDOM/USDT:USDT", timeframe="4h", limit=1000)
+        btcd_df = pd.DataFrame(btcd_raw, columns=["timestamp","open","high","low","close","volume"])
+        if not btcd_df.empty:
+            btcd_c = btcd_df['close'].values
+            btcd_trend = np.zeros_like(btcd_c)
+            for i in range(5, len(btcd_c)):
+                slope = (btcd_c[i] - btcd_c[i-5]) / btcd_c[i-5] * 100.0
+                if slope > 0.5: btcd_trend[i] = 1.0
+                elif slope < -0.5: btcd_trend[i] = -1.0
+            btcd_series = pd.Series(btcd_trend, index=pd.to_datetime(btcd_df['timestamp'], unit='ms', utc=True))
+            btcd_aligned = btcd_series.shift(1).reindex(pd.to_datetime(exec_tf["timestamp"], unit='ms', utc=True), method='ffill').fillna(0.0).values
+        else:
+            btcd_aligned = np.zeros(len(exec_tf))
+    except Exception as e:
+        log.warning(f"Failed to fetch BTCDOM: {e}")
+        btcd_aligned = np.zeros(len(exec_tf))
 
     for row in exec_iter.itertuples():
         ts = int(row.timestamp)
@@ -150,11 +176,11 @@ def run_backtest_with_brain(args, preloaded=None):
 
         extras = {
             "btc_bullish": btc_val,
-            "funding_rate": 0.0,
-            "btcd_trend": 0.0,
-            "dxy_trend": float(dxy_aligned[iExec]) if getattr(cfg, 'use_macro_data', False) and iExec < len(dxy_aligned) else 0.0,
-            "spx_trend": float(spx_aligned[iExec]) if getattr(cfg, 'use_macro_data', False) and iExec < len(spx_aligned) else 0.0,
-            "delta_oi": float(oi_aligned[iExec]) if getattr(cfg, 'use_macro_data', False) and iExec < len(oi_aligned) else 0.0,
+            "funding_rate": float(funding_aligned[iExec]) if iExec < len(funding_aligned) else 0.0,
+            "btcd_trend": float(btcd_aligned[iExec]) if iExec < len(btcd_aligned) else 0.0,
+            "dxy_trend": float(dxy_aligned[iExec]) if iExec < len(dxy_aligned) else 0.0,
+            "spx_trend": float(spx_aligned[iExec]) if iExec < len(spx_aligned) else 0.0,
+            "delta_oi": float(oi_aligned[iExec]) if iExec < len(oi_aligned) else 0.0,
             "bid_ask_imbalance": 0.5,
             "macro_sentiment": 0.0
         }
