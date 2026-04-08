@@ -298,11 +298,10 @@ def main(argv=None):
                 if not args.no_smote:
                     X_tr, y_tr = _apply_smote(X_tr, y_tr, random_state=42 + i)
 
-                # Recalculate fold-specific class weighting after potential SMOTE
-                neg_cases_fold = np.sum(y_tr == 0)
-                pos_cases_fold = np.sum(y_tr == 1)
-                fold_scale_weight = float(neg_cases_fold) / max(1.0, float(pos_cases_fold))
-                fold_scale_weight = min(fold_scale_weight, 20.0)
+                # Use ORIGINAL class weight (pre-SMOTE) — SMOTE already balances the
+                # data, so recalculating weight on SMOTE output double-corrects and
+                # distorts probability calibration.
+                fold_scale_weight = scale_weight
 
                 clf = xgb.XGBClassifier(
                     n_estimators=args.n_estimators,
@@ -394,10 +393,9 @@ def main(argv=None):
             if not args.no_smote:
                 X_final_train, y_final_train = _apply_smote(X_all_sel, y_all, random_state=42)
 
-            # Recalculate weight after SMOTE
-            final_pos = np.sum(y_final_train == 1)
-            final_neg = np.sum(y_final_train == 0)
-            final_weight = min(float(final_neg) / max(1.0, float(final_pos)), 20.0)
+            # Use ORIGINAL class weight (pre-SMOTE) — SMOTE already balances data,
+            # recalculating on SMOTE output double-corrects and distorts probabilities.
+            final_weight = scale_weight
 
             if best_tuned_params:
                 final_model = xgb.XGBClassifier(
@@ -680,6 +678,7 @@ def _train_meta_brain(df: pd.DataFrame, base_feature_names: list, args, out_dir:
     neg_cases = int(np.sum(y_oos == 0))
     scale_weight = min(float(neg_cases) / max(1.0, float(pos_cases)), 20.0)
 
+    meta_scale_weight = scale_weight  # Pre-SMOTE weight for proper calibration
     log.info(f"Meta-Brain: {n_meta} samples with OOS predictions ({pos_cases} pos / {neg_cases} neg)")
 
     # ══════════════════════════════════════════════════════════════════
@@ -698,9 +697,8 @@ def _train_meta_brain(df: pd.DataFrame, base_feature_names: list, args, out_dir:
         if not args.no_smote:
             X_tr, y_tr = _apply_smote(X_tr, y_tr, random_state=42 + i)
 
-        neg_f = np.sum(y_tr == 0)
-        pos_f = np.sum(y_tr == 1)
-        sw = min(float(neg_f) / max(1.0, float(pos_f)), 20.0)
+        # Use ORIGINAL class weight (pre-SMOTE) for proper probability calibration
+        sw = meta_scale_weight
 
         clf = xgb.XGBClassifier(
             n_estimators=args.n_estimators,
@@ -740,9 +738,8 @@ def _train_meta_brain(df: pd.DataFrame, base_feature_names: list, args, out_dir:
     if not args.no_smote:
         X_final, y_final = _apply_smote(X_all_meta, y_oos, random_state=99)
 
-    final_pos = np.sum(y_final == 1)
-    final_neg = np.sum(y_final == 0)
-    final_weight = min(float(final_neg) / max(1.0, float(final_pos)), 20.0)
+    # Use ORIGINAL class weight (pre-SMOTE) for proper probability calibration
+    final_weight = meta_scale_weight
 
     meta_model = xgb.XGBClassifier(
         n_estimators=args.n_estimators,
