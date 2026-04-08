@@ -209,7 +209,8 @@ def main():
     p.add_argument("--htf", default="1h")
     p.add_argument("--exec-tf", default="15m")
     p.add_argument("--out", required=True)
-    p.add_argument("--min-rr", type=float, default=2.2)
+    p.add_argument("--min-rr", type=float, default=-1.0,
+                   help="Minimum R:R for setups. Default -1 = use strategy overrides value.")
     p.add_argument("--brains-dir", default=None,
                    help="Path to trained specialist brains. When set, exports specialist "
                         "probabilities alongside events for Meta-Brain training.")
@@ -226,10 +227,13 @@ def main():
     cfg.filter_rvol_breakout = False
     cfg.filter_adx_chop = False
 
-    # Disable all early-exit or time-decay logic during meta-labeling phase
-    cfg.be_trigger_r = 0.0
-    cfg.trailing_stop_trigger_r = 0.0
-    cfg.time_in_force_decay = 0
+    # Pure signal quality measurement: no trade management overlays.
+    # Signals are evaluated by raw outcome — did price hit TP or SL first?
+    # BE, trailing, and time decay are trade management, NOT signal quality.
+    # The backtest overrides MUST match these values for train/test parity.
+    cfg.be_trigger_r = 0.0              # No break-even — raw signal outcome
+    cfg.trailing_stop_trigger_r = 0.0   # No trailing — raw signal outcome
+    cfg.time_in_force_decay = 0         # No time decay — let signal resolve
 
     cfg.exchange_id = args.exchange_id; cfg.market_type = args.market_type
     cfg.macro_tf = args.macro_tf

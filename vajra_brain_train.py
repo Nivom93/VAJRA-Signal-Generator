@@ -129,9 +129,11 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
 
     # Pure Target Binary with improved labeling
     if "meta_label" in df.columns:
-        # Use threshold > 0.25 for binary (any meaningful profit = positive)
-        df["label"] = (pd.to_numeric(df["meta_label"], errors='coerce').fillna(0) > 0.25).astype(int)
-        log.info("🎯 Dynamic Target mapped via meta_label (threshold > 0.25 for positive).")
+        # Threshold 0.50: only trades achieving ≥50% of target R:R are positive.
+        # At 0.25 barely-profitable noise trades (0.01R→meta_label 0.30) were
+        # labeled positive, diluting the signal the brain learns from.
+        df["label"] = (pd.to_numeric(df["meta_label"], errors='coerce').fillna(0) > 0.50).astype(int)
+        log.info("🎯 Dynamic Target mapped via meta_label (threshold > 0.50 for positive).")
     elif "pnl_r" in df.columns:
         df["label"] = (df["pnl_r"] > 0).astype(int)
         log.info("🎯 Pure Target Binary (Fallback): pnl_r > 0.")
@@ -266,7 +268,10 @@ def main(argv=None):
             n_samples = len(X_all)
             # Adaptive folds: fewer folds for small datasets (min 2, scale with data)
             actual_folds = min(args.wfa_folds, max(2, n_samples // 25))
-            actual_gap = max(3, min(15, n_samples // 10))
+            # Gap must be large enough that test-set trades don't share recent
+            # structural context with training trades.  On 15m data with trades
+            # potentially hours apart, 3-15 events is far too small.
+            actual_gap = max(20, min(100, n_samples // 8))
             log.info(f"Running Walk-Forward Analysis ({actual_folds} folds) with dynamic per-fold RFE Feature Selection...")
 
             if HAS_SMOTE and not args.no_smote:
@@ -379,13 +384,19 @@ def main(argv=None):
 
             log.info(f"Dynamic RFE: Selecting up to {dynamic_n_features_final} features for {n_samples_all} samples.")
 
-            estimator_rfe_final = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
-            selector_final = RFE(estimator_rfe_final, n_features_to_select=dynamic_n_features_final, step=1)
-
             # Apply SMOTE before final RFE if enabled
             X_all_for_rfe, y_all_for_rfe = X_all, y_all
+            rfe_smote_applied = False
             if not args.no_smote:
+                X_before = X_all_for_rfe
                 X_all_for_rfe, y_all_for_rfe = _apply_smote(X_all, y_all, random_state=99)
+                rfe_smote_applied = len(X_all_for_rfe) != len(X_before)
+
+            # When SMOTE rebalances the data for RFE, scale_pos_weight must be
+            # 1.0 to avoid double-correcting (same fix as fold-level training).
+            rfe_final_weight = 1.0 if rfe_smote_applied else scale_weight
+            estimator_rfe_final = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=rfe_final_weight)
+            selector_final = RFE(estimator_rfe_final, n_features_to_select=dynamic_n_features_final, step=1)
 
             selector_final = selector_final.fit(X_all_for_rfe, y_all_for_rfe)
             selected_features = [f for f, s in zip(base_feature_names, selector_final.support_) if s]
