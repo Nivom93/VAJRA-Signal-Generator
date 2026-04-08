@@ -42,6 +42,49 @@ except Exception:
         return decorator
 
 # ==============================================================================
+# PHASE 6 DIAGNOSTIC COUNTERS — Track why trades are rejected
+# ==============================================================================
+_p6_counters = {
+    "reached_phase6": 0,
+    "no_brain": 0,
+    "specialist_none": 0,
+    "specialist_below_thresh": 0,
+    "meta_below_thresh": 0,
+    "ev_too_low": 0,
+    "passed": 0,
+    "specialist_prob_sum": 0.0,
+    "specialist_prob_count": 0,
+    "meta_prob_sum": 0.0,
+    "meta_prob_count": 0,
+}
+
+def reset_p6_counters():
+    """Reset diagnostic counters (call before each backtest run)."""
+    for k in _p6_counters:
+        _p6_counters[k] = 0 if isinstance(_p6_counters[k], int) else 0.0
+
+def log_p6_summary():
+    """Print a summary of Phase 6 gate rejections."""
+    c = _p6_counters
+    log.info("=" * 60)
+    log.info("PHASE 6 AI GATE DIAGNOSTIC SUMMARY")
+    log.info("=" * 60)
+    log.info(f"  Setups reaching Phase 6:       {c['reached_phase6']}")
+    log.info(f"  No brain loaded for setup:     {c['no_brain']}")
+    log.info(f"  Specialist returned None:      {c['specialist_none']}")
+    log.info(f"  Specialist below threshold:    {c['specialist_below_thresh']}")
+    log.info(f"  Meta-Brain below threshold:    {c['meta_below_thresh']}")
+    log.info(f"  EV too low:                    {c['ev_too_low']}")
+    log.info(f"  PASSED (trade generated):      {c['passed']}")
+    if c['specialist_prob_count'] > 0:
+        avg_sp = c['specialist_prob_sum'] / c['specialist_prob_count']
+        log.info(f"  Avg specialist probability:    {avg_sp:.4f} (n={c['specialist_prob_count']})")
+    if c['meta_prob_count'] > 0:
+        avg_mp = c['meta_prob_sum'] / c['meta_prob_count']
+        log.info(f"  Avg meta probability:          {avg_mp:.4f} (n={c['meta_prob_count']})")
+    log.info("=" * 60)
+
+# ==============================================================================
 # 1. BASE MATHEMATICAL HELPERS (JIT COMPILED)
 # ==============================================================================
 
@@ -2919,28 +2962,34 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     analysis_str = f"SETUP: {setup_type}. {logic_desc}"
 
     if brain:
+        _p6_counters["reached_phase6"] += 1
+
         # ── Meta-Brain: Two-tier decision system ──
-        # Tier 1: Specialist brain for setup-specific pattern recognition
-        # Tier 2: Meta-Brain fuses ALL specialist views + market context for final go/no-go
         meta_prob, specialist_prob = brain.predict_meta_probability(
             strat, side, base, adv, iExec, px, pExec
         )
         if meta_prob is None:
+            _p6_counters["specialist_none"] += 1
             return None
 
-        # Use SPECIALIST probability for the calibrated threshold check,
-        # because specialists are trained per-setup with SMOTE-balanced classes.
-        # The Meta-Brain serves as an additional filter: it must agree the trade is viable.
-        # Meta-Brain probabilities have a different distribution (lower base rate)
-        # so we use a separate, lower threshold for its go/no-go decision.
+        # Specialist threshold — SMOTE(0.4) + scale_pos_weight produces probabilities
+        # in the 0.15-0.45 range for most setups. Threshold must match this distribution.
         min_prob = getattr(cfg, 'min_prob_long', 0.50) if side == 'long' else getattr(cfg, 'min_prob_short', 0.50)
 
         if brain.meta_brain is not None and specialist_prob is not None:
+            # Track probability distributions
+            _p6_counters["specialist_prob_sum"] += specialist_prob
+            _p6_counters["specialist_prob_count"] += 1
+            _p6_counters["meta_prob_sum"] += meta_prob
+            _p6_counters["meta_prob_count"] += 1
+
             # Two-gate system: specialist must clear its threshold AND meta must clear its own
             if specialist_prob < min_prob:
+                _p6_counters["specialist_below_thresh"] += 1
                 return None
             meta_threshold = getattr(cfg, 'min_meta_prob', 0.22)
             if meta_prob < meta_threshold:
+                _p6_counters["meta_below_thresh"] += 1
                 return None
             # Blend: specialist drives the probability estimate, meta scales confidence
             # meta_prob > base_rate means meta agrees; < base_rate means meta disagrees
@@ -2950,12 +2999,17 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             win_prob = min(win_prob, 0.95)  # Safety cap
         else:
             # Specialist-only mode (no meta-brain loaded)
+            _p6_counters["specialist_prob_sum"] += meta_prob
+            _p6_counters["specialist_prob_count"] += 1
             win_prob = meta_prob  # meta_prob == specialist_prob in fallback mode
             if win_prob < min_prob:
+                _p6_counters["specialist_below_thresh"] += 1
                 return None
 
         ev = (win_prob * rr) - ((1.0 - win_prob) * 1.0)
-        if ev <= getattr(cfg, 'min_ev', 0.0): return None
+        if ev <= getattr(cfg, 'min_ev', 0.0):
+            _p6_counters["ev_too_low"] += 1
+            return None
 
         if getattr(cfg, 'dynamic_risk_scaling', True):
             risk_factor = min(1.0 + (ev ** 1.5), getattr(cfg, 'max_risk_factor', 2.5))
@@ -2971,7 +3025,10 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             f"R:R {rr:.1f}. TF alignment: {bullish_tf_count}B/{bearish_tf_count}S. "
             f"Invalidation: {rev_warn:.2f}."
         )
+    else:
+        _p6_counters["no_brain"] += 1
 
+    _p6_counters["passed"] += 1
     return {
         "side": side, "entry": entry_target, "sl": sl, "tp": tp, "rr": rr,
         "prob": win_prob, "key": f"{setup_type}_{side}", "features": base,

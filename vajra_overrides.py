@@ -34,10 +34,12 @@ def _strategy_overrides(cfg):
     cfg.slippage_bps = 3.0              # Realistic 3bps slippage
     cfg.max_risk_factor = 2.0           # Cap dynamic risk scaling
 
-    # AI Gates (relaxed — let the brain see more setups to learn patterns)
-    cfg.min_ev = 0.05                   # Lower EV floor (was 0.10)
-    cfg.min_prob_long = 0.40            # 40% minimum AI confidence for longs (was 0.45)
-    cfg.min_prob_short = 0.40           # 40% minimum AI confidence for shorts (was 0.45)
+    # AI Gates — calibrated for SMOTE(0.4) + scale_pos_weight training
+    # SMOTE at 0.4 ratio only enriches minority to ~29%, so specialist outputs
+    # cluster in 0.15-0.45 range. Thresholds must match this distribution.
+    cfg.min_ev = 0.01                   # Low EV floor — let blended probs through
+    cfg.min_prob_long = 0.30            # 30% specialist threshold for longs
+    cfg.min_prob_short = 0.30           # 30% specialist threshold for shorts
     cfg.dynamic_risk_scaling = True
 
     # ── NEW: Engine Gate Controls (override hardcoded gates) ──

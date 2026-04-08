@@ -21,7 +21,8 @@ from vajra_engine_ultra_v6_final import (
     confluence_features, plan_trade_with_brain,
     precompute_v6_features,
     BrainLearningManager,
-    _ema_np
+    _ema_np,
+    reset_p6_counters, log_p6_summary
 )
 import vajra_backtest_optimized as bt_helpers
 
@@ -37,6 +38,7 @@ if not log.handlers:
 
 def run_backtest_with_brain(args, preloaded=None):
     start_t = time.perf_counter()
+    reset_p6_counters()
     cfg = bt_helpers.args_to_cfg(args)
     
     # 1. Apply Strategy File Overrides
@@ -165,6 +167,7 @@ def run_backtest_with_brain(args, preloaded=None):
         if plan: tm.submit_plan(plan, bar)
 
     dur = time.perf_counter() - start_t
+    log_p6_summary()
     wins = sum(1 for t in all_closed if t["pnl_r"] > 0)
     summary = {
         "trades": len(all_closed),
