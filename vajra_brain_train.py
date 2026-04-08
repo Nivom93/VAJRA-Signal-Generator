@@ -448,13 +448,22 @@ def main(argv=None):
 
             final_model.fit(X_final_train, y_final_train)
 
-            valid_edge = bool(avg_roc > 0.52 and avg_prec > 0.12)
+            # Tiered quality system — all brains are saved with a quality tag
+            # instead of hard-blocking on WFA metrics
+            if avg_roc > 0.55 and avg_prec > 0.15:
+                quality_tier = "strong"
+                threshold_adj = 0.0
+            elif avg_roc > 0.50:
+                quality_tier = "medium"
+                threshold_adj = 0.03
+            else:
+                quality_tier = "weak"
+                threshold_adj = 0.07
 
-            if not valid_edge:
-                log.warning(f"⚠️ SKIPPING {strat_clean}_{side}: WFA quality too low "
-                            f"(ROC={avg_roc:.4f} < 0.52 or Prec={avg_prec:.4f} < 0.12). "
-                            f"Brain would degrade prediction quality.")
-                continue
+            valid_edge = quality_tier in ("strong", "medium")
+
+            log.info(f"Brain {strat_clean}_{side}: quality_tier={quality_tier} "
+                     f"(ROC={avg_roc:.4f}, Prec={avg_prec:.4f}) → threshold_adj=+{threshold_adj:.2f}")
 
             # Save XGBoost model natively (version-agnostic JSON format)
             xgb_model_file = out_dir / f"brain_{strat_clean}_{side}.json"
@@ -470,6 +479,8 @@ def main(argv=None):
                 "wfa_roc_auc": avg_roc,
                 "wfa_f1": avg_f1,
                 "valid_edge": valid_edge,
+                "quality_tier": quality_tier,
+                "threshold_adj": threshold_adj,
                 "smote_enabled": HAS_SMOTE and not args.no_smote,
                 "n_features_selected": len(selected_features),
                 "n_samples_total": n_samples_all,

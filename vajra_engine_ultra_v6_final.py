@@ -2034,11 +2034,12 @@ class BrainLearningManager:
                     side = parts[2]
                     brain_data = joblib.load(str(model_file))
 
-                    # Skip brains that failed WFA quality gate during training
-                    if not brain_data.get("valid_edge", True):
-                        wfa_roc = brain_data.get("wfa_roc_auc", 0)
-                        log.warning(f"Skipping {model_file.stem}: WFA quality too low (ROC={wfa_roc:.3f})")
-                        continue
+                    # Load all brains regardless of valid_edge — quality tier
+                    # adjusts threshold at inference time instead of blocking
+                    quality_tier = brain_data.get("quality_tier", "strong")
+                    threshold_adj = brain_data.get("threshold_adj", 0.0)
+                    wfa_roc = brain_data.get("wfa_roc_auc", 0)
+                    log.info(f"Loading {model_file.stem}: tier={quality_tier}, ROC={wfa_roc:.3f}, threshold_adj=+{threshold_adj:.2f}")
 
                     # Load XGBoost model natively if saved in new format
                     if "xgb_model_file" in brain_data:
@@ -2078,6 +2079,13 @@ class BrainLearningManager:
                 log.info(f"Loaded Meta-Brain (unified) with {len(meta_data.get('feature_names', []))} features")
             except Exception as e:
                 log.error(f"Meta-Brain load error: {e}")
+
+    def get_threshold_adj(self, strategy, side):
+        """Return the threshold adjustment for a brain based on its quality tier."""
+        b = self.brains.get((strategy, side))
+        if not b:
+            return 0.0
+        return b.get("threshold_adj", 0.0)
 
     def predict_probability(self, strategy, side, base, adv, iExec, px, pExec):
         b = self.brains.get((strategy, side))
@@ -3028,9 +3036,11 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             _p6_counters["specialist_none"] += 1
             return None
 
-        # Specialist threshold — SMOTE(0.4) + scale_pos_weight produces probabilities
-        # in the 0.15-0.45 range for most setups. Threshold must match this distribution.
-        min_prob = getattr(cfg, 'min_prob_long', 0.50) if side == 'long' else getattr(cfg, 'min_prob_short', 0.50)
+        # Specialist threshold — dynamically adjusted by brain quality tier.
+        # Weak brains need higher confidence to pass, but still provide filtering.
+        base_min_prob = getattr(cfg, 'min_prob_long', 0.50) if side == 'long' else getattr(cfg, 'min_prob_short', 0.50)
+        threshold_adj = brain.get_threshold_adj(strat, side)
+        min_prob = base_min_prob + threshold_adj
 
         if brain.meta_brain is not None and specialist_prob is not None:
             # Track probability distributions
