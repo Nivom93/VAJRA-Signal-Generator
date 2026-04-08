@@ -247,8 +247,9 @@ def main(argv=None):
             mask = (df["side"] == side_val) | (df["side"] == side) | (df["strategy"].str.endswith(side.upper()))
             subset = df[(df["strategy"].str.startswith(strat_clean)) & mask].copy()
 
-            # Lowered minimum sample threshold from 30 to 20
-            if len(subset) < 20:
+            # Minimum 100 samples for robust generalization — with feature cap
+            # of n/25, fewer samples means too few features to learn from.
+            if len(subset) < 100:
                 log.info(f"Skipping {strat_clean}_{side} - Not enough samples ({len(subset)})")
                 continue
 
@@ -289,9 +290,12 @@ def main(argv=None):
                 X_tr_full, y_tr = X_all[train_idx], y_all[train_idx]
                 X_te_full, y_te = X_all[test_idx], y_all[test_idx]
 
-                # ADAPTIVE RFE: scale features with sqrt(n_samples) — not arbitrary cap at 30
+                # ADAPTIVE RFE: cap at n_samples/25 to prevent overfitting.
+                # sqrt(n)*1.5 was too aggressive (428 samples → 31 features = 14:1 ratio).
+                # Need at least 25 samples per feature for robust generalization.
                 n_samples_fold = len(X_tr_full)
-                dynamic_n_features_fold = max(8, min(int(np.sqrt(n_samples_fold) * 1.5), len(base_feature_names)))
+                max_by_ratio = max(8, n_samples_fold // 25)
+                dynamic_n_features_fold = max(8, min(max_by_ratio, int(np.sqrt(n_samples_fold) * 1.5), len(base_feature_names)))
 
                 # Dynamically run RFE on this specific fold
                 estimator_rfe = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
@@ -378,9 +382,10 @@ def main(argv=None):
 
             log.info("Running Final RFE Feature Selection on FULL dataset for Production Model...")
 
-            # ADAPTIVE RFE for final model: sqrt(n) * 1.5, no arbitrary cap
+            # ADAPTIVE RFE for final model: cap at n_samples/25 for robustness.
             n_samples_all = len(X_all)
-            dynamic_n_features_final = max(10, min(int(np.sqrt(n_samples_all) * 1.5), len(base_feature_names)))
+            max_by_ratio_final = max(10, n_samples_all // 25)
+            dynamic_n_features_final = max(10, min(max_by_ratio_final, int(np.sqrt(n_samples_all) * 1.5), len(base_feature_names)))
 
             log.info(f"Dynamic RFE: Selecting up to {dynamic_n_features_final} features for {n_samples_all} samples.")
 
@@ -443,7 +448,13 @@ def main(argv=None):
 
             final_model.fit(X_final_train, y_final_train)
 
-            valid_edge = bool(avg_roc > 0.50 and avg_prec > 0.10)
+            valid_edge = bool(avg_roc > 0.52 and avg_prec > 0.12)
+
+            if not valid_edge:
+                log.warning(f"⚠️ SKIPPING {strat_clean}_{side}: WFA quality too low "
+                            f"(ROC={avg_roc:.4f} < 0.52 or Prec={avg_prec:.4f} < 0.12). "
+                            f"Brain would degrade prediction quality.")
+                continue
 
             # Save XGBoost model natively (version-agnostic JSON format)
             xgb_model_file = out_dir / f"brain_{strat_clean}_{side}.json"
