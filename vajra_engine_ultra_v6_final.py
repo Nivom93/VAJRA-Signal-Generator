@@ -2103,13 +2103,17 @@ class BrainLearningManager:
             if "booster" in b:
                 import xgboost as xgb
                 dmat = xgb.DMatrix(vec, feature_names=b['feature_names'])
-                raw = float(b['booster'].predict(dmat)[0])
-                # Safeguard: if XGBoost returns raw margins (log-odds) instead of
-                # probabilities, apply sigmoid. Raw margins can be negative or >1.
-                if raw < 0.0 or raw > 1.0:
-                    prob = 1.0 / (1.0 + math.exp(-raw))
-                else:
-                    prob = raw
+                # Always get raw log-odds and apply sigmoid manually.
+                # Booster.predict() behavior varies across XGBoost versions —
+                # output_margin=True guarantees raw log-odds in ALL versions.
+                raw = float(b['booster'].predict(dmat, output_margin=True)[0])
+                prob = 1.0 / (1.0 + math.exp(-raw))
+                # One-time raw margin diagnostic
+                if not getattr(self, '_raw_diag_done', False):
+                    self._raw_diag_done = True
+                    prob_direct = float(b['booster'].predict(dmat)[0])
+                    log.info(f"BOOSTER DIAGNOSTIC: predict()={prob_direct:.6f}, "
+                             f"predict(output_margin=True)={raw:.6f}, sigmoid(raw)={prob:.6f}")
             else:
                 prob = b['classifier'].predict_proba(vec)[0][1]
             return prob
@@ -2198,12 +2202,8 @@ class BrainLearningManager:
             if "booster" in self.meta_brain:
                 import xgboost as xgb
                 dmat = xgb.DMatrix(vec, feature_names=meta_fnames)
-                raw = float(self.meta_brain['booster'].predict(dmat)[0])
-                # Sigmoid safeguard for raw margin outputs
-                if raw < 0.0 or raw > 1.0:
-                    meta_prob = 1.0 / (1.0 + math.exp(-raw))
-                else:
-                    meta_prob = raw
+                raw = float(self.meta_brain['booster'].predict(dmat, output_margin=True)[0])
+                meta_prob = 1.0 / (1.0 + math.exp(-raw))
             else:
                 meta_prob = self.meta_brain['classifier'].predict_proba(vec)[0][1]
 
