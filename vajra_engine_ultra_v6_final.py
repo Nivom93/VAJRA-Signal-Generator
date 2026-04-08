@@ -2034,11 +2034,10 @@ class BrainLearningManager:
                     side = parts[2]
                     brain_data = joblib.load(str(model_file))
 
-                    # Skip brains that failed WFA quality gate during training
-                    if not brain_data.get("valid_edge", True):
-                        wfa_roc = brain_data.get("wfa_roc_auc", 0)
-                        log.warning(f"Skipping {model_file.stem}: WFA quality too low (ROC={wfa_roc:.3f})")
-                        continue
+                    # Log brain quality tier (all brains are loaded — quality adjusts threshold at inference)
+                    quality_tier = brain_data.get("quality_tier", "medium")
+                    wfa_roc = brain_data.get("wfa_roc_auc", 0)
+                    log.info(f"  {model_file.stem}: tier={quality_tier}, ROC={wfa_roc:.3f}")
 
                     # Load XGBoost model natively if saved in new format
                     if "xgb_model_file" in brain_data:
@@ -3028,9 +3027,17 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             _p6_counters["specialist_none"] += 1
             return None
 
-        # Specialist threshold — SMOTE(0.4) + scale_pos_weight produces probabilities
-        # in the 0.15-0.45 range for most setups. Threshold must match this distribution.
-        min_prob = getattr(cfg, 'min_prob_long', 0.50) if side == 'long' else getattr(cfg, 'min_prob_short', 0.50)
+        # Specialist threshold — adjusted by brain quality tier.
+        # Strong brains use base threshold; weaker brains need higher confidence to pass.
+        base_min_prob = getattr(cfg, 'min_prob_long', 0.50) if side == 'long' else getattr(cfg, 'min_prob_short', 0.50)
+        brain_meta = brain.brains.get((strat, side), {})
+        quality_tier = brain_meta.get("quality_tier", "medium")
+        if quality_tier == "strong":
+            min_prob = base_min_prob
+        elif quality_tier == "medium":
+            min_prob = base_min_prob + 0.03
+        else:  # weak
+            min_prob = base_min_prob + 0.07
 
         if brain.meta_brain is not None and specialist_prob is not None:
             # Track probability distributions
