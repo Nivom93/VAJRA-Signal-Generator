@@ -2078,10 +2078,38 @@ class BrainLearningManager:
         try:
             vec = self._build_vec(side, base, adv, iExec, px, pExec, b['feature_names'])
             vec = np.clip(np.nan_to_num(vec, nan=0.0), -1e10, 1e10).astype(np.float32)
+
+            # One-time feature match diagnostic
+            if not getattr(self, '_feature_diag_done', False):
+                self._feature_diag_done = True
+                d = {**base}
+                for k, v in adv.items():
+                    if hasattr(v, '__getitem__') and len(v) > iExec:
+                        d[k] = float(v[iExec])
+                d["side"] = 1.0
+                d["pos_vs_swing_h"] = 0.0
+                d["pos_vs_swing_l"] = 0.0
+                d["dist_to_mtf_ema200_pct"] = 0.0
+                fnames = b['feature_names']
+                found = sum(1 for n in fnames if n in d and d[n] != 0.0)
+                missing = [n for n in fnames if n not in d]
+                zeros = [n for n in fnames if n in d and d[n] == 0.0]
+                log.info(f"FEATURE DIAGNOSTIC ({strategy}_{side}): {found}/{len(fnames)} features have non-zero values")
+                if missing:
+                    log.info(f"  MISSING features (defaulting to 0.0): {missing[:20]}")
+                non_zero_vals = [(n, float(vec[0][i])) for i, n in enumerate(fnames) if abs(vec[0][i]) > 1e-9]
+                log.info(f"  Non-zero feature values (first 10): {non_zero_vals[:10]}")
+
             if "booster" in b:
                 import xgboost as xgb
                 dmat = xgb.DMatrix(vec, feature_names=b['feature_names'])
-                prob = float(b['booster'].predict(dmat)[0])
+                raw = float(b['booster'].predict(dmat)[0])
+                # Safeguard: if XGBoost returns raw margins (log-odds) instead of
+                # probabilities, apply sigmoid. Raw margins can be negative or >1.
+                if raw < 0.0 or raw > 1.0:
+                    prob = 1.0 / (1.0 + math.exp(-raw))
+                else:
+                    prob = raw
             else:
                 prob = b['classifier'].predict_proba(vec)[0][1]
             return prob
@@ -2170,7 +2198,12 @@ class BrainLearningManager:
             if "booster" in self.meta_brain:
                 import xgboost as xgb
                 dmat = xgb.DMatrix(vec, feature_names=meta_fnames)
-                meta_prob = float(self.meta_brain['booster'].predict(dmat)[0])
+                raw = float(self.meta_brain['booster'].predict(dmat)[0])
+                # Sigmoid safeguard for raw margin outputs
+                if raw < 0.0 or raw > 1.0:
+                    meta_prob = 1.0 / (1.0 + math.exp(-raw))
+                else:
+                    meta_prob = raw
             else:
                 meta_prob = self.meta_brain['classifier'].predict_proba(vec)[0][1]
 
