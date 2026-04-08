@@ -9,13 +9,15 @@ def _strategy_overrides(cfg):
     cfg.use_dca = False
     cfg.dca_max_safety_orders = 0
 
-    # Pure Signal Generation (No Mid-Trade Alterations)
+    # Pure Signal Generation — raw TP/SL outcome only.
+    # No trade management overlays (BE, trailing, time decay) so we measure
+    # true signal quality.  MUST match vajra_export_events.py for train/test parity.
     cfg.execution_style = 'market'
     cfg.pullback_atr_mult = 0.0
-    cfg.be_trigger_r = 1.0                 # Break-even at 1R to protect capital
-    cfg.trailing_stop_trigger_r = 1.5      # Trail after 1.5R to lock profits
+    cfg.be_trigger_r = 0.0                 # No break-even — raw signal outcome
+    cfg.trailing_stop_trigger_r = 0.0      # No trailing — raw signal outcome
     cfg.dynamic_tp_enabled = False         # Enforce strict structural targets
-    cfg.time_in_force_decay = 96           # 96 bars (24h on 15m) — setups need time to develop
+    cfg.time_in_force_decay = 0            # No time decay — let signal resolve to TP or SL
 
     # Structural Geometry (balanced precision + frequency)
     cfg.min_rr = 1.5            # 1.5R minimum — captures many valid setups missed at 2.2
