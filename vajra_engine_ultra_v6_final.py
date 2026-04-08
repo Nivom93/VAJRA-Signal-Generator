@@ -1888,7 +1888,8 @@ def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, b
     rsi_min_14 = pd.Series(pExec.rsi14).rolling(14, min_periods=1).min().to_numpy()
     rsi_max_14 = pd.Series(pExec.rsi14).rolling(14, min_periods=1).max().to_numpy()
     rsi_range = rsi_max_14 - rsi_min_14
-    f['stoch_rsi_k'] = np.where(rsi_range > 1e-9, (pExec.rsi14 - rsi_min_14) / rsi_range * 100.0, 50.0)
+    safe_rsi_range = np.where(rsi_range > 1e-9, rsi_range, 1.0)  # avoid divide-by-zero warning
+    f['stoch_rsi_k'] = np.where(rsi_range > 1e-9, (pExec.rsi14 - rsi_min_14) / safe_rsi_range * 100.0, 50.0)
     f['stoch_rsi_d'] = _ema_np(f['stoch_rsi_k'], 3)
 
     # ---------------------------------------------------------
@@ -2032,6 +2033,12 @@ class BrainLearningManager:
                     strat = parts[1]
                     side = parts[2]
                     brain_data = joblib.load(str(model_file))
+
+                    # Skip brains that failed WFA quality gate during training
+                    if not brain_data.get("valid_edge", True):
+                        wfa_roc = brain_data.get("wfa_roc_auc", 0)
+                        log.warning(f"Skipping {model_file.stem}: WFA quality too low (ROC={wfa_roc:.3f})")
+                        continue
 
                     # Load XGBoost model natively if saved in new format
                     if "xgb_model_file" in brain_data:
