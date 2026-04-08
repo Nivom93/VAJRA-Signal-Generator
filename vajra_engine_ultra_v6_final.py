@@ -2998,48 +2998,52 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     if not candidates: return None
 
     # ==========================================================
-    # PHASE 4C: MARKET STRUCTURE TREND ALIGNMENT FILTER
+    # PHASE 4C: MARKET STRUCTURE CONTEXT SCORING
     # ==========================================================
-    # Trend-following setups must align with the exec-TF structural trend.
-    # Reversal setups (ALPHA, GAMMA, EPSILON, KAPPA, ETA) are allowed against
-    # structure only when they have strong confluence (>= 3) to confirm the reversal.
-    # This prevents taking trend trades into opposing market structure.
-    struct_trend = base.get("struct_trend", 0)  # +1 bullish, -1 bearish, 0 ranging
+    # Instead of hard-blocking counter-structure trades (which killed 86% of setups),
+    # we ADJUST confluence scores: with-trend gets a bonus, counter-trend gets a penalty.
+    # Only truly suicidal trades get dropped (trend-following setup against strong HTF trend).
+    struct_trend = base.get("struct_trend", 0)     # +1 bullish HH/HL, -1 bearish LH/LL, 0 ranging
     htf_struct = base.get("htf_struct_trend", 0)
+    struct_strength = base.get("struct_strength", 0)  # 0-10, higher = stronger trend
 
-    _REVERSAL_SETUPS = {"ALPHA", "GAMMA", "EPSILON", "KAPPA", "ETA", "IOTA", "BETA"}
-    _TREND_SETUPS = {"ZETA", "LAMBDA", "THETA"}
-    min_reversal_confluence = getattr(cfg, 'min_reversal_confluence', 3.0)
+    _TREND_SETUPS = {"ZETA", "LAMBDA"}
 
-    filtered = []
+    scored = []
     for cand in candidates:
         cand_name, cand_side, cand_desc, cand_conf = cand
         cand_strat = cand_name.split("_")[0]
+        adj = 0.0
 
-        # Check structural alignment
-        if cand_side == "long" and struct_trend < 0:
-            # Long trade against bearish structure
-            if cand_strat in _TREND_SETUPS:
-                continue  # Drop trend-following longs in bearish structure
-            if cand_strat in _REVERSAL_SETUPS and cand_conf < min_reversal_confluence:
-                continue  # Reversal needs strong confluence to fight structure
-        elif cand_side == "short" and struct_trend > 0:
-            # Short trade against bullish structure
-            if cand_strat in _TREND_SETUPS:
-                continue
-            if cand_strat in _REVERSAL_SETUPS and cand_conf < min_reversal_confluence:
-                continue
+        # ── Exec-TF structure alignment ──
+        if cand_side == "long":
+            if struct_trend > 0:
+                adj += 1.0   # With bullish structure → boost
+            elif struct_trend < 0:
+                adj -= 1.0   # Against bearish structure → penalize
+                # Hard-drop only: trend-following setup against STRONG bearish structure
+                if cand_strat in _TREND_SETUPS and struct_strength >= 3:
+                    continue
+        else:  # short
+            if struct_trend < 0:
+                adj += 1.0   # With bearish structure → boost
+            elif struct_trend > 0:
+                adj -= 1.0   # Against bullish structure → penalize
+                if cand_strat in _TREND_SETUPS and struct_strength >= 3:
+                    continue
 
-        # HTF structure disagreement: require extra confluence for any counter-HTF trade
-        if cand_side == "long" and htf_struct < 0 and cand_conf < 2:
-            continue
-        if cand_side == "short" and htf_struct > 0 and cand_conf < 2:
-            continue
+        # ── HTF structure alignment ──
+        if cand_side == "long":
+            if htf_struct > 0:  adj += 0.5
+            elif htf_struct < 0: adj -= 0.5
+        else:
+            if htf_struct < 0:  adj += 0.5
+            elif htf_struct > 0: adj -= 0.5
 
-        filtered.append(cand)
+        scored.append((cand_name, cand_side, cand_desc, cand_conf + adj))
 
-    if not filtered: return None
-    candidates = filtered
+    if not scored: return None
+    candidates = scored
 
     # Pick the candidate with the highest confluence score.
     # On ties, structural setups (ALPHA/GAMMA/DELTA) rank higher than momentum setups.
@@ -3048,12 +3052,13 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     candidates.sort(key=lambda c: (c[3], _struct_priority.get(c[0].split("_")[0], 0)), reverse=True)
     setup_type, side, logic_desc, confluence = candidates[0]
 
-    # Enrich the logic description with confluence info
+    # Enrich the logic description with structure context
     conf_reasons = bull_struct_reasons if side == "long" else bear_struct_reasons
     struct_label = "BULLISH" if struct_trend > 0 else ("BEARISH" if struct_trend < 0 else "RANGING")
-    logic_desc += f" STRUCT={struct_label}."
+    htf_label = "HTF_BULL" if htf_struct > 0 else ("HTF_BEAR" if htf_struct < 0 else "HTF_FLAT")
+    logic_desc += f" STRUCT={struct_label} {htf_label}."
     if confluence >= 2:
-        logic_desc += f" CONFLUENCE {confluence:.0f}× [{'+'.join(conf_reasons)}]."
+        logic_desc += f" CONFLUENCE {confluence:.1f}× [{'+'.join(conf_reasons)}]."
 
     if not setup_type: return None
 
@@ -3101,22 +3106,22 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         risk_distance = entry_target - sl
 
         # ── Structure-blocking filter ──
-        # If resistance is within 1 ATR above entry, the trade has no room to run.
-        sr_block_dist = current_atr * getattr(cfg, 'sr_block_atr', 1.0)
+        # Only block when nearest resistance makes the trade truly impossible (< 1.0 R:R).
+        # Using min_rr here was too aggressive — it killed valid trades in congestion zones.
         if resistance_above:
             nearest_res_price = resistance_above[0][1]
-            if nearest_res_price - entry_target < sr_block_dist:
-                # Check if we can still achieve min R:R despite the nearby resistance
-                blocked_rr = (nearest_res_price - entry_target) / risk_distance
-                if blocked_rr < getattr(cfg, 'min_rr', 2.0):
-                    return None  # Structure blocks the trade
+            blocked_rr = (nearest_res_price - entry_target) / risk_distance
+            if blocked_rr < 1.0:
+                return None  # Resistance too close — impossible R:R
 
         # ── Structure-aware TP targeting ──
-        # Use the full S/R level book as TP candidates instead of a hardcoded list.
+        # Use the full S/R level book as TP candidates.
         # Pick the nearest structural level above entry that gives >= min_rr.
+        # If no structural level qualifies, fall back to ATR-based TP.
         possible_tps = [lvl for _, lvl in resistance_above]
-        if not possible_tps:
-            possible_tps = [entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 4.0))]
+        # Always include ATR fallback so we don't reject trades when S/R book is sparse
+        atr_fallback_tp = entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 4.0))
+        possible_tps.append(atr_fallback_tp)
 
         selected_tp = None
         for t in possible_tps:
@@ -3149,18 +3154,16 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         risk_distance = sl - entry_target
 
         # ── Structure-blocking filter ──
-        sr_block_dist = current_atr * getattr(cfg, 'sr_block_atr', 1.0)
         if support_below:
             nearest_sup_price = support_below[0][1]
-            if entry_target - nearest_sup_price < sr_block_dist:
-                blocked_rr = (entry_target - nearest_sup_price) / risk_distance
-                if blocked_rr < getattr(cfg, 'min_rr', 2.0):
-                    return None  # Structure blocks the trade
+            blocked_rr = (entry_target - nearest_sup_price) / risk_distance
+            if blocked_rr < 1.0:
+                return None  # Support too close — impossible R:R
 
         # ── Structure-aware TP targeting ──
         possible_tps = [lvl for _, lvl in support_below]
-        if not possible_tps:
-            possible_tps = [entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 4.0))]
+        atr_fallback_tp = entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 4.0))
+        possible_tps.append(atr_fallback_tp)
 
         selected_tp = None
         for t in possible_tps:
