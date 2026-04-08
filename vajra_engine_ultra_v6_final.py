@@ -3105,21 +3105,18 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         if sl >= entry_target: return None
         risk_distance = entry_target - sl
 
-        # ── Structure-aware TP targeting ──
-        # Use the full S/R level book as TP candidates.
-        # Pick the nearest structural level above entry that gives >= min_rr.
-        # If no structural level qualifies, fall back to ATR-based TP.
+        # ── Structure-only TP targeting ──
+        # On 15m, TP must be a real structural level (next resistance).
+        # No ATR math fallback — if structure doesn't give a target, don't trade.
+        # Lower R:R thresholds (1.5 min, 2.5 max) fit 15m where high R:R rarely hits.
         possible_tps = [lvl for _, lvl in resistance_above]
-        # Always include ATR fallback so we don't reject trades when S/R book is sparse
-        atr_fallback_tp = entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 4.0))
-        possible_tps.append(atr_fallback_tp)
 
         selected_tp = None
         for t in possible_tps:
             curr_rr = (t - entry_target) / risk_distance
-            if curr_rr >= getattr(cfg, 'min_rr', 2.0):
-                if curr_rr > getattr(cfg, 'atr_mult_tp', 3.5):
-                    selected_tp = entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 3.5))
+            if curr_rr >= getattr(cfg, 'min_rr', 1.5):
+                if curr_rr > getattr(cfg, 'max_struct_rr', 2.5):
+                    selected_tp = entry_target + (risk_distance * getattr(cfg, 'max_struct_rr', 2.5))
                 else:
                     selected_tp = t
                 break
@@ -3144,17 +3141,15 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         if sl <= entry_target: return None
         risk_distance = sl - entry_target
 
-        # ── Structure-aware TP targeting ──
+        # ── Structure-only TP targeting ──
         possible_tps = [lvl for _, lvl in support_below]
-        atr_fallback_tp = entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 4.0))
-        possible_tps.append(atr_fallback_tp)
 
         selected_tp = None
         for t in possible_tps:
             curr_rr = (entry_target - t) / risk_distance
-            if curr_rr >= getattr(cfg, 'min_rr', 2.0):
-                if curr_rr > getattr(cfg, 'atr_mult_tp', 3.5):
-                    selected_tp = entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 3.5))
+            if curr_rr >= getattr(cfg, 'min_rr', 1.5):
+                if curr_rr > getattr(cfg, 'max_struct_rr', 2.5):
+                    selected_tp = entry_target - (risk_distance * getattr(cfg, 'max_struct_rr', 2.5))
                 else:
                     selected_tp = t
                 break
