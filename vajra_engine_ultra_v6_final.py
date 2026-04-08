@@ -2097,6 +2097,8 @@ class BrainLearningManager:
                 log.info(f"FEATURE DIAGNOSTIC ({strategy}_{side}): {found}/{len(fnames)} features have non-zero values")
                 if missing:
                     log.info(f"  MISSING features (defaulting to 0.0): {missing[:20]}")
+                if zeros:
+                    log.info(f"  ZERO-valued features ({len(zeros)}): {zeros[:20]}")
                 non_zero_vals = [(n, float(vec[0][i])) for i, n in enumerate(fnames) if abs(vec[0][i]) > 1e-9]
                 log.info(f"  Non-zero feature values (first 10): {non_zero_vals[:10]}")
 
@@ -2222,6 +2224,12 @@ class BrainLearningManager:
             probs[f"brain_{strat_key}_{side_key}"] = prob if prob is not None else -1.0
         return probs
 
+    # Features that leaked post-hoc trade info into training data.
+    # Old models still list them — force a neutral value so they don't
+    # push every prediction into the negative branch (bars_open was always
+    # >0 in training but 0/missing at inference → OOD → near-zero probs).
+    _LEAKED_FEATURE_DEFAULTS = {"bars_open": -1.0}
+
     def _build_vec(self, side, b, a, iExec, px, pExec, fnames):
         d = {**b}
         for k, v in a.items():
@@ -2239,6 +2247,13 @@ class BrainLearningManager:
             "dist_to_mtf_ema200_pct": (px-a['mtf_ema200_arr'][iExec])/px*100 if px and 'mtf_ema200_arr' in a else 0.0,
             "side": 1.0 if side=="long" else 0.0
         })
+
+        # Neutralize leaked features in old models (use XGBoost missing-value
+        # sentinel so trees route via the default direction, not the 0-branch).
+        for lf, default_val in self._LEAKED_FEATURE_DEFAULTS.items():
+            if lf in fnames and lf not in d:
+                d[lf] = default_val
+
         return np.array([d.get(n, 0.0) for n in fnames]).reshape(1,-1)
 
 class TradeManager:

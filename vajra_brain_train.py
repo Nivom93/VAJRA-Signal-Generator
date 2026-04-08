@@ -86,6 +86,9 @@ def is_feature_column(df: pd.DataFrame, col: str, extra_exclude: Set[str]) -> bo
         # --- ABSOLUTE DERIVATIVES (Scale with price — use normalized versions instead) ---
         "atr14_L", "atr7_L", "cvd",
 
+        # --- POST-HOC LEAKAGE (only known after trade closes, always 0 at entry) ---
+        "bars_open",
+
         # --- STRING/NON-NUMERIC FIELDS ---
         "bull_confluence_reasons", "bear_confluence_reasons",
         "market_regime"
@@ -295,13 +298,17 @@ def main(argv=None):
                 X_te = X_te_full[:, selector.support_]
 
                 # Apply SMOTE oversampling on training fold (not validation!)
+                smote_applied = False
                 if not args.no_smote:
+                    X_tr_before = X_tr
                     X_tr, y_tr = _apply_smote(X_tr, y_tr, random_state=42 + i)
+                    smote_applied = len(X_tr) != len(X_tr_before)
 
-                # Use ORIGINAL class weight (pre-SMOTE) — SMOTE already balances the
-                # data, so recalculating weight on SMOTE output double-corrects and
-                # distorts probability calibration.
-                fold_scale_weight = scale_weight
+                # When SMOTE rebalanced the data, it already handles the class
+                # imbalance — adding scale_pos_weight on top double-corrects and
+                # warps probability calibration (pushes outputs to extremes).
+                # Only use scale_pos_weight when SMOTE was NOT applied.
+                fold_scale_weight = 1.0 if smote_applied else scale_weight
 
                 clf = xgb.XGBClassifier(
                     n_estimators=args.n_estimators,
@@ -390,12 +397,15 @@ def main(argv=None):
 
             # Apply SMOTE on the selected features for final training
             X_final_train, y_final_train = X_all_sel, y_all
+            final_smote_applied = False
             if not args.no_smote:
+                X_before_smote = X_final_train
                 X_final_train, y_final_train = _apply_smote(X_all_sel, y_all, random_state=42)
+                final_smote_applied = len(X_final_train) != len(X_before_smote)
 
-            # Use ORIGINAL class weight (pre-SMOTE) — SMOTE already balances data,
-            # recalculating on SMOTE output double-corrects and distorts probabilities.
-            final_weight = scale_weight
+            # When SMOTE rebalanced the data, it handles class imbalance —
+            # scale_pos_weight on top double-corrects and warps calibration.
+            final_weight = 1.0 if final_smote_applied else scale_weight
 
             if best_tuned_params:
                 final_model = xgb.XGBClassifier(
