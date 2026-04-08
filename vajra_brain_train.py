@@ -269,10 +269,13 @@ def main(argv=None):
             n_samples = len(X_all)
             # Adaptive folds: fewer folds for small datasets (min 2, scale with data)
             actual_folds = min(args.wfa_folds, max(2, n_samples // 25))
-            # Gap must be large enough that test-set trades don't share recent
-            # structural context with training trades.  On 15m data with trades
-            # potentially hours apart, 3-15 events is far too small.
-            actual_gap = max(20, min(100, n_samples // 8))
+            # Gap scales with dataset size — large enough to prevent context leakage,
+            # but small enough that TimeSeriesSplit doesn't run out of samples.
+            # Formula: each fold needs at least (test_size + gap) samples, plus training data.
+            # test_size ≈ n_samples / (n_splits + 1), so total need ≈ (n_splits+1)*(test+gap).
+            # We ensure gap doesn't exceed what the dataset can support.
+            max_feasible_gap = max(1, (n_samples // (actual_folds + 1)) - 5)
+            actual_gap = min(max(5, n_samples // 8), max_feasible_gap)
             log.info(f"Running Walk-Forward Analysis ({actual_folds} folds) with dynamic per-fold RFE Feature Selection...")
 
             if HAS_SMOTE and not args.no_smote:
