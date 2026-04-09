@@ -2025,8 +2025,10 @@ class BrainLearningManager:
         for model_file in p.glob("brain_*.joblib"):
             try:
                 parts = model_file.stem.split("_")
-                # Skip the meta-brain file during specialist loading
+                # Skip the meta-brain file and calibrator files during specialist loading
                 if len(parts) >= 3 and parts[1] == "META":
+                    continue
+                if "calibrator" in model_file.stem:
                     continue
                 # brain_{STRATEGY}_{SIDE}.joblib
                 if len(parts) >= 3:
