@@ -2025,8 +2025,10 @@ class BrainLearningManager:
         for model_file in p.glob("brain_*.joblib"):
             try:
                 parts = model_file.stem.split("_")
-                # Skip the meta-brain file during specialist loading
+                # Skip the meta-brain file and calibrator files during specialist loading
                 if len(parts) >= 3 and parts[1] == "META":
+                    continue
+                if "calibrator" in model_file.stem:
                     continue
                 # brain_{STRATEGY}_{SIDE}.joblib
                 if len(parts) >= 3:
@@ -2917,29 +2919,32 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     if not candidates: return None
 
     # ==========================================================
-    # PHASE 4C: MARKET STRUCTURE CONTEXT (informational only)
+    # PHASE 4C: HIGH-CONFIDENCE SIGNAL GATE
     # ==========================================================
-    # Structure info is passed as FEATURES to the brain (struct_trend, struct_strength,
-    # htf_struct_trend, etc.) — the brain learns when structure alignment matters.
-    # We do NOT adjust confluence scores or drop candidates here, because doing so
-    # changes the event pipeline and degrades brain training quality.
+    # As a signal generator, quality > quantity. Only emit signals when multiple
+    # structural factors converge. Single-factor setups are noise.
     struct_trend = base.get("struct_trend", 0)
     htf_struct = base.get("htf_struct_trend", 0)
 
     # Pick the candidate with the highest confluence score.
-    # On ties, structural setups (ALPHA/GAMMA/DELTA) rank higher than momentum setups.
     _struct_priority = {"ALPHA": 10, "GAMMA": 9, "IOTA": 8, "DELTA": 7, "KAPPA": 6,
                         "EPSILON": 5, "BETA": 4, "ETA": 3, "ZETA": 2, "THETA": 1, "LAMBDA": 0}
     candidates.sort(key=lambda c: (c[3], _struct_priority.get(c[0].split("_")[0], 0)), reverse=True)
     setup_type, side, logic_desc, confluence = candidates[0]
+
+    # Minimum confluence gate — require multiple structural factors to converge.
+    # A signal with only 1-2 factors (e.g. just "OB" or "WICK+FVG") is not high enough
+    # confidence for a signal generator. Require at least 3 independent confirmations.
+    min_confluence = getattr(cfg, 'min_confluence', 3.0)
+    if confluence < min_confluence:
+        return None
 
     # Enrich the logic description with structure context
     conf_reasons = bull_struct_reasons if side == "long" else bear_struct_reasons
     struct_label = "BULLISH" if struct_trend > 0 else ("BEARISH" if struct_trend < 0 else "RANGING")
     htf_label = "HTF_BULL" if htf_struct > 0 else ("HTF_BEAR" if htf_struct < 0 else "HTF_FLAT")
     logic_desc += f" STRUCT={struct_label} {htf_label}."
-    if confluence >= 2:
-        logic_desc += f" CONFLUENCE {confluence:.0f}× [{'+'.join(conf_reasons)}]."
+    logic_desc += f" CONFLUENCE {confluence:.0f}× [{'+'.join(conf_reasons)}]."
 
     if not setup_type: return None
 

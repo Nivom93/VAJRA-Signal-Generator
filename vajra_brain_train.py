@@ -203,11 +203,11 @@ def main(argv=None):
     ap.add_argument("--events", nargs="+", required=True)
     ap.add_argument("--brains-dir", required=True, help="Directory to save individual strategy brains")
     ap.add_argument("--min-win-r", type=float, default=0.0)
-    ap.add_argument("--n-estimators", type=int, default=300)
-    ap.add_argument("--learning-rate", type=float, default=0.1)
-    ap.add_argument("--max-depth", type=int, default=7)
+    ap.add_argument("--n-estimators", type=int, default=200)
+    ap.add_argument("--learning-rate", type=float, default=0.08)
+    ap.add_argument("--max-depth", type=int, default=6)
     ap.add_argument("--reg-alpha", type=float, default=0.1)
-    ap.add_argument("--reg-lambda", type=float, default=2.0)
+    ap.add_argument("--reg-lambda", type=float, default=3.0)
     ap.add_argument("--max-features", type=int, default=130, help="Number of features to keep after RFE")
     ap.add_argument("--exclude-cols", type=str, default="")
     ap.add_argument("--weight-decay", type=float, default=0.999)
@@ -418,10 +418,15 @@ def main(argv=None):
                 random_state=42,
                 objective='binary:logistic',
                 eval_metric='logloss',
-                scale_pos_weight=final_weight
+                scale_pos_weight=final_weight,
+                early_stopping_rounds=20
             )
 
-            final_model.fit(X_final_train, y_final_train)
+            # Split off 15% as validation for early stopping to prevent overfitting
+            val_split = max(10, int(len(X_final_train) * 0.15))
+            X_fit, X_val = X_final_train[:-val_split], X_final_train[-val_split:]
+            y_fit, y_val = y_final_train[:-val_split], y_final_train[-val_split:]
+            final_model.fit(X_fit, y_fit, eval_set=[(X_val, y_val)], verbose=False)
 
             # Probability calibration — raw XGBoost probabilities are poorly calibrated.
             # Isotonic calibration on cross-validated predictions produces honest probabilities
