@@ -2519,13 +2519,13 @@ def _build_sr_levels(side, entry, base, pExec, iExec, htf_sh_val, htf_sl_val, mt
     if mtf_sh_val > 0: all_levels.append(("MTF_SH", mtf_sh_val))
     if mtf_sl_val > 0: all_levels.append(("MTF_SL", mtf_sl_val))
 
-    # Order block zones — bearish OBs act as resistance, bullish OBs as support
+    # Order block zones — bearish OB top = resistance, bullish OB bottom = support
     ob_bear_bot = base.get("ob_bear_bot", 0)
     ob_bear_top = base.get("ob_bear_top", 0)
     ob_bull_top = base.get("ob_bull_top", 0)
     ob_bull_bot = base.get("ob_bull_bot", 0)
-    if ob_bear_bot > 0: all_levels.append(("OB_BEAR", ob_bear_bot))
-    if ob_bull_top > 0: all_levels.append(("OB_BULL", ob_bull_top))
+    if ob_bear_top > 0: all_levels.append(("OB_BEAR", ob_bear_top))
+    if ob_bull_bot > 0: all_levels.append(("OB_BULL", ob_bull_bot))
 
     # FVG centers — unfilled gaps act as magnets / S/R
     fvg_bear = base.get("fvg_bear", 0)
@@ -3106,17 +3106,18 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         risk_distance = entry_target - sl
 
         # ── Structure-only TP targeting ──
-        # On 15m, TP must be a real structural level (next resistance).
+        # TP must be a real structural level (next resistance from S/R book).
         # No ATR math fallback — if structure doesn't give a target, don't trade.
-        # Lower R:R thresholds (1.5 min, 2.5 max) fit 15m where high R:R rarely hits.
+        # min_rr=2.0 ensures each win covers ~2 losses at 30% WR.
+        # max_struct_rr=3.0 caps unrealistic targets on lower timeframes.
         possible_tps = [lvl for _, lvl in resistance_above]
 
         selected_tp = None
         for t in possible_tps:
             curr_rr = (t - entry_target) / risk_distance
-            if curr_rr >= getattr(cfg, 'min_rr', 1.5):
-                if curr_rr > getattr(cfg, 'max_struct_rr', 2.5):
-                    selected_tp = entry_target + (risk_distance * getattr(cfg, 'max_struct_rr', 2.5))
+            if curr_rr >= getattr(cfg, 'min_rr', 2.0):
+                if curr_rr > getattr(cfg, 'max_struct_rr', 3.0):
+                    selected_tp = entry_target + (risk_distance * getattr(cfg, 'max_struct_rr', 3.0))
                 else:
                     selected_tp = t
                 break
@@ -3147,9 +3148,9 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         selected_tp = None
         for t in possible_tps:
             curr_rr = (entry_target - t) / risk_distance
-            if curr_rr >= getattr(cfg, 'min_rr', 1.5):
-                if curr_rr > getattr(cfg, 'max_struct_rr', 2.5):
-                    selected_tp = entry_target - (risk_distance * getattr(cfg, 'max_struct_rr', 2.5))
+            if curr_rr >= getattr(cfg, 'min_rr', 2.0):
+                if curr_rr > getattr(cfg, 'max_struct_rr', 3.0):
+                    selected_tp = entry_target - (risk_distance * getattr(cfg, 'max_struct_rr', 3.0))
                 else:
                     selected_tp = t
                 break
