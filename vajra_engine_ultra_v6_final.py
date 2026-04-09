@@ -2899,52 +2899,14 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     if not candidates: return None
 
     # ==========================================================
-    # PHASE 4C: MARKET STRUCTURE CONTEXT SCORING
+    # PHASE 4C: MARKET STRUCTURE CONTEXT (informational only)
     # ==========================================================
-    # Instead of hard-blocking counter-structure trades (which killed 86% of setups),
-    # we ADJUST confluence scores: with-trend gets a bonus, counter-trend gets a penalty.
-    # Only truly suicidal trades get dropped (trend-following setup against strong HTF trend).
-    struct_trend = base.get("struct_trend", 0)     # +1 bullish HH/HL, -1 bearish LH/LL, 0 ranging
+    # Structure info is passed as FEATURES to the brain (struct_trend, struct_strength,
+    # htf_struct_trend, etc.) — the brain learns when structure alignment matters.
+    # We do NOT adjust confluence scores or drop candidates here, because doing so
+    # changes the event pipeline and degrades brain training quality.
+    struct_trend = base.get("struct_trend", 0)
     htf_struct = base.get("htf_struct_trend", 0)
-    struct_strength = base.get("struct_strength", 0)  # 0-10, higher = stronger trend
-
-    _TREND_SETUPS = {"ZETA", "LAMBDA"}
-
-    scored = []
-    for cand in candidates:
-        cand_name, cand_side, cand_desc, cand_conf = cand
-        cand_strat = cand_name.split("_")[0]
-        adj = 0.0
-
-        # ── Exec-TF structure alignment ──
-        if cand_side == "long":
-            if struct_trend > 0:
-                adj += 1.0   # With bullish structure → boost
-            elif struct_trend < 0:
-                adj -= 1.0   # Against bearish structure → penalize
-                # Hard-drop only: trend-following setup against STRONG bearish structure
-                if cand_strat in _TREND_SETUPS and struct_strength >= 3:
-                    continue
-        else:  # short
-            if struct_trend < 0:
-                adj += 1.0   # With bearish structure → boost
-            elif struct_trend > 0:
-                adj -= 1.0   # Against bullish structure → penalize
-                if cand_strat in _TREND_SETUPS and struct_strength >= 3:
-                    continue
-
-        # ── HTF structure alignment ──
-        if cand_side == "long":
-            if htf_struct > 0:  adj += 0.5
-            elif htf_struct < 0: adj -= 0.5
-        else:
-            if htf_struct < 0:  adj += 0.5
-            elif htf_struct > 0: adj -= 0.5
-
-        scored.append((cand_name, cand_side, cand_desc, cand_conf + adj))
-
-    if not scored: return None
-    candidates = scored
 
     # Pick the candidate with the highest confluence score.
     # On ties, structural setups (ALPHA/GAMMA/DELTA) rank higher than momentum setups.
@@ -2959,7 +2921,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     htf_label = "HTF_BULL" if htf_struct > 0 else ("HTF_BEAR" if htf_struct < 0 else "HTF_FLAT")
     logic_desc += f" STRUCT={struct_label} {htf_label}."
     if confluence >= 2:
-        logic_desc += f" CONFLUENCE {confluence:.1f}× [{'+'.join(conf_reasons)}]."
+        logic_desc += f" CONFLUENCE {confluence:.0f}× [{'+'.join(conf_reasons)}]."
 
     if not setup_type: return None
 
