@@ -185,14 +185,14 @@ def _apply_smote(X_train, y_train, random_state=42):
     if pos_count < 6 or neg_count < 6:
         return X_train, y_train
 
-    # Only oversample to 40% of majority (avoid full balance which introduces too much noise)
-    target_ratio = min(0.4, pos_count / max(1, neg_count))
-    if target_ratio >= 0.35:
+    # Oversample to 50% of majority for better class balance
+    target_ratio = min(0.5, pos_count / max(1, neg_count))
+    if target_ratio >= 0.45:
         return X_train, y_train  # Already reasonably balanced
 
     try:
         k_neighbors = min(5, pos_count - 1)
-        smote = SMOTE(sampling_strategy=0.4, random_state=random_state, k_neighbors=k_neighbors)
+        smote = SMOTE(sampling_strategy=0.5, random_state=random_state, k_neighbors=k_neighbors)
         X_res, y_res = smote.fit_resample(X_train, y_train)
         return X_res, y_res
     except Exception:
@@ -203,11 +203,11 @@ def main(argv=None):
     ap.add_argument("--events", nargs="+", required=True)
     ap.add_argument("--brains-dir", required=True, help="Directory to save individual strategy brains")
     ap.add_argument("--min-win-r", type=float, default=0.0)
-    ap.add_argument("--n-estimators", type=int, default=100)
-    ap.add_argument("--learning-rate", type=float, default=0.05)
-    ap.add_argument("--max-depth", type=int, default=5)
+    ap.add_argument("--n-estimators", type=int, default=300)
+    ap.add_argument("--learning-rate", type=float, default=0.1)
+    ap.add_argument("--max-depth", type=int, default=7)
     ap.add_argument("--reg-alpha", type=float, default=0.1)
-    ap.add_argument("--reg-lambda", type=float, default=5.0)
+    ap.add_argument("--reg-lambda", type=float, default=2.0)
     ap.add_argument("--max-features", type=int, default=130, help="Number of features to keep after RFE")
     ap.add_argument("--exclude-cols", type=str, default="")
     ap.add_argument("--weight-decay", type=float, default=0.999)
@@ -273,13 +273,13 @@ def main(argv=None):
             # where test_size ≈ n_samples/(folds+1). Solve for max safe gap.
             test_size_est = max(5, n_samples // (actual_folds + 1))
             max_safe_gap = max(1, (n_samples - (actual_folds + 1) * test_size_est) // actual_folds)
-            actual_gap = min(max(3, n_samples // 10), max_safe_gap)
+            actual_gap = min(max(3, n_samples // 30), max_safe_gap)
             # Final safety: if gap still too large, reduce folds
             while actual_folds > 2 and n_samples < (actual_folds + 1) * test_size_est + actual_folds * actual_gap:
                 actual_folds -= 1
                 test_size_est = max(5, n_samples // (actual_folds + 1))
                 max_safe_gap = max(1, (n_samples - (actual_folds + 1) * test_size_est) // actual_folds)
-                actual_gap = min(max(3, n_samples // 10), max_safe_gap)
+                actual_gap = min(max(3, n_samples // 30), max_safe_gap)
             log.info(f"Running Walk-Forward Analysis ({actual_folds} folds) with dynamic per-fold RFE Feature Selection...")
 
             if HAS_SMOTE and not args.no_smote:
@@ -304,8 +304,8 @@ def main(argv=None):
                 max_by_ratio = max(8, n_samples_fold // 25)
                 dynamic_n_features_fold = max(8, min(max_by_ratio, int(np.sqrt(n_samples_fold) * 1.5), len(base_feature_names)))
 
-                # Dynamically run RFE on this specific fold
-                estimator_rfe = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
+                # Dynamically run RFE with a stronger estimator for reliable feature ranking
+                estimator_rfe = xgb.XGBClassifier(n_estimators=100, max_depth=5, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
                 selector = RFE(estimator_rfe, n_features_to_select=dynamic_n_features_fold, step=1)
                 selector = selector.fit(X_tr_full, y_tr)
 
@@ -323,7 +323,6 @@ def main(argv=None):
                 # When SMOTE rebalanced the data, it already handles the class
                 # imbalance — adding scale_pos_weight on top double-corrects and
                 # warps probability calibration (pushes outputs to extremes).
-                # Only use scale_pos_weight when SMOTE was NOT applied.
                 fold_scale_weight = 1.0 if smote_applied else scale_weight
 
                 clf = xgb.XGBClassifier(
@@ -337,33 +336,11 @@ def main(argv=None):
                     random_state=42,
                     objective='binary:logistic',
                     eval_metric='logloss',
-                    scale_pos_weight=fold_scale_weight
+                    scale_pos_weight=fold_scale_weight,
+                    early_stopping_rounds=15
                 )
 
-                # Hyperparameter Tuning Support (lowered min positive cases from 15 to 8)
-                if getattr(args, 'tune', False):
-                    orig_pos = np.sum(y_all[train_idx] == 1)  # Use original count for threshold
-                    if orig_pos >= 8:
-                        from sklearn.model_selection import RandomizedSearchCV
-                        param_dist = {
-                            'learning_rate': [0.01, 0.05, 0.1, 0.2],
-                            'max_depth': [1, 2, 3, 4, 5],
-                            'n_estimators': [50, 100, 150, 200],
-                            'reg_alpha': [0.1, 1.0, 5.0],
-                            'reg_lambda': [0.1, 1.0, 5.0],
-                            'subsample': [0.6, 0.8, 1.0],
-                            'colsample_bytree': [0.6, 0.8, 1.0]
-                        }
-                        cv_folds = min(3, max(2, len(X_tr) // 15))
-                        random_search = RandomizedSearchCV(clf, param_distributions=param_dist, n_iter=15, scoring='roc_auc', cv=cv_folds, random_state=42)
-                        random_search.fit(X_tr, y_tr)
-                        clf = random_search.best_estimator_
-                        best_tuned_params = random_search.best_params_
-                        log.info(f"    Fold {i+1} Tuned Params: {random_search.best_params_}")
-                    else:
-                        log.info(f"    Fold {i+1}: Skipped Tuning (Insufficient Positive Cases: {orig_pos} < 8)")
-
-                clf.fit(X_tr, y_tr)
+                clf.fit(X_tr, y_tr, eval_set=[(X_te, y_te)], verbose=False)
 
                 preds = clf.predict(X_te)
                 probs = clf.predict_proba(X_te)[:, 1] if len(np.unique(y_te)) > 1 else np.zeros_like(preds)
@@ -407,7 +384,7 @@ def main(argv=None):
             # When SMOTE rebalances the data for RFE, scale_pos_weight must be
             # 1.0 to avoid double-correcting (same fix as fold-level training).
             rfe_final_weight = 1.0 if rfe_smote_applied else scale_weight
-            estimator_rfe_final = xgb.XGBClassifier(n_estimators=25, max_depth=2, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=rfe_final_weight)
+            estimator_rfe_final = xgb.XGBClassifier(n_estimators=100, max_depth=5, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=rfe_final_weight)
             selector_final = RFE(estimator_rfe_final, n_features_to_select=dynamic_n_features_final, step=1)
 
             selector_final = selector_final.fit(X_all_for_rfe, y_all_for_rfe)
@@ -430,30 +407,37 @@ def main(argv=None):
             # scale_pos_weight on top double-corrects and warps calibration.
             final_weight = 1.0 if final_smote_applied else scale_weight
 
-            if best_tuned_params:
-                final_model = xgb.XGBClassifier(
-                    **best_tuned_params,
-                    random_state=42,
-                    objective='binary:logistic',
-                    eval_metric='logloss',
-                    scale_pos_weight=final_weight
-                )
-            else:
-                final_model = xgb.XGBClassifier(
-                    n_estimators=args.n_estimators,
-                    learning_rate=args.learning_rate,
-                    max_depth=args.max_depth,
-                    reg_alpha=args.reg_alpha,
-                    reg_lambda=args.reg_lambda,
-                    colsample_bytree=0.7,
-                    subsample=0.8,
-                    random_state=42,
-                    objective='binary:logistic',
-                    eval_metric='logloss',
-                    scale_pos_weight=final_weight
-                )
+            final_model = xgb.XGBClassifier(
+                n_estimators=args.n_estimators,
+                learning_rate=args.learning_rate,
+                max_depth=args.max_depth,
+                reg_alpha=args.reg_alpha,
+                reg_lambda=args.reg_lambda,
+                colsample_bytree=0.7,
+                subsample=0.8,
+                random_state=42,
+                objective='binary:logistic',
+                eval_metric='logloss',
+                scale_pos_weight=final_weight
+            )
 
             final_model.fit(X_final_train, y_final_train)
+
+            # Probability calibration — raw XGBoost probabilities are poorly calibrated.
+            # Isotonic calibration on cross-validated predictions produces honest probabilities
+            # so the brain can actually distinguish high-confidence from low-confidence trades.
+            try:
+                calib_folds = min(3, max(2, len(X_all_sel) // 50))
+                if FrozenEstimator is not None:
+                    calibrated = CalibratedClassifierCV(FrozenEstimator(final_model), method='isotonic', cv=calib_folds)
+                else:
+                    calibrated = CalibratedClassifierCV(final_model, method='isotonic', cv=calib_folds)
+                calibrated.fit(X_all_sel, y_all)
+                # Store calibrator alongside the model for inference
+                final_model._calibrator = calibrated
+                log.info(f"  Probability calibration: APPLIED (isotonic, {calib_folds} folds)")
+            except Exception as e:
+                log.warning(f"  Probability calibration FAILED ({e}), using raw probabilities")
 
             # Tiered quality system — all brains are saved with a quality tag
             # instead of hard-blocking on WFA metrics
@@ -491,8 +475,15 @@ def main(argv=None):
                 "smote_enabled": HAS_SMOTE and not args.no_smote,
                 "n_features_selected": len(selected_features),
                 "n_samples_total": n_samples_all,
-                "pos_neg_ratio": f"{pos_cases}/{neg_cases}"
+                "pos_neg_ratio": f"{pos_cases}/{neg_cases}",
+                "has_calibrator": hasattr(final_model, '_calibrator'),
             }
+
+            # Save calibrator alongside brain if it was successfully fitted
+            if hasattr(final_model, '_calibrator'):
+                calib_file = out_dir / f"brain_{strat_clean}_{side}_calibrator.joblib"
+                joblib.dump(final_model._calibrator, calib_file)
+                pipeline["calibrator_file"] = str(calib_file.name)
 
             out_file = out_dir / f"brain_{strat_clean}_{side}.joblib"
             joblib.dump(pipeline, out_file)
