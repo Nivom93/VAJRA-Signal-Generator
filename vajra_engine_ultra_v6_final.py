@@ -2497,71 +2497,6 @@ def plan_trade(cfg, f):
     # Backward compatibility stub
     return None
 
-def _build_sr_levels(side, entry, base, pExec, iExec, htf_sh_val, htf_sl_val, mtf_sh_val, mtf_sl_val, current_atr):
-    """Build sorted lists of structural resistance & support levels.
-
-    Returns MAJOR structural levels only (swing H/L, OBs, FVGs, QMs, HTF/MTF swings).
-    Minor levels (POC, VWAP, Asian range, Donchian, Fib ext, equal H/L) were creating
-    a ceiling too close to entry, capping R:R at ~2.0 and killing profitability.
-    Major levels are where price genuinely reacts — they make proper TP targets.
-    """
-    all_levels = []
-
-    # ── MAJOR structural levels (used for TP targeting) ──
-
-    # Swing highs/lows (execution TF) — primary structure
-    sh = pExec.last_sh[iExec] if iExec < len(pExec.last_sh) else 0
-    sl_val = pExec.last_sl[iExec] if iExec < len(pExec.last_sl) else 0
-    if sh > 0: all_levels.append(("SWING_H", sh))
-    if sl_val > 0: all_levels.append(("SWING_L", sl_val))
-
-    # HTF / MTF swing levels — higher-TF structure carries more weight
-    if htf_sh_val > 0: all_levels.append(("HTF_SH", htf_sh_val))
-    if htf_sl_val > 0: all_levels.append(("HTF_SL", htf_sl_val))
-    if mtf_sh_val > 0: all_levels.append(("MTF_SH", mtf_sh_val))
-    if mtf_sl_val > 0: all_levels.append(("MTF_SL", mtf_sl_val))
-
-    # Order block zones — institutional accumulation/distribution
-    ob_bear_top = base.get("ob_bear_top", 0)
-    ob_bull_bot = base.get("ob_bull_bot", 0)
-    if ob_bear_top > 0: all_levels.append(("OB_BEAR", ob_bear_top))
-    if ob_bull_bot > 0: all_levels.append(("OB_BULL", ob_bull_bot))
-
-    # FVG centers — unfilled gaps where price tends to return
-    fvg_bear = base.get("fvg_bear", 0)
-    fvg_bull = base.get("fvg_bull", 0)
-    if fvg_bear > 0: all_levels.append(("FVG_BEAR", fvg_bear))
-    if fvg_bull > 0: all_levels.append(("FVG_BULL", fvg_bull))
-
-    # QM levels — quasimodo reversal zones
-    qm_bear = base.get("qm_bear", 0)
-    qm_bull = base.get("qm_bull", 0)
-    if qm_bear > 0: all_levels.append(("QM_BEAR", qm_bear))
-    if qm_bull > 0: all_levels.append(("QM_BULL", qm_bull))
-
-    # Volume profile: VAH/VAL only (major boundaries where volume clusters)
-    vah = base.get("vah", 0)
-    val_lvl = base.get("val", 0)
-    if vah > 0: all_levels.append(("VAH", vah))
-    if val_lvl > 0: all_levels.append(("VAL", val_lvl))
-
-    # Deduplicate levels within 0.1 ATR of each other (keep first)
-    tol = current_atr * 0.1
-    unique = []
-    for lbl, lvl in sorted(all_levels, key=lambda x: x[1]):
-        if lvl <= 0:
-            continue
-        if not unique or abs(lvl - unique[-1][1]) > tol:
-            unique.append((lbl, lvl))
-
-    # Split into resistance (above entry) and support (below entry)
-    resistance_above = [(lbl, lvl) for lbl, lvl in unique if lvl > entry + tol]
-    support_below = [(lbl, lvl) for lbl, lvl in unique if lvl < entry - tol]
-    support_below.reverse()  # Closest support first
-
-    return resistance_above, support_below
-
-
 def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     px = base.get("price")
     if not px or not pExec: return None
@@ -3048,12 +2983,6 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
     strat_base = setup_type.split("_")[0]
 
-    # Build the full structural S/R level book from ALL known market structure
-    resistance_above, support_below = _build_sr_levels(
-        side, entry_target, base, pExec, iExec,
-        htf_sh_val, htf_sl_val, mtf_sh_val, mtf_sl_val, current_atr
-    )
-
     if side == 'long':
         # Setup-specific SL: use the tightest structural invalidation
         if strat_base == "ALPHA" and ob_bull_bot > 0:
@@ -3071,19 +3000,20 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         if sl >= entry_target: return None
         risk_distance = entry_target - sl
 
-        # ── Structure-only TP targeting ──
-        # TP must be a real structural level (next resistance from S/R book).
-        # No ATR math fallback — if structure doesn't give a target, don't trade.
-        # min_rr=2.0 ensures each win covers ~2 losses at 30% WR.
-        # max_struct_rr=3.0 caps unrealistic targets on lower timeframes.
-        possible_tps = [lvl for _, lvl in resistance_above]
+        # Structural TP targets — proven 6-level approach + ATR fallback
+        vwap_val = base.get("rolling_vwap_20", 0)
+        poc_val = base.get("poc", 0)
+        possible_tps = [t for t in [ob_bear_bot, base.get("vah", 0), htf_sh_val, mtf_sh_val, vwap_val, poc_val] if t > entry_target]
+        possible_tps.sort()
+        if not possible_tps:
+            possible_tps = [entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 4.0))]
 
         selected_tp = None
         for t in possible_tps:
             curr_rr = (t - entry_target) / risk_distance
             if curr_rr >= getattr(cfg, 'min_rr', 2.0):
-                if curr_rr > getattr(cfg, 'max_struct_rr', 3.0):
-                    selected_tp = entry_target + (risk_distance * getattr(cfg, 'max_struct_rr', 3.0))
+                if curr_rr > getattr(cfg, 'atr_mult_tp', 3.5):
+                    selected_tp = entry_target + (risk_distance * getattr(cfg, 'atr_mult_tp', 3.5))
                 else:
                     selected_tp = t
                 break
@@ -3108,15 +3038,19 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         if sl <= entry_target: return None
         risk_distance = sl - entry_target
 
-        # ── Structure-only TP targeting ──
-        possible_tps = [lvl for _, lvl in support_below]
+        vwap_val = base.get("rolling_vwap_20", 0)
+        poc_val = base.get("poc", 0)
+        possible_tps = [t for t in [ob_bull_top, base.get("val", 0), htf_sl_val, mtf_sl_val, vwap_val, poc_val] if 0 < t < entry_target]
+        possible_tps.sort(reverse=True)
+        if not possible_tps:
+            possible_tps = [entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 4.0))]
 
         selected_tp = None
         for t in possible_tps:
             curr_rr = (entry_target - t) / risk_distance
             if curr_rr >= getattr(cfg, 'min_rr', 2.0):
-                if curr_rr > getattr(cfg, 'max_struct_rr', 3.0):
-                    selected_tp = entry_target - (risk_distance * getattr(cfg, 'max_struct_rr', 3.0))
+                if curr_rr > getattr(cfg, 'atr_mult_tp', 3.5):
+                    selected_tp = entry_target - (risk_distance * getattr(cfg, 'atr_mult_tp', 3.5))
                 else:
                     selected_tp = t
                 break
