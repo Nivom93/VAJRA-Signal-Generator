@@ -2498,88 +2498,54 @@ def plan_trade(cfg, f):
     return None
 
 def _build_sr_levels(side, entry, base, pExec, iExec, htf_sh_val, htf_sl_val, mtf_sh_val, mtf_sl_val, current_atr):
-    """Build sorted lists of structural resistance & support levels from ALL known structure.
+    """Build sorted lists of structural resistance & support levels.
 
-    For LONG trades: resistance_above = TP targets, support_below = SL anchors.
-    For SHORT trades: support_below = TP targets, resistance_above = SL anchors.
-
-    Each level is (label, price) so the engine can log which structure drove the decision.
+    Returns MAJOR structural levels only (swing H/L, OBs, FVGs, QMs, HTF/MTF swings).
+    Minor levels (POC, VWAP, Asian range, Donchian, Fib ext, equal H/L) were creating
+    a ceiling too close to entry, capping R:R at ~2.0 and killing profitability.
+    Major levels are where price genuinely reacts — they make proper TP targets.
     """
     all_levels = []
 
-    # Swing highs/lows (execution TF)
+    # ── MAJOR structural levels (used for TP targeting) ──
+
+    # Swing highs/lows (execution TF) — primary structure
     sh = pExec.last_sh[iExec] if iExec < len(pExec.last_sh) else 0
     sl_val = pExec.last_sl[iExec] if iExec < len(pExec.last_sl) else 0
     if sh > 0: all_levels.append(("SWING_H", sh))
     if sl_val > 0: all_levels.append(("SWING_L", sl_val))
 
-    # HTF / MTF swing levels
+    # HTF / MTF swing levels — higher-TF structure carries more weight
     if htf_sh_val > 0: all_levels.append(("HTF_SH", htf_sh_val))
     if htf_sl_val > 0: all_levels.append(("HTF_SL", htf_sl_val))
     if mtf_sh_val > 0: all_levels.append(("MTF_SH", mtf_sh_val))
     if mtf_sl_val > 0: all_levels.append(("MTF_SL", mtf_sl_val))
 
-    # Order block zones — bearish OB top = resistance, bullish OB bottom = support
-    ob_bear_bot = base.get("ob_bear_bot", 0)
+    # Order block zones — institutional accumulation/distribution
     ob_bear_top = base.get("ob_bear_top", 0)
-    ob_bull_top = base.get("ob_bull_top", 0)
     ob_bull_bot = base.get("ob_bull_bot", 0)
     if ob_bear_top > 0: all_levels.append(("OB_BEAR", ob_bear_top))
     if ob_bull_bot > 0: all_levels.append(("OB_BULL", ob_bull_bot))
 
-    # FVG centers — unfilled gaps act as magnets / S/R
+    # FVG centers — unfilled gaps where price tends to return
     fvg_bear = base.get("fvg_bear", 0)
     fvg_bull = base.get("fvg_bull", 0)
     if fvg_bear > 0: all_levels.append(("FVG_BEAR", fvg_bear))
     if fvg_bull > 0: all_levels.append(("FVG_BULL", fvg_bull))
 
-    # QM levels
+    # QM levels — quasimodo reversal zones
     qm_bear = base.get("qm_bear", 0)
     qm_bull = base.get("qm_bull", 0)
     if qm_bear > 0: all_levels.append(("QM_BEAR", qm_bear))
     if qm_bull > 0: all_levels.append(("QM_BULL", qm_bull))
 
-    # Volume profile: POC, VAH, VAL
-    poc = base.get("poc", 0)
+    # Volume profile: VAH/VAL only (major boundaries where volume clusters)
     vah = base.get("vah", 0)
     val_lvl = base.get("val", 0)
-    if poc > 0: all_levels.append(("POC", poc))
     if vah > 0: all_levels.append(("VAH", vah))
     if val_lvl > 0: all_levels.append(("VAL", val_lvl))
 
-    # VWAP
-    vwap = base.get("rolling_vwap_20", 0)
-    if vwap > 0: all_levels.append(("VWAP", vwap))
-
-    # Equal highs/lows = liquidity pools (use swing values as proxy)
-    eq_high_count = base.get("equal_highs_count", 0)
-    eq_low_count = base.get("equal_lows_count", 0)
-    if eq_high_count >= 2 and sh > 0: all_levels.append(("EQ_HIGH", sh))
-    if eq_low_count >= 2 and sl_val > 0: all_levels.append(("EQ_LOW", sl_val))
-
-    # Asian range
-    asian_h = base.get("asian_high", 0)
-    asian_l = base.get("asian_low", 0)
-    if asian_h > 0: all_levels.append(("ASIAN_H", asian_h))
-    if asian_l > 0: all_levels.append(("ASIAN_L", asian_l))
-
-    # Donchian channel
-    dc_h = base.get("dc_high_20", 0)
-    dc_l = base.get("dc_low_20", 0)
-    if dc_h > 0: all_levels.append(("DC_HIGH", dc_h))
-    if dc_l > 0: all_levels.append(("DC_LOW", dc_l))
-
-    # Fibonacci extensions (from fractal range)
-    fractal_h = float(pExec.fractal_high[iExec]) if iExec < len(pExec.fractal_high) else 0
-    fractal_l = float(pExec.fractal_low[iExec]) if iExec < len(pExec.fractal_low) else 0
-    frac_range = fractal_h - fractal_l
-    if frac_range > 0:
-        all_levels.append(("FIB_EXT_1272", fractal_h + frac_range * 0.272))
-        all_levels.append(("FIB_EXT_1618", fractal_h + frac_range * 0.618))
-        all_levels.append(("FIB_EXT_N1272", fractal_l - frac_range * 0.272))
-        all_levels.append(("FIB_EXT_N1618", fractal_l - frac_range * 0.618))
-
-    # Deduplicate levels that are within 0.1 ATR of each other (keep first)
+    # Deduplicate levels within 0.1 ATR of each other (keep first)
     tol = current_atr * 0.1
     unique = []
     for lbl, lvl in sorted(all_levels, key=lambda x: x[1]):
