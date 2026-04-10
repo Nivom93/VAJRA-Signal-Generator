@@ -2933,9 +2933,10 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     setup_type, side, logic_desc, confluence = candidates[0]
 
     # Minimum confluence gate — require multiple structural factors to converge.
-    # A signal with only 1-2 factors (e.g. just "OB" or "WICK+FVG") is not high enough
-    # confidence for a signal generator. Require at least 3 independent confirmations.
-    min_confluence = getattr(cfg, 'min_confluence', 3.0)
+    # confluence=2 filters pure single-factor noise while preserving enough signals
+    # for the brains to train on effectively. confluence=3 was too aggressive
+    # (cut 33% of training data → brains became weaker → worse results).
+    min_confluence = getattr(cfg, 'min_confluence', 2.0)
     if confluence < min_confluence:
         return None
 

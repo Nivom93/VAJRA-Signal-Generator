@@ -185,14 +185,14 @@ def _apply_smote(X_train, y_train, random_state=42):
     if pos_count < 6 or neg_count < 6:
         return X_train, y_train
 
-    # Oversample to 50% of majority for better class balance
-    target_ratio = min(0.5, pos_count / max(1, neg_count))
-    if target_ratio >= 0.45:
+    # Only oversample to 40% of majority (avoid full balance which introduces too much noise)
+    target_ratio = min(0.4, pos_count / max(1, neg_count))
+    if target_ratio >= 0.35:
         return X_train, y_train  # Already reasonably balanced
 
     try:
         k_neighbors = min(5, pos_count - 1)
-        smote = SMOTE(sampling_strategy=0.5, random_state=random_state, k_neighbors=k_neighbors)
+        smote = SMOTE(sampling_strategy=0.4, random_state=random_state, k_neighbors=k_neighbors)
         X_res, y_res = smote.fit_resample(X_train, y_train)
         return X_res, y_res
     except Exception:
@@ -203,11 +203,11 @@ def main(argv=None):
     ap.add_argument("--events", nargs="+", required=True)
     ap.add_argument("--brains-dir", required=True, help="Directory to save individual strategy brains")
     ap.add_argument("--min-win-r", type=float, default=0.0)
-    ap.add_argument("--n-estimators", type=int, default=200)
-    ap.add_argument("--learning-rate", type=float, default=0.08)
-    ap.add_argument("--max-depth", type=int, default=6)
+    ap.add_argument("--n-estimators", type=int, default=100)
+    ap.add_argument("--learning-rate", type=float, default=0.05)
+    ap.add_argument("--max-depth", type=int, default=5)
     ap.add_argument("--reg-alpha", type=float, default=0.1)
-    ap.add_argument("--reg-lambda", type=float, default=3.0)
+    ap.add_argument("--reg-lambda", type=float, default=5.0)
     ap.add_argument("--max-features", type=int, default=130, help="Number of features to keep after RFE")
     ap.add_argument("--exclude-cols", type=str, default="")
     ap.add_argument("--weight-decay", type=float, default=0.999)
@@ -305,7 +305,7 @@ def main(argv=None):
                 dynamic_n_features_fold = max(8, min(max_by_ratio, int(np.sqrt(n_samples_fold) * 1.5), len(base_feature_names)))
 
                 # Dynamically run RFE with a stronger estimator for reliable feature ranking
-                estimator_rfe = xgb.XGBClassifier(n_estimators=100, max_depth=5, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
+                estimator_rfe = xgb.XGBClassifier(n_estimators=50, max_depth=3, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=scale_weight)
                 selector = RFE(estimator_rfe, n_features_to_select=dynamic_n_features_fold, step=1)
                 selector = selector.fit(X_tr_full, y_tr)
 
@@ -336,11 +336,10 @@ def main(argv=None):
                     random_state=42,
                     objective='binary:logistic',
                     eval_metric='logloss',
-                    scale_pos_weight=fold_scale_weight,
-                    early_stopping_rounds=15
+                    scale_pos_weight=fold_scale_weight
                 )
 
-                clf.fit(X_tr, y_tr, eval_set=[(X_te, y_te)], verbose=False)
+                clf.fit(X_tr, y_tr)
 
                 preds = clf.predict(X_te)
                 probs = clf.predict_proba(X_te)[:, 1] if len(np.unique(y_te)) > 1 else np.zeros_like(preds)
@@ -384,7 +383,7 @@ def main(argv=None):
             # When SMOTE rebalances the data for RFE, scale_pos_weight must be
             # 1.0 to avoid double-correcting (same fix as fold-level training).
             rfe_final_weight = 1.0 if rfe_smote_applied else scale_weight
-            estimator_rfe_final = xgb.XGBClassifier(n_estimators=100, max_depth=5, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=rfe_final_weight)
+            estimator_rfe_final = xgb.XGBClassifier(n_estimators=50, max_depth=3, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=rfe_final_weight)
             selector_final = RFE(estimator_rfe_final, n_features_to_select=dynamic_n_features_final, step=1)
 
             selector_final = selector_final.fit(X_all_for_rfe, y_all_for_rfe)
@@ -418,15 +417,10 @@ def main(argv=None):
                 random_state=42,
                 objective='binary:logistic',
                 eval_metric='logloss',
-                scale_pos_weight=final_weight,
-                early_stopping_rounds=20
+                scale_pos_weight=final_weight
             )
 
-            # Split off 15% as validation for early stopping to prevent overfitting
-            val_split = max(10, int(len(X_final_train) * 0.15))
-            X_fit, X_val = X_final_train[:-val_split], X_final_train[-val_split:]
-            y_fit, y_val = y_final_train[:-val_split], y_final_train[-val_split:]
-            final_model.fit(X_fit, y_fit, eval_set=[(X_val, y_val)], verbose=False)
+            final_model.fit(X_final_train, y_final_train)
 
             # Probability calibration — raw XGBoost probabilities are poorly calibrated.
             # Isotonic calibration on cross-validated predictions produces honest probabilities
