@@ -2056,15 +2056,6 @@ class BrainLearningManager:
                         booster.load_model(str(xgb_path))
                         brain_data["booster"] = booster
 
-                    # Load probability calibrator if available
-                    if brain_data.get("calibrator_file"):
-                        calib_path = p / brain_data["calibrator_file"]
-                        if calib_path.exists():
-                            try:
-                                brain_data["calibrator"] = joblib.load(str(calib_path))
-                            except Exception:
-                                pass
-
                     self.brains[(strat, side)] = brain_data
                     loaded += 1
             except Exception as e:
@@ -2144,15 +2135,6 @@ class BrainLearningManager:
                              f"predict(output_margin=True)={raw:.6f}, sigmoid(raw)={prob:.6f}")
             else:
                 prob = b['classifier'].predict_proba(vec)[0][1]
-
-            # Apply probability calibration if available — produces honest probabilities
-            # so threshold filtering actually separates high-confidence from low-confidence
-            if "calibrator" in b:
-                try:
-                    prob = float(b["calibrator"].predict_proba(vec)[0][1])
-                except Exception:
-                    pass  # Fall back to raw probability
-
             return prob
         except Exception as e:
             log.error(f"Brain Prediction Failed: {e}\n{traceback.format_exc()}")
