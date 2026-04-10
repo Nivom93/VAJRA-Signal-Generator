@@ -2914,20 +2914,19 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     candidates.sort(key=lambda c: (c[3], _struct_priority.get(c[0].split("_")[0], 0)), reverse=True)
     setup_type, side, logic_desc, confluence = candidates[0]
 
-    # Minimum confluence gate — require multiple structural factors to converge.
-    # confluence=2 filters pure single-factor noise while preserving enough signals
-    # for the brains to train on effectively. confluence=3 was too aggressive
-    # (cut 33% of training data → brains became weaker → worse results).
-    min_confluence = getattr(cfg, 'min_confluence', 2.0)
-    if confluence < min_confluence:
-        return None
+    # NOTE: Confluence gate was removed. Pre-filtering by confluence score created
+    # a feedback loop — brains trained on a harder distribution had lower ROC
+    # (0.51 vs 0.59 baseline), weaker brains → worse filtering → -47R vs +77R.
+    # The bull/bear_struct_score is already passed as a feature via the base dict,
+    # so the brain can learn to use confluence itself on the full signal distribution.
 
     # Enrich the logic description with structure context
     conf_reasons = bull_struct_reasons if side == "long" else bear_struct_reasons
     struct_label = "BULLISH" if struct_trend > 0 else ("BEARISH" if struct_trend < 0 else "RANGING")
     htf_label = "HTF_BULL" if htf_struct > 0 else ("HTF_BEAR" if htf_struct < 0 else "HTF_FLAT")
     logic_desc += f" STRUCT={struct_label} {htf_label}."
-    logic_desc += f" CONFLUENCE {confluence:.0f}× [{'+'.join(conf_reasons)}]."
+    if confluence >= 2:
+        logic_desc += f" CONFLUENCE {confluence:.0f}× [{'+'.join(conf_reasons)}]."
 
     if not setup_type: return None
 
