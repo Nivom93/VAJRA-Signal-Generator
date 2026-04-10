@@ -422,21 +422,10 @@ def main(argv=None):
 
             final_model.fit(X_final_train, y_final_train)
 
-            # Probability calibration — raw XGBoost probabilities are poorly calibrated.
-            # Isotonic calibration on cross-validated predictions produces honest probabilities
-            # so the brain can actually distinguish high-confidence from low-confidence trades.
-            try:
-                calib_folds = min(3, max(2, len(X_all_sel) // 50))
-                if FrozenEstimator is not None:
-                    calibrated = CalibratedClassifierCV(FrozenEstimator(final_model), method='isotonic', cv=calib_folds)
-                else:
-                    calibrated = CalibratedClassifierCV(final_model, method='isotonic', cv=calib_folds)
-                calibrated.fit(X_all_sel, y_all)
-                # Store calibrator alongside the model for inference
-                final_model._calibrator = calibrated
-                log.info(f"  Probability calibration: APPLIED (isotonic, {calib_folds} folds)")
-            except Exception as e:
-                log.warning(f"  Probability calibration FAILED ({e}), using raw probabilities")
+            # NOTE: Isotonic calibration was tried but distorted probabilities — raw
+            # XGBoost outputs around 0.30-0.40 get calibrated down to 0.09, which
+            # blows away the threshold filter. The raw XGBoost probabilities are
+            # good enough given we're using threshold-based filtering. Reverted.
 
             # Tiered quality system — all brains are saved with a quality tag
             # instead of hard-blocking on WFA metrics
@@ -475,14 +464,7 @@ def main(argv=None):
                 "n_features_selected": len(selected_features),
                 "n_samples_total": n_samples_all,
                 "pos_neg_ratio": f"{pos_cases}/{neg_cases}",
-                "has_calibrator": hasattr(final_model, '_calibrator'),
             }
-
-            # Save calibrator alongside brain if it was successfully fitted
-            if hasattr(final_model, '_calibrator'):
-                calib_file = out_dir / f"brain_{strat_clean}_{side}_calibrator.joblib"
-                joblib.dump(final_model._calibrator, calib_file)
-                pipeline["calibrator_file"] = str(calib_file.name)
 
             out_file = out_dir / f"brain_{strat_clean}_{side}.joblib"
             joblib.dump(pipeline, out_file)
