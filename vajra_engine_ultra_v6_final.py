@@ -2369,6 +2369,37 @@ class TradeManager:
         self.mem.record_signal(order)
         return order
 
+    # ------------------------------------------------------------------
+    # FRICTION PHYSICS (Directive 1 — Authentic PnL)
+    # ------------------------------------------------------------------
+    # The total round-trip friction cost per unit is:
+    #     friction_per_unit =  entry_fill_px * (fee_rate_entry + slip_rate)
+    #                        +  exit_px       * (fee_rate_exit  + slip_rate)
+    # and is deducted from the raw directional delta BEFORE dividing by the
+    # per-unit risk distance. The resulting ``pnl_r`` is the TRUE NET yield.
+    # ------------------------------------------------------------------
+    def _friction_per_unit(self, entry_fill_px: float, exit_px: float, order_type: str) -> float:
+        taker = float(getattr(self.cfg, 'taker_fee_bps', 0.0)) / 10000.0
+        maker = float(getattr(self.cfg, 'maker_fee_bps', 0.0)) / 10000.0
+        slip  = float(getattr(self.cfg, 'slippage_bps', 0.0)) / 10000.0
+
+        # Entry leg — maker only if an unmarketable limit was used; otherwise taker.
+        entry_fee_rate = maker if order_type == 'limit' else taker
+        # Exits are executed as protective market orders (TP/SL/TIF all cross the book).
+        exit_fee_rate = taker
+
+        entry_friction = float(entry_fill_px) * (entry_fee_rate + slip)
+        exit_friction  = float(exit_px)       * (exit_fee_rate  + slip)
+        return entry_friction + exit_friction
+
+    def _compute_net_pnl_r(self, side: str, entry_fill_px: float, exit_px: float,
+                           raw_risk: float, order_type: str) -> float:
+        raw_delta = (exit_px - entry_fill_px) if side == 'long' else (entry_fill_px - exit_px)
+        friction  = self._friction_per_unit(entry_fill_px, exit_px, order_type)
+        net_delta = raw_delta - friction
+        denom = raw_risk if raw_risk > 1e-12 else 1e-12
+        return float(net_delta / denom)
+
     def step_bar(self, symbol, o, h, l, c, ts=None, swing_high=0.0, swing_low=0.0):
         if ts is not None and ts == self.last_processed_ts.get(symbol): return []
         self.last_processed_ts[symbol] = ts
@@ -2377,12 +2408,14 @@ class TradeManager:
         closed = []
         still_open = []
         still_pending = []
-        
+
         # Determine the current bar's timestamp, fallback to 0 if not provided
         current_ts = ts if ts is not None else 0
 
-        fee = (self.cfg.taker_fee_bps + self.cfg.slippage_bps) / 10000.0
-        
+        # Strict Time-In-Force horizon (bars). Directive 4: a 15m structural
+        # trigger must resolve inside 12h (48 bars) or be force-exited.
+        tif_decay_global = int(getattr(self.cfg, 'time_in_force_decay', 0) or 0)
+
         for order in self.pending_orders:
             if order.get('symbol', self.cfg.symbol) != symbol:
                 still_pending.append(order)
@@ -2390,16 +2423,16 @@ class TradeManager:
 
             triggered = False
             fill_px = 0.0
-            
+
             order['ttl'] -= 1
             if order['ttl'] < 0:
-                continue 
-            
+                continue
+
             side = order['side']
             entry_target = order['entry']
             # PATCH: DYNAMIC EXECUTION STYLE INHERITANCE
-            order_type = order.get('type', self.cfg.execution_style)
-            
+            order_type = order.get('type', getattr(self.cfg, 'execution_style', 'limit'))
+
             if order_type == 'limit':
                 if side == 'long':
                     if o <= order.get('sl', -1.0):
@@ -2427,14 +2460,14 @@ class TradeManager:
                     if l <= entry_target:
                         triggered = True
                         fill_px = min(o, entry_target)
-            
+
             if triggered:
                 planned_risk = abs(order['entry'] - order['sl'])
                 if planned_risk < 1e-9:
                     planned_risk = order['entry'] * 0.01
 
                 initial_risk = planned_risk
-                
+
                 trade = order.copy()
                 trade['avg_price'] = fill_px
                 trade['total_size'] = order.get('total_size', 1.0 * order.get('risk_factor',1.0))
@@ -2442,6 +2475,9 @@ class TradeManager:
                 trade['status'] = 'OPEN'
                 trade['fill_ts'] = current_ts
                 trade['bars_open'] = 0
+                # Lock in the order type used for the fill so exit math knows
+                # whether the entry leg was maker or taker.
+                trade['type'] = order_type
 
                 # PREVENT INTRA-BAR LEAKAGE: A trade cannot hit TP on the same bar it triggers
                 # because we do not know if the high/low occurred before or after the trigger.
@@ -2452,7 +2488,7 @@ class TradeManager:
                 self.mem.record_fill(trade)
             else:
                 still_pending.append(order)
-        
+
         self.pending_orders = still_pending
 
         for t in self.open_trades:
@@ -2465,18 +2501,19 @@ class TradeManager:
             entry = t['avg_price']
             sl = t['sl']
             tp = t['tp']
-            
+            order_type = t.get('type', getattr(self.cfg, 'execution_style', 'limit'))
+
             can_tp = t.get('can_tp_this_bar', True)
             if not can_tp:
                 t['can_tp_this_bar'] = True
 
             raw_risk = max(t.get('initial_risk_unit', abs(t['entry'] - t['sl'])), 1e-9)
 
-            curr_pnl = (c - entry) if side == 'long' else (entry - c)
-            t['pnl_r'] = (curr_pnl / raw_risk)
+            # Live unrealized PnL tracked as NET of friction (fair apples-to-apples).
+            t['pnl_r'] = self._compute_net_pnl_r(side, entry, c, raw_risk, order_type)
 
-            intra_max_pnl = (h - entry) if side == 'long' else (entry - l)
-            intra_max_pnl_r = (intra_max_pnl / raw_risk)
+            intra_best_px = h if side == 'long' else l
+            intra_max_pnl_r = self._compute_net_pnl_r(side, entry, intra_best_px, raw_risk, order_type)
 
             t['max_unrealized_pnl_r'] = max(t.get('max_unrealized_pnl_r', -999.0), t['pnl_r'], intra_max_pnl_r)
             t['max_pnl_r'] = max(t.get('max_pnl_r', -99.0), intra_max_pnl_r)
@@ -2484,7 +2521,7 @@ class TradeManager:
             hit_sl = False
             hit_tp = False
             exit_reason = ''
-            
+
             # Pessimistic Check: SL evaluated first!
             if side == 'long':
                 if l <= sl: hit_sl = True; exit_reason = 'sl'
@@ -2493,26 +2530,39 @@ class TradeManager:
                 if h >= sl: hit_sl = True; exit_reason = 'sl'
                 elif l <= tp and can_tp: hit_tp = True; exit_reason = 'tp'
 
-            if hit_sl or hit_tp:
+            # Directive 4B: forced TIF exit at current bar close if the window
+            # has been fully consumed without an SL/TP resolution.
+            force_tif = (
+                not hit_sl
+                and not hit_tp
+                and tif_decay_global > 0
+                and t['bars_open'] >= tif_decay_global
+            )
+
+            if hit_sl or hit_tp or force_tif:
                 if hit_sl:
                     if side == 'long': exit_px = min(o, t['sl']) if o < t['sl'] else t['sl']
-                    else: exit_px = max(o, t['sl']) if o > t['sl'] else t['sl']
-                else:
+                    else:              exit_px = max(o, t['sl']) if o > t['sl'] else t['sl']
+                elif hit_tp:
                     if side == 'long': exit_px = max(o, tp) if o > tp else tp
-                    else: exit_px = min(o, tp) if o < tp else tp
+                    else:              exit_px = min(o, tp) if o < tp else tp
+                else:
+                    # Time-based market exit at the bar close.
+                    exit_px = c
+                    exit_reason = 'tif'
 
-                raw_pnl = (exit_px - entry) if side == 'long' else (entry - exit_px)
-                t['pnl_r'] = (raw_pnl / raw_risk)
+                # Directive 1: deduct full round-trip friction from pnl_r.
+                t['pnl_r'] = self._compute_net_pnl_r(side, entry, exit_px, raw_risk, order_type)
                 t['exit_price'] = exit_px
                 t['exit_reason'] = exit_reason
                 t['exit_ts'] = current_ts
-                
+
                 closed.append(t)
                 self.mem.record_exit(t)
                 continue
 
             still_open.append(t)
-        
+
         self.open_trades = still_open
         return closed
 def _score_side(f, s):
@@ -3137,9 +3187,15 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         _p6_counters["no_brain"] += 1
 
     _p6_counters["passed"] += 1
+    # Directive 5: the order type MUST be inherited from the global config so
+    # that the live L2 order-book spoofing defense (limit-order path) can be
+    # exercised. A literal hardcode ("market") nullifies the defense.
+    exec_style = getattr(cfg, 'execution_style', 'limit')
+    if not isinstance(exec_style, str) or exec_style not in ('limit', 'market', 'breakout'):
+        exec_style = 'limit'
     return {
         "side": side, "entry": entry_target, "sl": sl, "tp": tp, "rr": rr,
         "prob": win_prob, "key": f"{setup_type}_{side}", "features": base,
-        "risk_factor": risk_factor, "strategy": setup_type, "type": "market",
+        "risk_factor": risk_factor, "strategy": setup_type, "type": exec_style,
         "analysis": analysis_str
     }
