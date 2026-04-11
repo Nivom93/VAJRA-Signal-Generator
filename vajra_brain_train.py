@@ -207,7 +207,6 @@ def main(argv=None):
     ap.add_argument("--weight-decay", type=float, default=0.999)
     ap.add_argument("--wfa-folds", type=int, default=5)
     ap.add_argument("--tune", action="store_true", help="Enable RandomizedSearchCV for hyperparameter tuning.")
-    ap.add_argument("--no-smote", action="store_true", help="Disable SMOTE oversampling.")
     ap.add_argument("--meta-brain", action="store_true",
                     help="Train a unified Meta-Brain after specialist brains. "
                          "Requires events exported with --brains-dir (specialist probabilities).")
@@ -276,9 +275,6 @@ def main(argv=None):
                 actual_gap = min(max(3, n_samples // 30), max_safe_gap)
             log.info(f"Running Walk-Forward Analysis ({actual_folds} folds) with dynamic per-fold RFE Feature Selection...")
 
-            if HAS_SMOTE and not args.no_smote:
-                log.info(f"  SMOTE oversampling: ENABLED (pos={pos_cases}, neg={neg_cases})")
-
             tscv = TimeSeriesSplit(n_splits=actual_folds, gap=actual_gap)
 
             best_tuned_params = {}
@@ -307,17 +303,8 @@ def main(argv=None):
                 X_tr = X_tr_full[:, selector.support_]
                 X_te = X_te_full[:, selector.support_]
 
-                # Apply SMOTE oversampling on training fold (not validation!)
-                smote_applied = False
-                if not args.no_smote:
-                    X_tr_before = X_tr
-                    X_tr, y_tr = _apply_smote(X_tr, y_tr, random_state=42 + i)
-                    smote_applied = len(X_tr) != len(X_tr_before)
-
-                # When SMOTE rebalanced the data, it already handles the class
-                # imbalance — adding scale_pos_weight on top double-corrects and
-                # warps probability calibration (pushes outputs to extremes).
-                fold_scale_weight = 1.0 if smote_applied else scale_weight
+                # 🟢 DIRECTIVE 3: SMOTE ERADICATED (Rely strictly on scale_pos_weight)
+                fold_scale_weight = scale_weight
 
                 clf = xgb.XGBClassifier(
                     n_estimators=args.n_estimators,
@@ -366,17 +353,9 @@ def main(argv=None):
 
             log.info(f"Dynamic RFE: Selecting up to {dynamic_n_features_final} features for {n_samples_all} samples.")
 
-            # Apply SMOTE before final RFE if enabled
+            # 🟢 DIRECTIVE 3: SMOTE ERADICATED (Rely strictly on scale_pos_weight)
             X_all_for_rfe, y_all_for_rfe = X_all, y_all
-            rfe_smote_applied = False
-            if not args.no_smote:
-                X_before = X_all_for_rfe
-                X_all_for_rfe, y_all_for_rfe = _apply_smote(X_all, y_all, random_state=99)
-                rfe_smote_applied = len(X_all_for_rfe) != len(X_before)
-
-            # When SMOTE rebalances the data for RFE, scale_pos_weight must be
-            # 1.0 to avoid double-correcting (same fix as fold-level training).
-            rfe_final_weight = 1.0 if rfe_smote_applied else scale_weight
+            rfe_final_weight = scale_weight
             estimator_rfe_final = xgb.XGBClassifier(n_estimators=50, max_depth=3, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=rfe_final_weight)
             selector_final = RFE(estimator_rfe_final, n_features_to_select=dynamic_n_features_final, step=1)
 
@@ -388,17 +367,9 @@ def main(argv=None):
 
             log.info("Training and Calibrating Final Production Model on FULL dataset...")
 
-            # Apply SMOTE on the selected features for final training
+            # 🟢 DIRECTIVE 3: SMOTE ERADICATED (Rely strictly on scale_pos_weight)
             X_final_train, y_final_train = X_all_sel, y_all
-            final_smote_applied = False
-            if not args.no_smote:
-                X_before_smote = X_final_train
-                X_final_train, y_final_train = _apply_smote(X_all_sel, y_all, random_state=42)
-                final_smote_applied = len(X_final_train) != len(X_before_smote)
-
-            # When SMOTE rebalanced the data, it handles class imbalance —
-            # scale_pos_weight on top double-corrects and warps calibration.
-            final_weight = 1.0 if final_smote_applied else scale_weight
+            final_weight = scale_weight
 
             # ── SEED ENSEMBLE: Train 3 models with different random seeds ──
             # Training variance on small datasets causes ±30R swings. Averaging
@@ -473,7 +444,7 @@ def main(argv=None):
                 "valid_edge": valid_edge,
                 "quality_tier": quality_tier,
                 "threshold_adj": threshold_adj,
-                "smote_enabled": HAS_SMOTE and not args.no_smote,
+                "smote_enabled": False,
                 "n_features_selected": len(selected_features),
                 "n_samples_total": n_samples_all,
                 "pos_neg_ratio": f"{pos_cases}/{neg_cases}",
