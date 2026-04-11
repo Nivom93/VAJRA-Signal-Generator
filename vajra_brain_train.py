@@ -4,7 +4,6 @@
 vajra_brain_train.py — Advanced Trainer (v9.0 - Enhanced Signal Capture)
 ====================================================================
 LEVEL 31 UPGRADE:
-- SMOTE OVERSAMPLING: Synthetic minority class generation for balanced training.
 - ADAPTIVE RFE: Feature count scales with sqrt(n_samples) — no more arbitrary cap at 30.
 - IMPROVED BANLIST: Preserved normalized ATR/velocity features for brain learning.
 - CALIBRATED PROBABILITIES: Isotonic calibration for reliable confidence estimates.
@@ -28,12 +27,6 @@ from sklearn.metrics import accuracy_score, precision_score, roc_auc_score, f1_s
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import RFE
 from sklearn.calibration import CalibratedClassifierCV
-
-try:
-    from imblearn.over_sampling import SMOTE
-    HAS_SMOTE = True
-except ImportError:
-    HAS_SMOTE = False
 
 try:
     from sklearn.frozen import FrozenEstimator
@@ -167,30 +160,6 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
 
 def _sanitize_data(X: np.ndarray) -> np.ndarray:
     return np.clip(np.nan_to_num(X, nan=0.0), -1e10, 1e10).astype(np.float32)
-
-def _apply_smote(X_train, y_train, random_state=42):
-    """Apply SMOTE oversampling if imlearn is available and minority class is sufficient."""
-    if not HAS_SMOTE:
-        return X_train, y_train
-
-    pos_count = np.sum(y_train == 1)
-    neg_count = np.sum(y_train == 0)
-
-    if pos_count < 6 or neg_count < 6:
-        return X_train, y_train
-
-    # Only oversample to 40% of majority (avoid full balance which introduces too much noise)
-    target_ratio = min(0.4, pos_count / max(1, neg_count))
-    if target_ratio >= 0.35:
-        return X_train, y_train  # Already reasonably balanced
-
-    try:
-        k_neighbors = min(5, pos_count - 1)
-        smote = SMOTE(sampling_strategy=0.4, random_state=random_state, k_neighbors=k_neighbors)
-        X_res, y_res = smote.fit_resample(X_train, y_train)
-        return X_res, y_res
-    except Exception:
-        return X_train, y_train
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
@@ -684,7 +653,7 @@ def _train_meta_brain(df: pd.DataFrame, base_feature_names: list, args, out_dir:
     neg_cases = int(np.sum(y_oos == 0))
     scale_weight = min(float(neg_cases) / max(1.0, float(pos_cases)), 20.0)
 
-    meta_scale_weight = scale_weight  # Pre-SMOTE weight for proper calibration
+    meta_scale_weight = scale_weight  # Class weight for proper calibration
     log.info(f"Meta-Brain: {n_meta} samples with OOS predictions ({pos_cases} pos / {neg_cases} neg)")
 
     # ══════════════════════════════════════════════════════════════════
