@@ -2372,33 +2372,87 @@ class TradeManager:
     # ------------------------------------------------------------------
     # FRICTION PHYSICS (Directive 1 — Authentic PnL)
     # ------------------------------------------------------------------
-    # The total round-trip friction cost per unit is:
-    #     friction_per_unit =  entry_fill_px * (fee_rate_entry + slip_rate)
-    #                        +  exit_px       * (fee_rate_exit  + slip_rate)
-    # and is deducted from the raw directional delta BEFORE dividing by the
-    # per-unit risk distance. The resulting ``pnl_r`` is the TRUE NET yield.
+    # Round-trip monetary cost decomposition (per unit of contract size):
+    #
+    #     entry_fee_cost  = entry_fill_px * entry_fee_rate
+    #     entry_slip_cost = entry_fill_px * slip_rate
+    #     exit_fee_cost   = exit_px       * taker_fee_rate   (always taker on exit)
+    #     exit_slip_cost  = exit_px       * slip_rate
+    #     total_friction  = entry_fee_cost + entry_slip_cost
+    #                     + exit_fee_cost  + exit_slip_cost
+    #
+    # ``total_friction`` is an ALWAYS-POSITIVE dollar drag and is subtracted
+    # from the directional raw_delta BEFORE we divide by the per-unit risk
+    # distance. The resulting ``pnl_r`` is therefore the TRUE NET yield in
+    # R-multiples — identical to how an institutional post-trade TCA stack
+    # marks a fill after the clearing house takes its cut.
+    #
+    # The ENTRY leg is maker-priced only when the live router actually used
+    # an unmarketable limit order; every other execution style crosses the
+    # book and pays taker. The EXIT leg is ALWAYS taker because SL, TP, and
+    # TIF market-out all hit the book.
     # ------------------------------------------------------------------
-    def _friction_per_unit(self, entry_fill_px: float, exit_px: float, order_type: str) -> float:
-        taker = float(getattr(self.cfg, 'taker_fee_bps', 0.0)) / 10000.0
-        maker = float(getattr(self.cfg, 'maker_fee_bps', 0.0)) / 10000.0
-        slip  = float(getattr(self.cfg, 'slippage_bps', 0.0)) / 10000.0
+    def _fee_slip_rates(self, order_type: str):
+        """Resolve the per-leg fee and slippage rates from cfg (deterministic)."""
+        taker_rate = float(getattr(self.cfg, 'taker_fee_bps', 0.0)) / 10000.0
+        maker_rate = float(getattr(self.cfg, 'maker_fee_bps', 0.0)) / 10000.0
+        slip_rate  = float(getattr(self.cfg, 'slippage_bps',  0.0)) / 10000.0
+        entry_fee_rate = maker_rate if order_type == 'limit' else taker_rate
+        exit_fee_rate  = taker_rate
+        return entry_fee_rate, exit_fee_rate, slip_rate
 
-        # Entry leg — maker only if an unmarketable limit was used; otherwise taker.
-        entry_fee_rate = maker if order_type == 'limit' else taker
-        # Exits are executed as protective market orders (TP/SL/TIF all cross the book).
-        exit_fee_rate = taker
+    def _friction_breakdown(self, entry_fill_px: float, exit_px: float,
+                            order_type: str) -> Dict[str, float]:
+        """Explicit per-unit monetary friction decomposition for audit + PnL."""
+        entry_fee_rate, exit_fee_rate, slip_rate = self._fee_slip_rates(order_type)
 
-        entry_friction = float(entry_fill_px) * (entry_fee_rate + slip)
-        exit_friction  = float(exit_px)       * (exit_fee_rate  + slip)
-        return entry_friction + exit_friction
+        ep = float(entry_fill_px)
+        xp = float(exit_px)
+
+        entry_fee_cost  = ep * entry_fee_rate
+        entry_slip_cost = ep * slip_rate
+        exit_fee_cost   = xp * exit_fee_rate
+        exit_slip_cost  = xp * slip_rate
+
+        entry_friction = entry_fee_cost + entry_slip_cost
+        exit_friction  = exit_fee_cost  + exit_slip_cost
+        total_friction = entry_friction + exit_friction
+
+        return {
+            "entry_fee_cost":  entry_fee_cost,
+            "entry_slip_cost": entry_slip_cost,
+            "exit_fee_cost":   exit_fee_cost,
+            "exit_slip_cost":  exit_slip_cost,
+            "entry_friction":  entry_friction,
+            "exit_friction":   exit_friction,
+            "total_friction_cost": total_friction,
+        }
+
+    def _compute_pnl_r(self, side: str, entry_fill_px: float, exit_px: float,
+                       raw_risk: float, order_type: str) -> Tuple[float, float, Dict[str, float]]:
+        """Return ``(net_pnl_r, gross_pnl_r, friction_breakdown)``.
+
+        The monetary friction is deducted from the raw directional delta
+        BEFORE the R-multiple is computed so ``net_pnl_r`` is the authentic
+        yield after trading friction.
+        """
+        raw_delta = (exit_px - entry_fill_px) if side == 'long' else (entry_fill_px - exit_px)
+        fb = self._friction_breakdown(entry_fill_px, exit_px, order_type)
+        total_friction = fb["total_friction_cost"]
+        net_delta = raw_delta - total_friction
+
+        denom = raw_risk if raw_risk > 1e-12 else 1e-12
+        gross_pnl_r = float(raw_delta / denom)
+        net_pnl_r   = float(net_delta / denom)
+        return net_pnl_r, gross_pnl_r, fb
 
     def _compute_net_pnl_r(self, side: str, entry_fill_px: float, exit_px: float,
                            raw_risk: float, order_type: str) -> float:
-        raw_delta = (exit_px - entry_fill_px) if side == 'long' else (entry_fill_px - exit_px)
-        friction  = self._friction_per_unit(entry_fill_px, exit_px, order_type)
-        net_delta = raw_delta - friction
-        denom = raw_risk if raw_risk > 1e-12 else 1e-12
-        return float(net_delta / denom)
+        """Back-compat thin wrapper that only returns the net R-multiple."""
+        net_pnl_r, _gross, _fb = self._compute_pnl_r(
+            side, entry_fill_px, exit_px, raw_risk, order_type
+        )
+        return net_pnl_r
 
     def step_bar(self, symbol, o, h, l, c, ts=None, swing_high=0.0, swing_low=0.0):
         if ts is not None and ts == self.last_processed_ts.get(symbol): return []
@@ -2552,10 +2606,20 @@ class TradeManager:
                     exit_reason = 'tif'
 
                 # Directive 1: deduct full round-trip friction from pnl_r.
-                t['pnl_r'] = self._compute_net_pnl_r(side, entry, exit_px, raw_risk, order_type)
-                t['exit_price'] = exit_px
-                t['exit_reason'] = exit_reason
-                t['exit_ts'] = current_ts
+                # Stamp the full audit trail so the backtester, exporter,
+                # and meta-brain labeller all see identical numbers.
+                net_pnl_r, gross_pnl_r, fb = self._compute_pnl_r(
+                    side, entry, exit_px, raw_risk, order_type
+                )
+                t['pnl_r']                = net_pnl_r
+                t['gross_pnl_r']          = gross_pnl_r
+                t['entry_friction']       = fb["entry_friction"]
+                t['exit_friction']        = fb["exit_friction"]
+                t['total_friction_cost']  = fb["total_friction_cost"]
+                t['friction_drag_r']      = gross_pnl_r - net_pnl_r
+                t['exit_price']           = exit_px
+                t['exit_reason']          = exit_reason
+                t['exit_ts']              = current_ts
 
                 closed.append(t)
                 self.mem.record_exit(t)
@@ -3187,15 +3251,18 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         _p6_counters["no_brain"] += 1
 
     _p6_counters["passed"] += 1
-    # Directive 5: the order type MUST be inherited from the global config so
-    # that the live L2 order-book spoofing defense (limit-order path) can be
-    # exercised. A literal hardcode ("market") nullifies the defense.
-    exec_style = getattr(cfg, 'execution_style', 'limit')
-    if not isinstance(exec_style, str) or exec_style not in ('limit', 'market', 'breakout'):
-        exec_style = 'limit'
+    # DIRECTIVE 2 — EXECUTION ROUTER FIX:
+    # The order type MUST be dynamically inherited from the global config's
+    # ``execution_style`` property via a single safe ``getattr`` fallback.
+    # NEVER hardcode "market" / "limit" in the return dict — a literal here
+    # nullifies the live L2 order-book spoofing defense which relies on the
+    # limit-order path. The ``getattr`` fallback of ``'limit'`` is the only
+    # tolerated safety default, and the TradeManager carries an identical
+    # secondary safety net at fill time.
     return {
         "side": side, "entry": entry_target, "sl": sl, "tp": tp, "rr": rr,
         "prob": win_prob, "key": f"{setup_type}_{side}", "features": base,
-        "risk_factor": risk_factor, "strategy": setup_type, "type": exec_style,
+        "risk_factor": risk_factor, "strategy": setup_type,
+        "type": getattr(cfg, 'execution_style', 'limit'),
         "analysis": analysis_str
     }
