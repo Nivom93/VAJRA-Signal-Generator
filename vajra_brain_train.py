@@ -127,16 +127,10 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
     df["pnl_r"] = pd.to_numeric(df["pnl_r"], errors='coerce')
     df.dropna(subset=["pnl_r"], inplace=True)
 
-    # Pure Target Binary with improved labeling
-    if "meta_label" in df.columns:
-        # Threshold 0.50: only trades achieving ≥50% of target R:R are positive.
-        # At 0.25 barely-profitable noise trades (0.01R→meta_label 0.30) were
-        # labeled positive, diluting the signal the brain learns from.
-        df["label"] = (pd.to_numeric(df["meta_label"], errors='coerce').fillna(0) > 0.50).astype(int)
-        log.info("🎯 Dynamic Target mapped via meta_label (threshold > 0.50 for positive).")
-    elif "pnl_r" in df.columns:
-        df["label"] = (df["pnl_r"] > 0).astype(int)
-        log.info("🎯 Pure Target Binary (Fallback): pnl_r > 0.")
+    # 🟢 DIRECTIVE 2: STRICT R-MULTIPLE TARGETING (NO MORE FRACTIONAL WINS)
+    if "pnl_r" in df.columns:
+        df["label"] = (df["pnl_r"] >= 1.0).astype(int)
+        log.info("🎯 Institutional Binary Target: Net pnl_r >= 1.0R.")
     else:
         df["label"] = 0
 
