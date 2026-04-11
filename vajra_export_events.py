@@ -227,13 +227,16 @@ def main():
     cfg.filter_rvol_breakout = False
     cfg.filter_adx_chop = False
 
-    # Pure signal quality measurement: no trade management overlays.
-    # Signals are evaluated by raw outcome — did price hit TP or SL first?
-    # BE, trailing, and time decay are trade management, NOT signal quality.
-    # The backtest overrides MUST match these values for train/test parity.
-    cfg.be_trigger_r = 0.0              # No break-even — raw signal outcome
-    cfg.trailing_stop_trigger_r = 0.0   # No trailing — raw signal outcome
-    cfg.time_in_force_decay = 0         # No time decay — let signal resolve
+    # Raw TP/SL outcome ONLY — no break-even / trailing overlays. Time-in-Force
+    # decay IS allowed to fire here because it is a physical property of the
+    # strategy: a 15m structural trigger that has not resolved inside the TIF
+    # window is forcibly exited in production, so the exporter must label the
+    # same trade the same way. All three values are inherited from overrides.
+    cfg.be_trigger_r = 0.0
+    cfg.trailing_stop_trigger_r = 0.0
+    # IMPORTANT: do NOT override time_in_force_decay here — keep whatever
+    # _strategy_overrides installed so that exporter, backtester and live
+    # bot all force TIF exits on the exact same horizon.
 
     cfg.exchange_id = args.exchange_id; cfg.market_type = args.market_type
     cfg.macro_tf = args.macro_tf
@@ -366,20 +369,16 @@ def main():
 
                     if -50 < cl["pnl_r"] < 50:
                         bars_open = cl.get("bars_open", 0)
-                        pnl_r = cl["pnl_r"]
+                        pnl_r = float(cl["pnl_r"])
 
-                        # Improved meta-label: graduated reward system
-                        # - TP hit within time = perfect signal (1.0)
-                        # - Any profit > 0 = positive signal (scaled)
-                        # - Loss = negative signal (0.0)
-                        if cl.get("exit_reason") == "tp" and bars_open <= 192:
-                            meta_label = 1.0
-                        elif pnl_r > 0:
-                            # Any profitable trade is a positive label (scaled by quality)
-                            rr_target = meta.get("rr", 2.0)
-                            meta_label = max(0.3, min(pnl_r / rr_target, 0.95))
-                        else:
-                            meta_label = 0.0
+                        # Directive 2: STRICT ABSOLUTE R-THRESHOLD LABELING.
+                        # The engine has already deducted all friction (maker/taker
+                        # fees + slippage, entry AND exit leg) from pnl_r, so this
+                        # value is the true NET yield. The binary classification
+                        # target collapses to a single hyperplane: the trade either
+                        # cleared 1.0R net of costs or it did not. No fractional
+                        # credit is given for "nearly profitable" setups.
+                        meta_label = 1.0 if pnl_r >= 1.0 else 0.0
 
                         events.append({
                             "symbol": cfg.symbol,
