@@ -700,10 +700,7 @@ def _train_meta_brain(df: pd.DataFrame, base_feature_names: list, args, out_dir:
         X_tr, y_tr = X_all_meta[train_idx], y_oos[train_idx]
         X_te, y_te = X_all_meta[test_idx], y_oos[test_idx]
 
-        if not args.no_smote:
-            X_tr, y_tr = _apply_smote(X_tr, y_tr, random_state=42 + i)
-
-        # Use ORIGINAL class weight (pre-SMOTE) for proper probability calibration
+        # Use ORIGINAL class weight for proper probability calibration
         sw = meta_scale_weight
 
         clf = xgb.XGBClassifier(
@@ -741,10 +738,6 @@ def _train_meta_brain(df: pd.DataFrame, base_feature_names: list, args, out_dir:
     # PHASE 4: Train final production Meta-Brain on ALL OOS data
     # ══════════════════════════════════════════════════════════════════
     X_final, y_final = X_all_meta, y_oos
-    if not args.no_smote:
-        X_final, y_final = _apply_smote(X_all_meta, y_oos, random_state=99)
-
-    # Use ORIGINAL class weight (pre-SMOTE) for proper probability calibration
     final_weight = meta_scale_weight
 
     meta_model = xgb.XGBClassifier(
@@ -778,7 +771,7 @@ def _train_meta_brain(df: pd.DataFrame, base_feature_names: list, args, out_dir:
         "wfa_roc_auc": avg_roc,
         "wfa_f1": avg_f1,
         "valid_edge": valid_edge,
-        "smote_enabled": HAS_SMOTE and not args.no_smote,
+        "smote_enabled": False,
         "n_features": len(keep_meta),
         "n_specialist_features": len(found_spec_oos),
         "n_context_features": len(found_ctx_oos),
