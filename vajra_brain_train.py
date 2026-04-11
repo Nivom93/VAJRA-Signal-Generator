@@ -4,7 +4,6 @@
 vajra_brain_train.py — Advanced Trainer (v9.0 - Enhanced Signal Capture)
 ====================================================================
 LEVEL 31 UPGRADE:
-- SMOTE OVERSAMPLING: Synthetic minority class generation for balanced training.
 - ADAPTIVE RFE: Feature count scales with sqrt(n_samples) — no more arbitrary cap at 30.
 - IMPROVED BANLIST: Preserved normalized ATR/velocity features for brain learning.
 - CALIBRATED PROBABILITIES: Isotonic calibration for reliable confidence estimates.
@@ -28,12 +27,6 @@ from sklearn.metrics import accuracy_score, precision_score, roc_auc_score, f1_s
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import RFE
 from sklearn.calibration import CalibratedClassifierCV
-
-try:
-    from imblearn.over_sampling import SMOTE
-    HAS_SMOTE = True
-except ImportError:
-    HAS_SMOTE = False
 
 try:
     from sklearn.frozen import FrozenEstimator
@@ -127,16 +120,10 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
     df["pnl_r"] = pd.to_numeric(df["pnl_r"], errors='coerce')
     df.dropna(subset=["pnl_r"], inplace=True)
 
-    # Pure Target Binary with improved labeling
-    if "meta_label" in df.columns:
-        # Threshold 0.50: only trades achieving ≥50% of target R:R are positive.
-        # At 0.25 barely-profitable noise trades (0.01R→meta_label 0.30) were
-        # labeled positive, diluting the signal the brain learns from.
-        df["label"] = (pd.to_numeric(df["meta_label"], errors='coerce').fillna(0) > 0.50).astype(int)
-        log.info("🎯 Dynamic Target mapped via meta_label (threshold > 0.50 for positive).")
-    elif "pnl_r" in df.columns:
-        df["label"] = (df["pnl_r"] > 0).astype(int)
-        log.info("🎯 Pure Target Binary (Fallback): pnl_r > 0.")
+    # 🟢 DIRECTIVE 2: STRICT R-MULTIPLE TARGETING (NO MORE FRACTIONAL WINS)
+    if "pnl_r" in df.columns:
+        df["label"] = (df["pnl_r"] >= 1.0).astype(int)
+        log.info("🎯 Institutional Binary Target: Net pnl_r >= 1.0R.")
     else:
         df["label"] = 0
 
@@ -174,30 +161,6 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
 def _sanitize_data(X: np.ndarray) -> np.ndarray:
     return np.clip(np.nan_to_num(X, nan=0.0), -1e10, 1e10).astype(np.float32)
 
-def _apply_smote(X_train, y_train, random_state=42):
-    """Apply SMOTE oversampling if imlearn is available and minority class is sufficient."""
-    if not HAS_SMOTE:
-        return X_train, y_train
-
-    pos_count = np.sum(y_train == 1)
-    neg_count = np.sum(y_train == 0)
-
-    if pos_count < 6 or neg_count < 6:
-        return X_train, y_train
-
-    # Only oversample to 40% of majority (avoid full balance which introduces too much noise)
-    target_ratio = min(0.4, pos_count / max(1, neg_count))
-    if target_ratio >= 0.35:
-        return X_train, y_train  # Already reasonably balanced
-
-    try:
-        k_neighbors = min(5, pos_count - 1)
-        smote = SMOTE(sampling_strategy=0.4, random_state=random_state, k_neighbors=k_neighbors)
-        X_res, y_res = smote.fit_resample(X_train, y_train)
-        return X_res, y_res
-    except Exception:
-        return X_train, y_train
-
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--events", nargs="+", required=True)
@@ -213,7 +176,6 @@ def main(argv=None):
     ap.add_argument("--weight-decay", type=float, default=0.999)
     ap.add_argument("--wfa-folds", type=int, default=5)
     ap.add_argument("--tune", action="store_true", help="Enable RandomizedSearchCV for hyperparameter tuning.")
-    ap.add_argument("--no-smote", action="store_true", help="Disable SMOTE oversampling.")
     ap.add_argument("--meta-brain", action="store_true",
                     help="Train a unified Meta-Brain after specialist brains. "
                          "Requires events exported with --brains-dir (specialist probabilities).")
@@ -282,9 +244,6 @@ def main(argv=None):
                 actual_gap = min(max(3, n_samples // 30), max_safe_gap)
             log.info(f"Running Walk-Forward Analysis ({actual_folds} folds) with dynamic per-fold RFE Feature Selection...")
 
-            if HAS_SMOTE and not args.no_smote:
-                log.info(f"  SMOTE oversampling: ENABLED (pos={pos_cases}, neg={neg_cases})")
-
             tscv = TimeSeriesSplit(n_splits=actual_folds, gap=actual_gap)
 
             best_tuned_params = {}
@@ -313,17 +272,8 @@ def main(argv=None):
                 X_tr = X_tr_full[:, selector.support_]
                 X_te = X_te_full[:, selector.support_]
 
-                # Apply SMOTE oversampling on training fold (not validation!)
-                smote_applied = False
-                if not args.no_smote:
-                    X_tr_before = X_tr
-                    X_tr, y_tr = _apply_smote(X_tr, y_tr, random_state=42 + i)
-                    smote_applied = len(X_tr) != len(X_tr_before)
-
-                # When SMOTE rebalanced the data, it already handles the class
-                # imbalance — adding scale_pos_weight on top double-corrects and
-                # warps probability calibration (pushes outputs to extremes).
-                fold_scale_weight = 1.0 if smote_applied else scale_weight
+                # 🟢 DIRECTIVE 3: SMOTE ERADICATED (Rely strictly on scale_pos_weight)
+                fold_scale_weight = scale_weight
 
                 clf = xgb.XGBClassifier(
                     n_estimators=args.n_estimators,
@@ -372,17 +322,9 @@ def main(argv=None):
 
             log.info(f"Dynamic RFE: Selecting up to {dynamic_n_features_final} features for {n_samples_all} samples.")
 
-            # Apply SMOTE before final RFE if enabled
+            # 🟢 DIRECTIVE 3: SMOTE ERADICATED (Rely strictly on scale_pos_weight)
             X_all_for_rfe, y_all_for_rfe = X_all, y_all
-            rfe_smote_applied = False
-            if not args.no_smote:
-                X_before = X_all_for_rfe
-                X_all_for_rfe, y_all_for_rfe = _apply_smote(X_all, y_all, random_state=99)
-                rfe_smote_applied = len(X_all_for_rfe) != len(X_before)
-
-            # When SMOTE rebalances the data for RFE, scale_pos_weight must be
-            # 1.0 to avoid double-correcting (same fix as fold-level training).
-            rfe_final_weight = 1.0 if rfe_smote_applied else scale_weight
+            rfe_final_weight = scale_weight
             estimator_rfe_final = xgb.XGBClassifier(n_estimators=50, max_depth=3, random_state=42, objective='binary:logistic', eval_metric='logloss', scale_pos_weight=rfe_final_weight)
             selector_final = RFE(estimator_rfe_final, n_features_to_select=dynamic_n_features_final, step=1)
 
@@ -394,17 +336,9 @@ def main(argv=None):
 
             log.info("Training and Calibrating Final Production Model on FULL dataset...")
 
-            # Apply SMOTE on the selected features for final training
+            # 🟢 DIRECTIVE 3: SMOTE ERADICATED (Rely strictly on scale_pos_weight)
             X_final_train, y_final_train = X_all_sel, y_all
-            final_smote_applied = False
-            if not args.no_smote:
-                X_before_smote = X_final_train
-                X_final_train, y_final_train = _apply_smote(X_all_sel, y_all, random_state=42)
-                final_smote_applied = len(X_final_train) != len(X_before_smote)
-
-            # When SMOTE rebalanced the data, it handles class imbalance —
-            # scale_pos_weight on top double-corrects and warps calibration.
-            final_weight = 1.0 if final_smote_applied else scale_weight
+            final_weight = scale_weight
 
             # ── SEED ENSEMBLE: Train 3 models with different random seeds ──
             # Training variance on small datasets causes ±30R swings. Averaging
@@ -479,7 +413,7 @@ def main(argv=None):
                 "valid_edge": valid_edge,
                 "quality_tier": quality_tier,
                 "threshold_adj": threshold_adj,
-                "smote_enabled": HAS_SMOTE and not args.no_smote,
+                "smote_enabled": False,
                 "n_features_selected": len(selected_features),
                 "n_samples_total": n_samples_all,
                 "pos_neg_ratio": f"{pos_cases}/{neg_cases}",
@@ -719,7 +653,7 @@ def _train_meta_brain(df: pd.DataFrame, base_feature_names: list, args, out_dir:
     neg_cases = int(np.sum(y_oos == 0))
     scale_weight = min(float(neg_cases) / max(1.0, float(pos_cases)), 20.0)
 
-    meta_scale_weight = scale_weight  # Pre-SMOTE weight for proper calibration
+    meta_scale_weight = scale_weight  # Class weight for proper calibration
     log.info(f"Meta-Brain: {n_meta} samples with OOS predictions ({pos_cases} pos / {neg_cases} neg)")
 
     # ══════════════════════════════════════════════════════════════════
@@ -735,10 +669,7 @@ def _train_meta_brain(df: pd.DataFrame, base_feature_names: list, args, out_dir:
         X_tr, y_tr = X_all_meta[train_idx], y_oos[train_idx]
         X_te, y_te = X_all_meta[test_idx], y_oos[test_idx]
 
-        if not args.no_smote:
-            X_tr, y_tr = _apply_smote(X_tr, y_tr, random_state=42 + i)
-
-        # Use ORIGINAL class weight (pre-SMOTE) for proper probability calibration
+        # Use ORIGINAL class weight for proper probability calibration
         sw = meta_scale_weight
 
         clf = xgb.XGBClassifier(
@@ -776,10 +707,6 @@ def _train_meta_brain(df: pd.DataFrame, base_feature_names: list, args, out_dir:
     # PHASE 4: Train final production Meta-Brain on ALL OOS data
     # ══════════════════════════════════════════════════════════════════
     X_final, y_final = X_all_meta, y_oos
-    if not args.no_smote:
-        X_final, y_final = _apply_smote(X_all_meta, y_oos, random_state=99)
-
-    # Use ORIGINAL class weight (pre-SMOTE) for proper probability calibration
     final_weight = meta_scale_weight
 
     meta_model = xgb.XGBClassifier(
@@ -813,7 +740,7 @@ def _train_meta_brain(df: pd.DataFrame, base_feature_names: list, args, out_dir:
         "wfa_roc_auc": avg_roc,
         "wfa_f1": avg_f1,
         "valid_edge": valid_edge,
-        "smote_enabled": HAS_SMOTE and not args.no_smote,
+        "smote_enabled": False,
         "n_features": len(keep_meta),
         "n_specialist_features": len(found_spec_oos),
         "n_context_features": len(found_ctx_oos),
