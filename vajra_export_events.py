@@ -367,24 +367,25 @@ def main():
                 if meta:
                     open_meta.remove(meta)
 
+                    # Sanitation guard only — reject engine pathological NaN/inf blow-ups.
+                    # This is data hygiene, NOT labeling.
                     if -50 < cl["pnl_r"] < 50:
-                        bars_open = cl.get("bars_open", 0)
                         pnl_r = float(cl["pnl_r"])
+                        bars_open = int(cl.get("bars_open", 0))
 
-                        # Directive 2: STRICT ABSOLUTE R-THRESHOLD LABELING.
-                        # The engine has already deducted all friction (maker/taker
-                        # fees + slippage, entry AND exit leg) from pnl_r, so this
-                        # value is the true NET yield. The binary classification
-                        # target collapses to a single hyperplane: the trade either
-                        # cleared 1.0R net of costs or it did not. No fractional
-                        # credit is given for "nearly profitable" setups.
-                        meta_label = 1.0 if pnl_r >= 1.0 else 0.0
-
+                        # Directive (Phase 2B / Meta-Label Trap — Part A):
+                        # NO label is computed in the exporter. No fractional scaling,
+                        # no fuzzy credit, and no binary thresholding. The engine has
+                        # already deducted all friction (maker/taker fees + slippage
+                        # on BOTH entry and exit legs), so `pnl_r` is the true net R
+                        # yield. We export it raw alongside `bars_open` and the
+                        # `exit_reason`; the downstream ML pipeline owns the binary
+                        # threshold hyperplane so it can be swept without re-export.
                         events.append({
                             "symbol": cfg.symbol,
                             "entry_ts": meta["entry_ts"],
                             "exit_ts": ts,
-                            "pnl_r": cl["pnl_r"],
+                            "pnl_r": pnl_r,
                             "rr": meta["rr"],
                             "side": cl.get("side"),
                             "strategy": meta.get("strategy", "UNKNOWN"),
@@ -394,7 +395,6 @@ def main():
                             "tp": cl.get("tp"),
                             "reason": cl.get("exit_reason"),
                             "bars_open": bars_open,
-                            "meta_label": meta_label,
                             **meta["features"]
                         })
 
