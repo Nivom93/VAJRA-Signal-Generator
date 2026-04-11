@@ -2056,6 +2056,21 @@ class BrainLearningManager:
                         booster.load_model(str(xgb_path))
                         brain_data["booster"] = booster
 
+                        # Load ensemble models if available (seed ensembling)
+                        ensemble_boosters = []
+                        for ens_file in brain_data.get("ensemble_files", []) or []:
+                            ens_path = p / ens_file
+                            if ens_path.exists():
+                                try:
+                                    ens_booster = xgb.Booster()
+                                    ens_booster.load_model(str(ens_path))
+                                    ensemble_boosters.append(ens_booster)
+                                except Exception as e:
+                                    log.warning(f"Failed to load ensemble model {ens_file}: {e}")
+                        if ensemble_boosters:
+                            brain_data["ensemble_boosters"] = ensemble_boosters
+                            log.info(f"  Loaded {len(ensemble_boosters)+1} ensemble models for {strat}_{side}")
+
                     self.brains[(strat, side)] = brain_data
                     loaded += 1
             except Exception as e:
@@ -2126,13 +2141,22 @@ class BrainLearningManager:
                 # Booster.predict() behavior varies across XGBoost versions —
                 # output_margin=True guarantees raw log-odds in ALL versions.
                 raw = float(b['booster'].predict(dmat, output_margin=True)[0])
+
+                # Seed ensembling: average raw log-odds across all ensemble models,
+                # then apply sigmoid. This reduces training variance significantly.
+                ensemble_boosters = b.get("ensemble_boosters", [])
+                if ensemble_boosters:
+                    raws = [raw]
+                    for eb in ensemble_boosters:
+                        raws.append(float(eb.predict(dmat, output_margin=True)[0]))
+                    raw = sum(raws) / len(raws)
+
                 prob = 1.0 / (1.0 + math.exp(-raw))
                 # One-time raw margin diagnostic
                 if not getattr(self, '_raw_diag_done', False):
                     self._raw_diag_done = True
-                    prob_direct = float(b['booster'].predict(dmat)[0])
-                    log.info(f"BOOSTER DIAGNOSTIC: predict()={prob_direct:.6f}, "
-                             f"predict(output_margin=True)={raw:.6f}, sigmoid(raw)={prob:.6f}")
+                    ens_note = f" [+{len(ensemble_boosters)} ensemble models]" if ensemble_boosters else ""
+                    log.info(f"BOOSTER DIAGNOSTIC: ensemble_avg_raw={raw:.6f}, sigmoid={prob:.6f}{ens_note}")
             else:
                 prob = b['classifier'].predict_proba(vec)[0][1]
             return prob
@@ -2611,8 +2635,10 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # ==========================================================
     adx_val = base.get("adx", 25.0)
 
-    # Choppy market filter — respects config (default threshold lowered to 10)
-    adx_threshold = getattr(cfg, 'adx_chop_threshold', 10.0)
+    # Choppy market filter — ADX < 15 means price is stuck in a range with no
+    # directional edge. Signals in this regime have poor intrinsic win rate, so
+    # filtering them at the raw level gives the brain a cleaner training distribution.
+    adx_threshold = getattr(cfg, 'adx_chop_threshold', 15.0)
     if getattr(cfg, 'filter_adx_chop', True) and adx_val < adx_threshold and not is_reversal_context:
         return None
 

@@ -406,21 +406,31 @@ def main(argv=None):
             # scale_pos_weight on top double-corrects and warps calibration.
             final_weight = 1.0 if final_smote_applied else scale_weight
 
-            final_model = xgb.XGBClassifier(
-                n_estimators=args.n_estimators,
-                learning_rate=args.learning_rate,
-                max_depth=args.max_depth,
-                reg_alpha=args.reg_alpha,
-                reg_lambda=args.reg_lambda,
-                colsample_bytree=0.7,
-                subsample=0.8,
-                random_state=42,
-                objective='binary:logistic',
-                eval_metric='logloss',
-                scale_pos_weight=final_weight
-            )
+            # ── SEED ENSEMBLE: Train 3 models with different random seeds ──
+            # Training variance on small datasets causes ±30R swings. Averaging
+            # predictions across multiple seeds stabilizes the output.
+            ENSEMBLE_SEEDS = [42, 123, 456]
+            ensemble_boosters = []
+            for seed_idx, seed in enumerate(ENSEMBLE_SEEDS):
+                seed_model = xgb.XGBClassifier(
+                    n_estimators=args.n_estimators,
+                    learning_rate=args.learning_rate,
+                    max_depth=args.max_depth,
+                    reg_alpha=args.reg_alpha,
+                    reg_lambda=args.reg_lambda,
+                    colsample_bytree=0.7,
+                    subsample=0.8,
+                    random_state=seed,
+                    objective='binary:logistic',
+                    eval_metric='logloss',
+                    scale_pos_weight=final_weight
+                )
+                seed_model.fit(X_final_train, y_final_train)
+                ensemble_boosters.append(seed_model)
 
-            final_model.fit(X_final_train, y_final_train)
+            # Keep first model as primary for backwards compat
+            final_model = ensemble_boosters[0]
+            log.info(f"  Seed ensemble: {len(ENSEMBLE_SEEDS)} models trained (seeds={ENSEMBLE_SEEDS})")
 
             # NOTE: Isotonic calibration was tried but distorted probabilities — raw
             # XGBoost outputs around 0.30-0.40 get calibrated down to 0.09, which
@@ -444,12 +454,21 @@ def main(argv=None):
             log.info(f"Brain {strat_clean}_{side}: quality_tier={quality_tier} "
                      f"(ROC={avg_roc:.4f}, Prec={avg_prec:.4f}) → threshold_adj=+{threshold_adj:.2f}")
 
-            # Save XGBoost model natively (version-agnostic JSON format)
+            # Save XGBoost models natively (version-agnostic JSON format)
+            # Primary model (for backwards compat)
             xgb_model_file = out_dir / f"brain_{strat_clean}_{side}.json"
             final_model.get_booster().save_model(str(xgb_model_file))
 
+            # Ensemble models (seeds 2 and 3)
+            ensemble_files = []
+            for i, m in enumerate(ensemble_boosters[1:], start=1):
+                ens_file = out_dir / f"brain_{strat_clean}_{side}_seed{i}.json"
+                m.get_booster().save_model(str(ens_file))
+                ensemble_files.append(str(ens_file.name))
+
             pipeline = {
                 "xgb_model_file": str(xgb_model_file.name),
+                "ensemble_files": ensemble_files,
                 "feature_names": selected_features,
                 "training_args": vars(args),
                 "model": "xgboost_native",
