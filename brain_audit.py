@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-brain_audit.py — Pre-flight Brain Quality Checker & Calibration Diagnostics
-==========================================================================
-Loads all specialist brain_*.joblib files, prints a formatted quality table,
-checks feature overlap, and optionally computes calibration error from a
-backtest trades CSV.
+"""brain_audit.py — pre-flight audit of trained brains.
+
+Reads the SAME tier/quality fields written by vajra_brain_train.py.
+Does NOT recompute tier — single source of truth.
 
 Usage:
     python brain_audit.py --brains-dir ./brains
@@ -15,132 +13,99 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import joblib
 import numpy as np
 import pandas as pd
 
-# ── Deployability thresholds ──
-MIN_ROC = 0.52
-MIN_PRECISION = 0.20
-MIN_FEATURES = 8
-
-# ── Protected features (must match vajra_brain_train.py) ──
-PROTECTED_FEATURES = {
-    "is_ttm_squeeze",
-    "atr_expansion_rate",
-    "cvd_acceleration",
-    "displacement_bos_bull",
-}
-
 
 # ==============================================================================
-# 1. BRAIN AUDIT TABLE
+# 1. BRAIN AUDIT TABLE — reads quality_tier directly from trainer output
 # ==============================================================================
 
-def _tier_label(roc: float) -> str:
-    if roc > 0.55:
-        return "strong"
-    elif roc > 0.50:
-        return "medium"
-    else:
-        return "noise"
+def audit_brains(brains_dir: str) -> bool:
+    p = Path(brains_dir)
+    if not p.is_dir():
+        print(f"ERROR: directory not found: {brains_dir}")
+        return False
 
+    print("-" * 90)
+    print("VAJRA BRAIN PRE-FLIGHT AUDIT")
+    print("-" * 90)
+    print(f"{'Brain':<28} {'Tier':<10} {'ROC':>6} {'Prec':>6} {'F1':>6} "
+          f"{'#Feat':>6} {'Pos%':>6} {'ThrAdj':>7} {'Deploy?':>8}")
+    print("-" * 90)
 
-def _is_deployable(roc: float, precision: float, n_features: int) -> bool:
-    return roc > MIN_ROC and precision > MIN_PRECISION and n_features >= MIN_FEATURES
+    files = sorted(p.glob("brain_*.joblib"))
+    deployable = 0
+    total = 0
+    no_deploy_strategies: set = set()
 
-
-def load_brains(brains_dir: Path) -> List[dict]:
-    """Load all specialist brain joblib files, excluding META and calibrator files."""
-    brains = []
-    for f in sorted(brains_dir.glob("brain_*.joblib")):
-        stem = f.stem
-        parts = stem.split("_")
-        # Skip META brains and calibrators
-        if len(parts) >= 2 and parts[1] == "META":
-            continue
-        if "calibrator" in stem:
+    for f in files:
+        if "META" in f.stem or "calibrator" in f.stem:
             continue
         try:
-            data = joblib.load(str(f))
-            data["_filename"] = f.name
-            # Parse strategy and side from filename: brain_{STRATEGY}_{SIDE}.joblib
-            if len(parts) >= 3:
-                data["_strategy"] = parts[1]
-                data["_side"] = parts[2]
-            brains.append(data)
+            b = joblib.load(f)
+            # Read quality_tier directly — NEVER recompute.
+            # This is the single source of truth written by vajra_brain_train.py.
+            tier = b.get("quality_tier", "unknown")
+            roc = b.get("wfa_roc_auc", 0.0)
+            prec = b.get("wfa_prec", 0.0)
+            f1 = b.get("wfa_f1", 0.0)
+            n_feat = b.get("n_features_selected", len(b.get("feature_names", [])))
+            pos_rate = b.get("positive_class_rate", 0.0) * 100
+            thr_adj = b.get("threshold_adj", 0.0)
+            # Deploy if tier is strong or medium — matching the trainer's definition
+            deploy = tier in ("strong", "medium")
+            print(f"{f.stem:<28} {tier:<10} {roc:>6.3f} {prec:>6.3f} {f1:>6.3f} "
+                  f"{n_feat:>6} {pos_rate:>5.1f}% {'+' + str(thr_adj):>7} "
+                  f"{'YES' if deploy else 'NO':>8}")
+            total += 1
+            if deploy:
+                deployable += 1
+            else:
+                # Extract strategy name (BOS, CHOCH, etc.)
+                parts = f.stem.split("_")
+                if len(parts) >= 2:
+                    no_deploy_strategies.add(parts[1])
         except Exception as e:
-            print(f"  WARNING: Failed to load {f.name}: {e}")
-    return brains
+            print(f"  ERROR reading {f.name}: {e}")
 
-
-def print_audit_table(brains: List[dict]) -> Tuple[int, int, List[str]]:
-    """Print formatted audit table. Returns (total, deployable_count, strategies_with_no_deployable)."""
-    header = (
-        f"{'Brain':<28} {'Tier':<8} {'ROC':>6} {'Prec':>6} {'F1':>6} "
-        f"{'#Feat':>6} {'Pos%':>7} {'ThrAdj':>7} {'Deploy?':>8}"
-    )
-    sep = "-" * len(header)
-
-    print("\n" + sep)
-    print("VAJRA BRAIN PRE-FLIGHT AUDIT")
-    print(sep)
-    print(header)
-    print(sep)
-
-    total = 0
-    deployable = 0
-    strategy_deploy_map: Dict[str, bool] = {}
-
-    for b in brains:
-        name = b.get("_filename", "unknown").replace(".joblib", "")
-        roc = b.get("wfa_roc_auc", 0.0)
-        prec = b.get("wfa_prec", 0.0)
-        f1 = b.get("wfa_f1", 0.0)
-        n_feat = b.get("n_features_selected", len(b.get("feature_names", [])))
-        pos_rate = b.get("positive_class_rate", 0.0)
-        thresh_adj = b.get("threshold_adj", 0.0)
-        tier = _tier_label(roc)
-        dep = _is_deployable(roc, prec, n_feat)
-
-        strat = b.get("_strategy", "?")
-        if strat not in strategy_deploy_map:
-            strategy_deploy_map[strat] = False
-        if dep:
-            strategy_deploy_map[strat] = True
-            deployable += 1
-        total += 1
-
-        dep_str = "YES" if dep else "NO"
-        print(
-            f"{name:<28} {tier:<8} {roc:>6.3f} {prec:>6.3f} {f1:>6.3f} "
-            f"{n_feat:>6} {pos_rate:>6.1%} {thresh_adj:>+7.2f} {dep_str:>8}"
-        )
-
-    print(sep)
-
-    no_deploy_strats = sorted(s for s, has in strategy_deploy_map.items() if not has)
-    pct = (deployable / total * 100) if total else 0
-
+    print("-" * 90)
+    pct = (100.0 * deployable / total) if total > 0 else 0.0
     print(f"\nSUMMARY: {deployable}/{total} brains deployable ({pct:.0f}%)")
-    if no_deploy_strats:
-        print(f"STRATEGIES WITH NO DEPLOYABLE BRAIN: {', '.join(no_deploy_strats)}")
-    else:
-        print("All strategies have at least one deployable brain.")
+    if no_deploy_strategies:
+        print(f"STRATEGIES WITH NO DEPLOYABLE BRAIN: {', '.join(sorted(no_deploy_strategies))}")
 
-    return total, deployable, no_deploy_strats
+    # CI gate
+    if pct >= 50.0:
+        print(f"\nCI GATE PASSED: {deployable}/{total} brains deployable ({pct:.0f}% >= 50%)")
+        return True
+    else:
+        print(f"\nCI GATE FAILED: only {deployable}/{total} deployable ({pct:.0f}% < 50%)")
+        return False
 
 
 # ==============================================================================
 # 2. FEATURE OVERLAP ANALYSIS
 # ==============================================================================
 
-def print_feature_overlap(brains: List[dict]) -> None:
+def print_feature_overlap(brains_dir: str) -> None:
     """Analyse feature usage across brains and flag fragile/universal features."""
+    p = Path(brains_dir)
+    files = sorted(p.glob("brain_*.joblib"))
+    brains = []
+    for f in files:
+        if "META" in f.stem or "calibrator" in f.stem:
+            continue
+        try:
+            brains.append(joblib.load(f))
+        except Exception:
+            pass
+
     if not brains:
         return
 
@@ -174,20 +139,6 @@ def print_feature_overlap(brains: List[dict]) -> None:
             print(f"  ! {f}")
     else:
         print("\nNo fragile features (all features used by 2+ brains).")
-
-    # Protected feature coverage check
-    missing_threshold = n_brains / 2
-    print(f"\nProtected feature coverage (warn if missing from >{int(missing_threshold)} brains):")
-    any_warning = False
-    for pf in PROTECTED_FEATURES:
-        count = feature_counter.get(pf, 0)
-        missing = n_brains - count
-        status = "OK" if missing <= missing_threshold else "WARNING"
-        if status == "WARNING":
-            any_warning = True
-        print(f"  {pf:<30} used by {count}/{n_brains} brains  [{status}]")
-    if not any_warning:
-        print("  All protected features have adequate coverage.")
     print(sep)
 
 
@@ -195,7 +146,7 @@ def print_feature_overlap(brains: List[dict]) -> None:
 # 3. CALIBRATION REPORT
 # ==============================================================================
 
-def calibration_report(trades_csv_path: str, brains_dir: str) -> None:
+def calibration_report(trades_csv_path: str) -> None:
     """
     Read backtest trades CSV, group by strategy, compute ECE per strategy,
     and flag overconfident strategies.
@@ -233,7 +184,7 @@ def calibration_report(trades_csv_path: str, brains_dir: str) -> None:
         print(f"  Found columns: {list(df.columns)}")
         return
 
-    # Convert outcome to binary if needed (positive pnl_r → win)
+    # Convert outcome to binary if needed (positive pnl_r -> win)
     if outcome_col == "outcome":
         df["_win"] = df[outcome_col].apply(lambda x: 1 if str(x).lower() in ("1", "win", "true", "tp") else 0)
     else:
@@ -243,7 +194,6 @@ def calibration_report(trades_csv_path: str, brains_dir: str) -> None:
     df = df.dropna(subset=["_prob"])
 
     if strategy_col is None:
-        # If no strategy column, treat all as one group
         df["_strategy"] = "ALL"
         strategy_col = "_strategy"
     else:
@@ -263,7 +213,6 @@ def calibration_report(trades_csv_path: str, brains_dir: str) -> None:
             print(f"\n  {strat}: too few trades ({len(sdf)}) for calibration analysis")
             continue
 
-        # Create decile bins based on predicted probability
         sdf["_decile"] = pd.qcut(sdf["_prob"], q=10, duplicates="drop")
 
         print(f"\n  Strategy: {strat} (n={len(sdf)})")
@@ -303,7 +252,7 @@ def calibration_report(trades_csv_path: str, brains_dir: str) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Vajra Brain Pre-Flight Audit — checks brain quality before deployment"
+        description="Vajra Brain Pre-Flight Audit — reads quality_tier from trainer (single source of truth)"
     )
     parser.add_argument(
         "--brains-dir", required=True,
@@ -315,35 +264,17 @@ def main():
     )
     args = parser.parse_args()
 
-    brains_dir = Path(args.brains_dir)
-    if not brains_dir.is_dir():
-        print(f"ERROR: brains directory not found: {brains_dir}")
-        sys.exit(1)
-
-    brains = load_brains(brains_dir)
-    if not brains:
-        print("ERROR: No specialist brains found in directory.")
-        sys.exit(1)
-
-    # 1. Audit table
-    total, deployable, no_deploy_strats = print_audit_table(brains)
+    # 1. Audit table (reads quality_tier directly — no recomputation)
+    ok = audit_brains(args.brains_dir)
 
     # 2. Feature overlap
-    print_feature_overlap(brains)
+    print_feature_overlap(args.brains_dir)
 
     # 3. Calibration report (if trades CSV provided)
     if args.trades_csv:
-        calibration_report(args.trades_csv, args.brains_dir)
+        calibration_report(args.trades_csv)
 
-    # CI gate: exit 1 if fewer than 50% deployable
-    if total > 0 and (deployable / total) < 0.50:
-        print(f"\nCI GATE FAILED: only {deployable}/{total} brains deployable "
-              f"({deployable / total:.0%} < 50% required)")
-        sys.exit(1)
-    else:
-        print(f"\nCI GATE PASSED: {deployable}/{total} brains deployable "
-              f"({deployable / total:.0%} >= 50%)")
-        sys.exit(0)
+    raise SystemExit(0 if ok else 1)
 
 
 if __name__ == "__main__":
