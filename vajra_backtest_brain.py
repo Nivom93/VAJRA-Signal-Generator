@@ -186,6 +186,9 @@ def run_backtest_with_brain(args, preloaded=None):
         }
 
         base = confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, max(0, iMacro-1), max(0, iSwing-1), max(0, iHtf-1), iExec, precomp=pre_map, extras=extras)
+        # PARITY FIX: timestamp MUST be set before plan_trade_with_brain so
+        # that _build_vec can recompute session flags (is_london_session,
+        # is_ny_session) via pd.to_datetime — matching _build_full_features.
         base["timestamp"] = ts
         base["symbol"] = cfg.symbol
 
