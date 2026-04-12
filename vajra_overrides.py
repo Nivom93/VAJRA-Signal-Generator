@@ -94,7 +94,7 @@ def _strategy_overrides(cfg):
     # wired dynamic inheritance in ``plan_trade_with_brain``, so a single
     # setting now drives backtest, export and live execution.
     cfg.execution_style = "limit"
-    cfg.pullback_atr_mult = 0.0
+    cfg.pullback_atr_mult = 0.30   # require price to pull back 0.3 ATR before the limit fills
 
     # Real friction — previously zero (illusion of profitability).
     cfg.maker_fee_bps = _BYBIT_MAKER_BPS
@@ -106,6 +106,18 @@ def _strategy_overrides(cfg):
     # risk distance of ~116 USD, filtering out friction-dominated setups.
     cfg.max_friction_pct = 0.25
     cfg.min_risk_distance_usd = 0.0  # disable hard USD floor; dynamic formula only
+
+    # ── Funding-window entry filter ───────────────────────────────────
+    # Don't enter within 30 min of Bybit's 8h funding settlement
+    # (00:00, 08:00, 16:00 UTC). Prevents paying funding almost
+    # immediately on entry, which can flip a +0.7R winner negative.
+    cfg.funding_buffer_minutes = 30
+
+    # ── Limit-order fill realism ──────────────────────────────────────
+    # Require the bar to penetrate the limit by 0.10 ATR to count as
+    # a fill. Proxies FIFO queue position and wick-depth effects that
+    # cause 40–70% of touches to NOT fill in practice.
+    cfg.limit_fill_buffer_atr = 0.10
 
     # ── Phase 2A · Directive 1: Structural SL & Time-In-Force ──────────
     #

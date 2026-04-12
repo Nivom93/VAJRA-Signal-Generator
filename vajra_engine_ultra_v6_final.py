@@ -55,6 +55,7 @@ _p6_counters = {
     "strategy_cap_rejected": 0,
     "cooldown_rejected": 0,
     "confluence_too_low": 0,
+    "funding_window_rejected": 0,
     "passed": 0,
     "filled": 0,                  # plan was triggered and entered a position
     "expired_unfilled": 0,        # plan TTL expired with no fill
@@ -93,6 +94,7 @@ def log_p6_summary():
     log.info(f"  Strategy cap rejected:         {c['strategy_cap_rejected']}")
     log.info(f"  Cooldown rejected:             {c['cooldown_rejected']}")
     log.info(f"  Confluence too low (<2.0):      {c['confluence_too_low']}")
+    log.info(f"  Funding-window rejected:       {c['funding_window_rejected']}")
     log.info(f"  PLANS GENERATED (Phase 6 pass): {c['passed']}")
     log.info(f"  --- of which ---")
     log.info(f"  Plans FILLED (entered position): {c['filled']}")
@@ -2604,6 +2606,26 @@ class TradeManager:
         self.last_processed_ts = {}
         self.strategy_trade_counts: Dict[str, int] = {}
         self.strategy_last_exit_ts: Dict[str, int] = {}
+        self.funding_lookup: Dict[int, float] = {}  # {timestamp_ms: funding_rate}
+        self.exec_tf_minutes: int = self._exec_tf_minutes_from_cfg(cfg)
+
+    def _exec_tf_minutes_from_cfg(self, cfg) -> int:
+        """Parse cfg.exec_tf string ('15m', '1h', etc.) -> minutes."""
+        tf = getattr(cfg, 'exec_tf', '15m').strip().lower()
+        if tf.endswith('m'):
+            return int(tf[:-1])
+        if tf.endswith('h'):
+            return int(tf[:-1]) * 60
+        if tf.endswith('d'):
+            return int(tf[:-1]) * 1440
+        return 15  # safe default
+
+    def set_funding_lookup(self, ts_array, funding_array):
+        """Populate the funding lookup table from aligned arrays (called by backtester)."""
+        self.funding_lookup = dict(zip(
+            np.asarray(ts_array, dtype=np.int64).tolist(),
+            np.asarray(funding_array, dtype=float).tolist(),
+        ))
 
     def can_open(self, side):
         total_active = len(self.open_trades) + len(self.pending_orders)
@@ -2751,28 +2773,56 @@ class TradeManager:
         }
 
     def _compute_pnl_r(self, side: str, entry_fill_px: float, exit_px: float,
-                       raw_risk: float, order_type: str) -> Tuple[float, float, Dict[str, float]]:
+                       raw_risk: float, order_type: str,
+                       bars_held: int = 0, avg_funding_rate: float = 0.0,
+                       exec_tf_minutes: int = 15) -> Tuple[float, float, Dict[str, float]]:
         """Return ``(net_pnl_r, gross_pnl_r, friction_breakdown)``.
 
         The monetary friction is deducted from the raw directional delta
         BEFORE the R-multiple is computed so ``net_pnl_r`` is the authentic
         yield after trading friction.
+
+        Now also deducts funding cost.  Bybit funding settles every 8h
+        (00:00, 08:00, 16:00 UTC).  Per-cycle cost is
+        funding_rate * notional.  Longs pay positive funding, shorts pay
+        negative funding.
+
+        Args:
+            bars_held: number of execution-tf bars the position was held
+            avg_funding_rate: average funding rate (decimal, e.g. 0.0001 = 0.01%)
+            exec_tf_minutes: minutes per execution bar (default 15)
         """
         raw_delta = (exit_px - entry_fill_px) if side == 'long' else (entry_fill_px - exit_px)
         fb = self._friction_breakdown(entry_fill_px, exit_px, order_type)
         total_friction = fb["total_friction_cost"]
-        net_delta = raw_delta - total_friction
+
+        # ── Funding accrual ──
+        # Number of 8h funding cycles crossed (rounded up — partial cycles still pay)
+        minutes_held = bars_held * exec_tf_minutes
+        n_funding_cycles = max(1, int(np.ceil(minutes_held / (8 * 60)))) if minutes_held > 0 else 0
+        # Long pays positive funding, short pays negative funding
+        sign = 1.0 if side == "long" else -1.0
+        funding_cost = avg_funding_rate * entry_fill_px * n_funding_cycles * sign
+        fb["funding_cost"] = funding_cost
+        fb["n_funding_cycles"] = n_funding_cycles
+        fb["avg_funding_rate"] = avg_funding_rate
+
+        net_delta = raw_delta - total_friction - funding_cost
 
         denom = raw_risk if raw_risk > 1e-12 else 1e-12
         gross_pnl_r = float(raw_delta / denom)
         net_pnl_r   = float(net_delta / denom)
+        fb["funding_drag_r"] = float(funding_cost / denom)
         return net_pnl_r, gross_pnl_r, fb
 
     def _compute_net_pnl_r(self, side: str, entry_fill_px: float, exit_px: float,
-                           raw_risk: float, order_type: str) -> float:
+                           raw_risk: float, order_type: str,
+                           bars_held: int = 0, avg_funding_rate: float = 0.0,
+                           exec_tf_minutes: int = 15) -> float:
         """Back-compat thin wrapper that only returns the net R-multiple."""
         net_pnl_r, _gross, _fb = self._compute_pnl_r(
-            side, entry_fill_px, exit_px, raw_risk, order_type
+            side, entry_fill_px, exit_px, raw_risk, order_type,
+            bars_held, avg_funding_rate, exec_tf_minutes
         )
         return net_pnl_r
 
@@ -2811,12 +2861,26 @@ class TradeManager:
             order_type = order.get('type', getattr(self.cfg, 'execution_style', 'limit'))
 
             if order_type == 'limit':
+                # Realistic fill: require the bar to CROSS the limit by a buffer,
+                # not just touch it. This proxies queue-position and wick-depth
+                # effects. The buffer is configurable via cfg.limit_fill_buffer_atr
+                # (default 0.10 ATR).
+                fill_buffer_pct = getattr(self.cfg, 'limit_fill_buffer_pct', 0.001)  # 0.1% of price
+                fill_buffer_atr_mult = getattr(self.cfg, 'limit_fill_buffer_atr', 0.10)
+                # Use ATR if the order carried it; else fall back to pct of entry
+                order_atr = order.get('atr_at_signal', 0.0)
+                if order_atr > 0:
+                    fill_buffer = order_atr * fill_buffer_atr_mult
+                else:
+                    fill_buffer = entry_target * fill_buffer_pct
+
                 if side == 'long':
                     if o <= order.get('sl', -1.0):
                         order['ttl'] = -1
                         _p6_counters["stopped_pre_entry"] += 1
                         continue
-                    if l <= entry_target:
+                    # Long limit: bar low must penetrate BELOW (target - buffer)
+                    if l <= (entry_target - fill_buffer):
                         triggered = True
                         fill_px = min(o, entry_target)
                 elif side == 'short':
@@ -2824,7 +2888,8 @@ class TradeManager:
                         order['ttl'] = -1
                         _p6_counters["stopped_pre_entry"] += 1
                         continue
-                    if h >= entry_target:
+                    # Short limit: bar high must penetrate ABOVE (target + buffer)
+                    if h >= (entry_target + fill_buffer):
                         triggered = True
                         fill_px = max(o, entry_target)
             elif order_type == 'market':
@@ -2938,8 +3003,27 @@ class TradeManager:
                 # Directive 1: deduct full round-trip friction from pnl_r.
                 # Stamp the full audit trail so the backtester, exporter,
                 # and meta-brain labeller all see identical numbers.
+
+                # ── Funding context for accrual ──
+                fill_ts = t.get('fill_ts', current_ts)
+                bars_held = t.get('bars_open', 0)
+                # Average funding over the hold window.  If lookup is empty
+                # (live mode w/o pre-loaded funding), default to 0 — the live
+                # executor handles funding via the exchange's actual debits.
+                avg_funding = 0.0
+                if self.funding_lookup:
+                    fill_ts_int = int(fill_ts) if fill_ts else current_ts
+                    exit_ts_int = int(current_ts)
+                    fr_samples = [v for ts_k, v in self.funding_lookup.items()
+                                  if fill_ts_int <= ts_k <= exit_ts_int]
+                    if fr_samples:
+                        avg_funding = float(np.mean(fr_samples))
+
                 net_pnl_r, gross_pnl_r, fb = self._compute_pnl_r(
-                    side, entry, exit_px, raw_risk, order_type
+                    side, entry, exit_px, raw_risk, order_type,
+                    bars_held=bars_held,
+                    avg_funding_rate=avg_funding,
+                    exec_tf_minutes=self.exec_tf_minutes,
                 )
                 t['pnl_r']                = net_pnl_r
                 t['gross_pnl_r']          = gross_pnl_r
@@ -2947,6 +3031,9 @@ class TradeManager:
                 t['exit_friction']        = fb["exit_friction"]
                 t['total_friction_cost']  = fb["total_friction_cost"]
                 t['friction_drag_r']      = gross_pnl_r - net_pnl_r
+                t['funding_drag_r']       = fb.get("funding_drag_r", 0.0)
+                t['n_funding_cycles']     = fb.get("n_funding_cycles", 0)
+                t['avg_funding_rate']     = fb.get("avg_funding_rate", 0.0)
                 t['exit_price']           = exit_px
                 t['exit_reason']          = exit_reason
                 t['exit_ts']              = current_ts
@@ -3707,6 +3794,27 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         _p6_counters["risk_dist_too_small"] += 1
         return None
 
+    # ── Funding-window filter ──
+    # Bybit funding settles at 00:00, 08:00, 16:00 UTC. Entering within
+    # `funding_buffer_minutes` of a settlement means paying funding almost
+    # immediately. Skip if too close.
+    funding_buffer_minutes = getattr(cfg, 'funding_buffer_minutes', 30)
+    if funding_buffer_minutes > 0:
+        ts_now = base.get("timestamp", 0)
+        if ts_now > 0:
+            from datetime import datetime, timezone
+            dt_now = datetime.fromtimestamp(ts_now / 1000, tz=timezone.utc)
+            hour = dt_now.hour
+            minute = dt_now.minute
+            # Minutes to next funding settlement (00, 08, 16 UTC)
+            next_funding_hour = ((hour // 8) + 1) * 8
+            if next_funding_hour >= 24:
+                next_funding_hour = 24  # wraps to 00:00 next day
+            minutes_to_funding = (next_funding_hour - hour) * 60 - minute
+            if 0 < minutes_to_funding < funding_buffer_minutes:
+                _p6_counters["funding_window_rejected"] += 1
+                return None
+
     # ==========================================================
     # PHASE 6: AI PROBABILITY GATE & EV CALCULATION
     # ==========================================================
@@ -3815,5 +3923,6 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         "prob": win_prob, "key": f"{setup_type}_{side}", "features": base,
         "risk_factor": risk_factor, "strategy": setup_type,
         "type": getattr(cfg, 'execution_style', 'limit'),
-        "analysis": analysis_str
+        "analysis": analysis_str,
+        "atr_at_signal": float(current_atr),
     }
