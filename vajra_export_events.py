@@ -359,7 +359,7 @@ def main():
             
             if iMacro < 0 or iSwing < 0 or iHtf < 0: return
 
-            bar = {"o": row.open, "h": row.high, "l": row.low, "c": row.close}
+            bar = {"o": row.open, "h": row.high, "l": row.low, "c": row.close, "timestamp": ts}
             exits = tm.step_bar(cfg.symbol, bar["o"], bar["h"], bar["l"], bar["c"], ts=ts)
 
             for cl in exits:
