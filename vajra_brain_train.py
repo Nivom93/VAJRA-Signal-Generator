@@ -109,7 +109,86 @@ def _enforce_causality_drop(df: pd.DataFrame, lookahead: int = 5) -> pd.DataFram
     if len(df) > lookahead: return df.iloc[:-lookahead]
     return df
 
-def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_exclude: Set[str]) -> Tuple[pd.DataFrame, List[str]]:
+
+def analyse_label_thresholds(df: pd.DataFrame) -> None:
+    """Print positive-class rate and per-strategy sample counts at key R thresholds.
+
+    Called before training to diagnose how label stringency affects class balance.
+    Thresholds tested: 0.0R, 0.5R, 1.0R, 1.5R.
+    """
+    if "pnl_r" not in df.columns:
+        log.warning("analyse_label_thresholds: 'pnl_r' column missing — skipping.")
+        return
+
+    pnl = pd.to_numeric(df["pnl_r"], errors="coerce")
+    n_total = len(pnl.dropna())
+    has_strategy = "strategy" in df.columns
+
+    log.info("=" * 70)
+    log.info("  LABEL THRESHOLD ANALYSIS")
+    log.info("=" * 70)
+    log.info(f"  Total samples (with valid pnl_r): {n_total}")
+
+    for thresh in [0.0, 0.5, 1.0, 1.5]:
+        pos_mask = pnl >= thresh
+        n_pos = int(pos_mask.sum())
+        rate = n_pos / n_total * 100 if n_total > 0 else 0.0
+        log.info(f"  Threshold >= {thresh:.1f}R : {n_pos:>5} positive  ({rate:5.1f}%)  |  scale_pos_weight ~ {((n_total - n_pos) / max(n_pos, 1)):.1f}x")
+
+        if has_strategy:
+            strat_counts = []
+            for strat in sorted(df["strategy"].dropna().unique()):
+                strat_mask = df["strategy"] == strat
+                strat_pos = int((pos_mask & strat_mask).sum())
+                strat_total = int(strat_mask.sum())
+                strat_counts.append(f"{strat}={strat_pos}/{strat_total}")
+            log.info(f"    Per-strategy: {', '.join(strat_counts)}")
+
+    log.info("=" * 70)
+
+
+def load_events_df(paths: List[str], min_win_r: float, filter_side: str,
+                   extra_exclude: Set[str], label_threshold: float = 0.5,
+                   label_mode: str = "fixed_r") -> Tuple[pd.DataFrame, List[str]]:
+    """Load trade-event JSONL files and construct the binary training label.
+
+    Label threshold recommendation
+    ==============================
+    The execution engine targets min_rr=1.5 with atr_mult_tp=2.5, meaning a
+    successful trade must travel ~2.5 ATR to hit take-profit and return >= 1.5R.
+    A label threshold of 0.5R is far too relaxed: it teaches the model which
+    trades briefly go profitable rather than which trades follow through to the
+    target.  The 2024 backtest confirms this — Spearman r=0.047 between model
+    probability and actual pnl_r, and all brain ROC-AUCs sit at noise level
+    (0.44–0.54).
+
+    Mathematical justification for threshold = 1.0R:
+      - The ideal label equals the execution target (1.5R), but at 1.5R the
+        positive class shrinks to ~25.9% of trades (130 TP / 502 total).
+        Per-strategy subsets (e.g. ALPHA_long) may drop below 30 positive
+        samples, violating the minimum sample guard.
+      - At 1.0R the positive class includes TP exits (avg +1.93R) plus the
+        strongest TIF exits (avg +0.35R, those above 1.0R), giving roughly
+        30–35% positive rate.  This keeps scale_pos_weight < 3x (well within
+        the < 4x guideline) while aligning the label much closer to the
+        execution target than 0.5R.
+      - At 0.5R the positive class is ~40–45%, but includes many trades that
+        only briefly went 0.5R before reversing — noise the model memorises.
+      - Recommended default: 1.0R (--label-threshold 1.0) with mode "fixed_r".
+        For maximum alignment, use mode "tp_or_tif_positive" which labels
+        positives as TP exits OR TIF exits with pnl_r > 1.0R, directly matching
+        the execution engine's success criteria.
+
+    Parameters
+    ----------
+    label_threshold : float
+        Minimum pnl_r to label a trade as positive (used in "fixed_r" mode).
+    label_mode : str
+        "fixed_r"            — label = 1 when pnl_r >= label_threshold (default).
+        "tp_only"            — label = 1 when exit_reason == 'tp'.
+        "tp_or_tif_positive" — label = 1 when exit_reason == 'tp' OR
+                               (exit_reason == 'tif' AND pnl_r > 1.0).
+    """
     log.info(f"Loading events from {len(paths)} file(s)...")
     rows = []
     for p in paths:
@@ -130,16 +209,32 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
     df["pnl_r"] = pd.to_numeric(df["pnl_r"], errors='coerce')
     df.dropna(subset=["pnl_r"], inplace=True)
 
-    # DIRECTIVE 2 (post-friction relaxation): Physical friction (fees + slippage)
-    # makes 1.0R a very noisy label on training data. Relaxing to 0.5R lets the
-    # model learn the FEATURES of a winning direction on a denser positive class.
-    # The live execution engine still holds trades to the full 2.5R target (min_rr),
-    # so this only affects supervised learning, not live position management.
+    # ── Label assignment (configurable via --label-mode / --label-threshold) ──
     if "pnl_r" in df.columns:
-        df["label"] = (df["pnl_r"] >= 0.5).astype(int)
-        log.info("🎯 Binary Target (Relaxed): Net pnl_r >= 0.5R (exec still targets 2.5R).")
+        if label_mode == "tp_only":
+            if "exit_reason" in df.columns:
+                df["label"] = (df["exit_reason"] == "tp").astype(int)
+            else:
+                log.warning("label_mode='tp_only' but 'exit_reason' column missing — falling back to fixed_r.")
+                df["label"] = (df["pnl_r"] >= label_threshold).astype(int)
+        elif label_mode == "tp_or_tif_positive":
+            if "exit_reason" in df.columns:
+                is_tp = df["exit_reason"] == "tp"
+                is_tif_positive = (df["exit_reason"] == "tif") & (df["pnl_r"] > 1.0)
+                df["label"] = (is_tp | is_tif_positive).astype(int)
+            else:
+                log.warning("label_mode='tp_or_tif_positive' but 'exit_reason' column missing — falling back to fixed_r.")
+                df["label"] = (df["pnl_r"] >= label_threshold).astype(int)
+        else:  # fixed_r (default)
+            df["label"] = (df["pnl_r"] >= label_threshold).astype(int)
+        log.info(f"Label mode='{label_mode}', threshold={label_threshold:.2f}R")
     else:
         df["label"] = 0
+
+    n_pos = int(df["label"].sum())
+    n_neg = int((df["label"] == 0).sum())
+    pos_rate = n_pos / max(1, n_pos + n_neg) * 100
+    log.info(f"Class distribution: {n_pos} positive / {n_neg} negative ({pos_rate:.1f}% positive rate)")
 
     df["entry_ts"] = pd.to_numeric(df["entry_ts"], errors='coerce')
     df.dropna(subset=["entry_ts"], inplace=True)
@@ -193,6 +288,13 @@ def main(argv=None):
     ap.add_argument("--meta-brain", action="store_true",
                     help="Train a unified Meta-Brain after specialist brains. "
                          "Requires events exported with --brains-dir (specialist probabilities).")
+    ap.add_argument("--label-threshold", type=float, default=0.5,
+                    help="Minimum pnl_r to label a trade as positive in 'fixed_r' mode (default: 0.5).")
+    ap.add_argument("--label-mode", type=str, default="fixed_r",
+                    choices=["fixed_r", "tp_only", "tp_or_tif_positive"],
+                    help="Label strategy: 'fixed_r' (pnl_r >= threshold), "
+                         "'tp_only' (exit_reason=='tp'), "
+                         "'tp_or_tif_positive' (tp OR tif with pnl_r > 1.0). Default: fixed_r.")
 
     args = ap.parse_args(argv)
 
@@ -202,10 +304,18 @@ def main(argv=None):
 
     try:
         # Load all sides, we will filter manually
-        df, base_feature_names = load_events_df(args.events, args.min_win_r, "all", set(_parse_extras(args.exclude_cols)))
+        df, base_feature_names = load_events_df(
+            args.events, args.min_win_r, "all",
+            set(_parse_extras(args.exclude_cols)),
+            label_threshold=args.label_threshold,
+            label_mode=args.label_mode,
+        )
     except Exception as e:
         log.error(f"Data load failed: {e}")
         return
+
+    # Run label threshold analysis before training begins
+    analyse_label_thresholds(df)
 
     out_dir = Path(args.brains_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -227,6 +337,14 @@ def main(argv=None):
             # of n/25, fewer samples means too few features to learn from.
             if len(subset) < 100:
                 log.info(f"Skipping {strat_clean}_{side} - Not enough samples ({len(subset)})")
+                continue
+
+            # Minimum positive-class guard: need at least 30 positive samples
+            # for meaningful gradient signal. With fewer, XGBoost learns noise.
+            n_pos_subset = int(subset["label"].sum())
+            if n_pos_subset < 30:
+                log.warning(f"Skipping {strat_clean}_{side} - Not enough positive samples "
+                            f"({n_pos_subset} positive out of {len(subset)} total, need >= 30)")
                 continue
 
             log.info(f"--- Training Isolated Brain: {strat_clean}_{side} ({len(subset)} samples) ---")
