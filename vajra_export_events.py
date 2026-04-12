@@ -84,13 +84,18 @@ def fetch_macro_trend(ticker_symbol: str, ltf_timestamps: pd.Series) -> np.ndarr
             if ma20[i] > 1e-12:
                 trend[i] = (close_np[i] - ma20[i]) / ma20[i] * 100.0
         
-        # MACRO TIME LEAK FIX: Shift the daily close by 24h to ensure it is fully closed!
+        # MACRO SETTLEMENT LAG: yfinance daily candles for indices close at ~21:00 UTC
+        # (NYSE close). Settlement data is available ~6h after close (~03:00 UTC next day).
+        # Adding +6h = 21,600,000 ms anchors the candle to its actual availability time.
+        # NOTE: This 6h lag is conservative for major equity indices (S&P, DXY).
+        # For thinly-traded futures, settlement may be later — verify per ticker.
+        SETTLEMENT_LAG_MS = 6 * 60 * 60 * 1000  # 6 hours
         trend_series = pd.Series(trend, index=df.index.view('int64') // 10**6)
 
         # FIX: Strip duplicate indices to prevent reindex crashes
         trend_series = trend_series[~trend_series.index.duplicated(keep='last')]
 
-        trend_series.index = trend_series.index + 86400000 
+        trend_series.index = trend_series.index + SETTLEMENT_LAG_MS
         
         # PREVENT DUPLICATE INDEX CRASHES (Source)
         trend_series = trend_series[~trend_series.index.duplicated(keep='last')]
@@ -191,10 +196,9 @@ def _build_full_features(base, adv_features, iMacro, iSwing, iHtf, iExec, len_ma
 
     full_feats["rsi_14"] = float(pExec.rsi14[iExec]) if iExec < len(pExec.rsi14) else 50.0
 
-    # Session flags instead of raw hour/day (generalize better across regimes)
-    entry_dt = pd.to_datetime(ts, unit="ms", utc=True)
-    full_feats["is_london_session"] = 1.0 if 7 <= entry_dt.hour <= 16 else 0.0
-    full_feats["is_ny_session"] = 1.0 if 13 <= entry_dt.hour <= 22 else 0.0
+    # Session flags — timezone-correct (handles BST/GMT and EST/EDT)
+    from vajra_macro_data import compute_session_flags
+    full_feats.update(compute_session_flags(int(ts)))
     return full_feats
 
 def main():
@@ -291,27 +295,13 @@ def main():
         oi_aligned = fetch_delta_oi(exw, cfg.symbol, cfg.exec_tf, exec_tf["timestamp"])
         funding_aligned = fetch_historical_funding_rates(exw, cfg.symbol, exec_tf["timestamp"])
 
-        # Historical BTC.D Fetch
-        try:
-            import ccxt
-            binance_ex = ccxt.binance({'options': {'defaultType': 'swap'}})
-            btcd_raw = binance_ex.fetch_ohlcv("BTCDOM/USDT:USDT", timeframe="4h", limit=1000)
-            btcd_df = pd.DataFrame(btcd_raw, columns=["timestamp","open","high","low","close","volume"])
-            if not btcd_df.empty:
-                btcd_c = btcd_df['close'].values
-                btcd_trend = np.zeros_like(btcd_c)
-                for i in range(5, len(btcd_c)):
-                    slope = (btcd_c[i] - btcd_c[i-5]) / btcd_c[i-5] * 100.0
-                    if slope > 0.5: btcd_trend[i] = 1.0
-                    elif slope < -0.5: btcd_trend[i] = -1.0
-
-                btcd_series = pd.Series(btcd_trend, index=pd.to_datetime(btcd_df['timestamp'], unit='ms', utc=True))
-                btcd_aligned = btcd_series.shift(1).reindex(pd.to_datetime(exec_tf["timestamp"], unit='ms', utc=True), method='ffill').fillna(0.0).values
-            else:
-                btcd_aligned = np.zeros(len(exec_tf))
-        except Exception as e:
-            log.warning(f"Failed to fetch BTCDOM: {e}")
-            btcd_aligned = np.zeros(len(exec_tf))
+        # Historical BTC.D — use real dominance cache instead of BTCDOM perpetual proxy
+        from vajra_macro_data import fetch_btc_dominance_series
+        btcd_aligned = fetch_btc_dominance_series(
+            start_ms=int(exec_tf["timestamp"].iloc[0]),
+            end_ms=int(exec_tf["timestamp"].iloc[-1]),
+            exec_timestamps=exec_tf["timestamp"],
+        )
 
         pMacro, pSwing, pHtf, pExec = Precomp(macro_tf), Precomp(swing_tf), Precomp(htf), Precomp(exec_tf)
         pre_map = {"macro_tf": pMacro, "swing_tf": pSwing, "htf": pHtf, "exec_tf": pExec}

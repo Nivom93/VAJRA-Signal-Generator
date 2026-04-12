@@ -1729,10 +1729,11 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
     f["asian_range_swept_dn"] = 1.0 if pExec.l[idx_Exec] < pExec.asian_low[idx_Exec] and pExec.c[idx_Exec] > pExec.asian_low[idx_Exec] else 0.0
     
     ts = exec_tf.timestamp.iloc[idx_Exec]
-    # Killzone session flags (generalize better than raw hour/day features)
-    hour = (int(ts) // 3600000) % 24
-    f["is_london_session"] = 1.0 if 7 <= hour <= 16 else 0.0
-    f["is_ny_session"] = 1.0 if 13 <= hour <= 22 else 0.0
+    # Killzone session flags — timezone-correct (handles BST/GMT and EST/EDT)
+    from vajra_macro_data import compute_session_flags
+    _sess = compute_session_flags(int(ts))
+    f["is_london_session"] = _sess["is_london_session"]
+    f["is_ny_session"] = _sess["is_ny_session"]
 
     # ORB breakout flags — scalar for plan_trade_with_brain (LAMBDA strategy)
     asian_h = float(pExec.asian_high[idx_Exec])
@@ -2573,15 +2574,13 @@ class BrainLearningManager:
             "side": 1.0 if side=="long" else 0.0
         })
 
-        # SESSION FLAG PARITY FIX: The training export (_build_full_features)
-        # explicitly overrides session flags with pd.to_datetime at the end.
-        # Replicate that here so inference matches training exactly.
+        # SESSION FLAG PARITY FIX: Use the same timezone-correct helper as
+        # the training export (_build_full_features) to avoid training/inference drift.
         _ts = b.get("timestamp")
         if _ts is not None:
             try:
-                _dt = pd.to_datetime(int(_ts), unit="ms", utc=True)
-                d["is_london_session"] = 1.0 if 7 <= _dt.hour <= 16 else 0.0
-                d["is_ny_session"] = 1.0 if 13 <= _dt.hour <= 22 else 0.0
+                from vajra_macro_data import compute_session_flags
+                d.update(compute_session_flags(int(_ts)))
             except Exception:
                 pass  # keep confluence_features values
 
