@@ -88,6 +88,11 @@ def _strategy_overrides(cfg):
     cfg.taker_fee_bps = _BYBIT_TAKER_BPS
     cfg.slippage_bps = _SLIPPAGE_BPS_PER_LEG
 
+    # Minimum risk distance — caps round-trip friction at 20% of 1R.
+    # With 13.5 bps RT friction at BTC ≈ 43,000 this implies a minimum
+    # risk distance of ~116 USD, filtering out friction-dominated setups.
+    cfg.max_friction_pct = 0.20
+
     # ── Phase 2A · Directive 1: Structural SL & Time-In-Force ──────────
     #
     # (A) Structural Stop Loss  ───────────────────────────────────────
