@@ -506,6 +506,13 @@ def main(argv=None):
                 roc = roc_auc_score(y_te, probs) if len(np.unique(y_te)) > 1 else 0.5
                 f1 = f1_score(y_te, preds, zero_division=0)
 
+                # Capture the LAST fold's OOS predictions for isotonic calibration training.
+                # This must be the LAST fold (most recent in time) — calibration is a
+                # distribution-mapping function and we want it fit on the most recent regime.
+                if i == actual_folds - 1:
+                    calib_probs_oos = probs.copy()
+                    calib_labels_oos = y_te.copy()
+
                 acc_scores.append(acc)
                 prec_scores.append(prec)
                 roc_auc_scores.append(roc)
@@ -531,6 +538,32 @@ def main(argv=None):
             avg_f1 = np.mean(f1_scores)
 
             log.info(f"✅ WFA RESULTS: Avg Acc = {avg_acc:.4f} | Avg Prec = {avg_prec:.4f} | Avg ROC-AUC = {avg_roc:.4f} | Avg F1 = {avg_f1:.4f}")
+
+            # ── Isotonic calibration on the held-out (last) fold ──
+            # This is the canonical post-XGBoost calibration step. We use the LAST fold
+            # specifically so the calibration sees the most-recent OOS predictions, and
+            # we hold this set out from the final production model fit (it's a true OOS
+            # subset by construction since the WFA already split it that way).
+            from sklearn.isotonic import IsotonicRegression
+
+            calibrator = None
+            if 'calib_probs_oos' in dir() and len(np.unique(calib_labels_oos)) > 1:
+                try:
+                    calibrator = IsotonicRegression(out_of_bounds='clip', y_min=0.0, y_max=1.0)
+                    calibrator.fit(calib_probs_oos, calib_labels_oos)
+                    # Sanity log: show calibration curve at key probability points
+                    test_pts = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])
+                    calibrated_pts = calibrator.predict(test_pts)
+                    log.info(
+                        f"Isotonic calibration fit on {len(calib_labels_oos)} OOS samples "
+                        f"({int(calib_labels_oos.sum())} positives)"
+                    )
+                    log.info(f"  Calibration map: " + ", ".join(
+                        f"{r:.2f}->{c:.2f}" for r, c in zip(test_pts, calibrated_pts)
+                    ))
+                except Exception as e:
+                    log.warning(f"Isotonic calibration failed: {e}. Brain will use raw probabilities.")
+                    calibrator = None
 
             log.info("Running Final RFE Feature Selection on FULL dataset for Production Model...")
 
@@ -667,6 +700,8 @@ def main(argv=None):
                 "n_samples_total": n_samples_all,
                 "pos_neg_ratio": f"{pos_cases}/{neg_cases}",
                 "positive_class_rate": float(pos_cases / len(y_all)),
+                "calibrator": calibrator,   # IsotonicRegression or None
+                "calibration_method": "isotonic_oos_lastfold" if calibrator else "none",
             }
 
             out_file = out_dir / f"brain_{strat_clean}_{side}.joblib"
@@ -770,11 +805,16 @@ def train_meta_brain(oof_df, context_df, out_dir, args):
         index="orig_idx", columns="spec_col", values="oof_prob", aggfunc="first"
     )
 
-    # Ensure all specialist columns exist, fill missing with -1.0
+    # Ensure all specialist columns exist — keep NaN for missingness, let XGBoost
+    # route via its native missing handling. Using -1.0 as a sentinel teaches the
+    # meta-brain that "specialist X didn't fire" is itself a feature, which leaks
+    # regime information already encoded in the context features. XGBoost's
+    # missing=np.nan handling avoids this by routing via the tree's default direction
+    # at each split, which is the principled approach.
     for col in specialist_col_names:
         if col not in pivoted.columns:
             pivoted[col] = np.nan
-    pivoted = pivoted[specialist_col_names].fillna(-1.0)
+    pivoted = pivoted[specialist_col_names]   # keep NaN — do NOT fillna(-1.0)
 
     event_indices = pivoted.index.values
     n_events = len(event_indices)
@@ -798,9 +838,21 @@ def train_meta_brain(oof_df, context_df, out_dir, args):
     side_vals = side_vals[sort_order]
     pivoted = pivoted.loc[event_indices]
 
+    # Diagnostic: surface fold-count heterogeneity across specialists.
+    # Each specialist's WFA uses different fold counts (actual_folds = min(args.wfa_folds, ...)).
+    # OOF predictions from a 2-fold specialist (50% trained on history) differ in noise
+    # characteristics from a 4-fold specialist (75% trained on history) at the same timestamp.
+    # A full fix would require homogenising fold counts across all specialists.
+    log.warning(
+        "Meta-Brain fold heterogeneity: specialists trained on different fraction of history. "
+        "OOF predictions from a 2-fold specialist (50%% trained on history) differ in noise "
+        "characteristics from a 4-fold specialist (75%% trained on history) at the same timestamp."
+    )
+    log.info("Per-strategy OOF count: " + str(oof_df.groupby("strategy")["oof_prob"].count().to_dict()))
+
     # ── Aggregate specialist statistics ──
     spec_vals = pivoted.values
-    active_mask = spec_vals >= 0.0
+    active_mask = ~np.isnan(spec_vals)
     active_for_stats = np.where(active_mask, spec_vals, np.nan)
 
     agg_data = {}
@@ -847,7 +899,14 @@ def train_meta_brain(oof_df, context_df, out_dir, args):
         return
 
     X_all = meta_df[keep_meta].values.astype(np.float32)
-    X_all = _sanitize_data(X_all)
+    # Sanitize non-specialist columns (clip extreme values, replace inf) but
+    # PRESERVE NaN in specialist columns — XGBoost routes via missing path.
+    specialist_col_set = set(specialist_col_names)
+    for col_idx, col_name in enumerate(keep_meta):
+        if col_name not in specialist_col_set:
+            X_all[:, col_idx] = np.clip(
+                np.nan_to_num(X_all[:, col_idx], nan=0.0), -1e10, 1e10
+            )
 
     pos_cases = int(np.sum(y_all == 1))
     neg_cases = int(np.sum(y_all == 0))
@@ -873,6 +932,7 @@ def train_meta_brain(oof_df, context_df, out_dir, args):
             objective='binary:logistic',
             eval_metric='logloss',
             scale_pos_weight=scale_weight,
+            missing=np.nan,           # explicit: route NaN specialist cols via default direction
         )
         clf.fit(X_tr, y_tr)
 
@@ -895,6 +955,7 @@ def train_meta_brain(oof_df, context_df, out_dir, args):
         objective='binary:logistic',
         eval_metric='logloss',
         scale_pos_weight=scale_weight,
+        missing=np.nan,           # explicit: route NaN specialist cols via default direction
     )
     meta_model.fit(X_all, y_all)
 

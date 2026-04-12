@@ -2378,6 +2378,15 @@ class BrainLearningManager:
                     raw = sum(raws) / len(raws)
 
                 prob = 1.0 / (1.0 + math.exp(-raw))
+
+                # ── Apply isotonic calibration if available ──
+                calibrator = b.get("calibrator")
+                if calibrator is not None:
+                    try:
+                        prob = float(calibrator.predict([prob])[0])
+                    except Exception as e:
+                        log.warning(f"Calibrator failed for {strategy}_{side}: {e}. Using raw prob.")
+
                 # One-time raw margin diagnostic
                 if not getattr(self, '_raw_diag_done', False):
                     self._raw_diag_done = True
@@ -2411,7 +2420,8 @@ class BrainLearningManager:
             specialist_probs = {}
             for (strat_key, side_key) in self.ALL_SPECIALIST_KEYS:
                 prob = self.predict_probability(strat_key, side_key, base, adv, iExec, px, pExec)
-                specialist_probs[f"brain_{strat_key}_{side_key}"] = prob if prob is not None else -1.0
+                # Use NaN for missing (matches meta-brain training distribution)
+                specialist_probs[f"brain_{strat_key}_{side_key}"] = prob if prob is not None else float('nan')
 
             # Step 3: Build meta-brain feature vector
             meta_features = {}
@@ -2420,7 +2430,7 @@ class BrainLearningManager:
             meta_features.update(specialist_probs)
 
             # 3b: Count how many specialists are active (have loaded brains)
-            active_probs = [v for v in specialist_probs.values() if v >= 0.0]
+            active_probs = [v for v in specialist_probs.values() if not (isinstance(v, float) and math.isnan(v))]
             meta_features["n_active_specialists"] = float(len(active_probs))
             meta_features["mean_specialist_prob"] = float(np.mean(active_probs)) if active_probs else 0.0
             meta_features["max_specialist_prob"] = float(np.max(active_probs)) if active_probs else 0.0
@@ -2465,12 +2475,20 @@ class BrainLearningManager:
 
             # Step 4: Build vector and predict
             meta_fnames = self.meta_brain['feature_names']
-            vec = np.array([meta_features.get(n, 0.0) for n in meta_fnames]).reshape(1, -1)
-            vec = np.clip(np.nan_to_num(vec, nan=0.0), -1e10, 1e10).astype(np.float32)
+            # Preserve NaN for specialist columns; XGBoost will route via missing path.
+            # Other features use 0.0 default if absent.
+            specialist_set = {f"brain_{s}_{sd}" for s, sd in self.ALL_SPECIALIST_KEYS}
+            vec_vals = []
+            for n in meta_fnames:
+                val = meta_features.get(n, np.nan if n in specialist_set else 0.0)
+                vec_vals.append(val)
+            vec = np.array(vec_vals).reshape(1, -1).astype(np.float32)
+            # Clip extreme numeric values but PRESERVE NaN
+            vec = np.where(np.isnan(vec), vec, np.clip(vec, -1e10, 1e10))
 
             if "booster" in self.meta_brain:
                 import xgboost as xgb
-                dmat = xgb.DMatrix(vec, feature_names=meta_fnames)
+                dmat = xgb.DMatrix(vec, feature_names=meta_fnames, missing=np.nan)
                 raw = float(self.meta_brain['booster'].predict(dmat, output_margin=True)[0])
                 meta_prob = 1.0 / (1.0 + math.exp(-raw))
             else:
@@ -3747,17 +3765,17 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
                 _p6_counters["specialist_below_thresh"] += 1
                 return None
 
-        # ── Calibrated EV: shrink win_prob toward base_rate using WFA ROC ──
+        # ── EV computation: win_prob is now isotonically calibrated at source (predict_probability).
+        # No more invented shrinkage formula. EV is computed directly from the calibrated probability.
+        ev = (win_prob * rr) - ((1.0 - win_prob) * 1.0)
+
+        # Optional: log the calibration provenance so we can audit
         brain_data = brain.brains.get((strat, side)) or {}
-        wfa_roc_auc = brain_data.get("wfa_roc_auc", 0.5)
-        base_rate = brain_data.get("positive_class_rate", 0.35)
-        calibrated_p = base_rate + (wfa_roc_auc - 0.5) * (2.0 * base_rate)
-        ev_input_prob = min(win_prob, calibrated_p)
-        ev = (ev_input_prob * rr) - ((1.0 - ev_input_prob) * 1.0)
+        calib_method = brain_data.get("calibration_method", "none")
         min_ev = getattr(cfg, 'min_ev', 0.0)
         log.debug(
-            f"EV: raw_prob={win_prob:.3f} calib_prob={ev_input_prob:.3f} "
-            f"roc={wfa_roc_auc:.3f} ev={ev:.3f} threshold={min_ev:.3f}"
+            f"EV computation: prob={win_prob:.3f} (calibration={calib_method}) "
+            f"rr={rr:.2f} ev={ev:.3f}"
         )
         if ev <= min_ev:
             _p6_counters["ev_too_low"] += 1
