@@ -639,20 +639,14 @@ def train_meta_brain(oof_df, context_df, out_dir, args):
     log.info("  META-BRAIN TRAINING (OOF-Safe Stacking)")
     log.info("=" * 60)
 
-    SPECIALIST_KEYS = [
-        ("ALPHA", "long"), ("ALPHA", "short"),
-        ("BETA", "long"), ("BETA", "short"),
-        ("GAMMA", "long"), ("GAMMA", "short"),
-        ("DELTA", "long"), ("DELTA", "short"),
-        ("EPSILON", "long"), ("EPSILON", "short"),
-        ("ZETA", "long"), ("ZETA", "short"),
-        ("ETA", "long"), ("ETA", "short"),
-        ("THETA", "long"), ("THETA", "short"),
-        ("IOTA", "long"), ("IOTA", "short"),
-        ("KAPPA", "long"), ("KAPPA", "short"),
-        ("LAMBDA", "long"), ("LAMBDA", "short"),
-    ]
+    # Derive specialist keys dynamically from actual OOF data instead of
+    # hardcoding strategy names (old Greek-letter names caused zero overlap).
+    oof_strategies = sorted(oof_df["strategy"].unique())
+    oof_sides = sorted(oof_df["side"].unique())
+    SPECIALIST_KEYS = [(s, sd) for s in oof_strategies for sd in oof_sides]
     specialist_col_names = [f"brain_{s}_{sd}" for s, sd in SPECIALIST_KEYS]
+    log.info(f"Meta-Brain: Detected {len(SPECIALIST_KEYS)} specialist keys "
+             f"from OOF data: {oof_strategies} x {oof_sides}")
 
     # Context features matching predict_meta_probability() context_keys
     CONTEXT_FEATURES = [
@@ -691,7 +685,7 @@ def train_meta_brain(oof_df, context_df, out_dir, args):
         index="orig_idx", columns="spec_col", values="oof_prob", aggfunc="first"
     )
 
-    # Ensure all 22 specialist columns exist, fill missing with -1.0
+    # Ensure all specialist columns exist, fill missing with -1.0
     for col in specialist_col_names:
         if col not in pivoted.columns:
             pivoted[col] = np.nan
@@ -834,6 +828,7 @@ def train_meta_brain(oof_df, context_df, out_dir, args):
     pipeline = {
         "xgb_model_file": str(xgb_model_file.name),
         "feature_names": keep_meta,
+        "specialist_keys": SPECIALIST_KEYS,
         "wfa_roc_auc": avg_roc,
         "quality_tier": quality_tier,
         "positive_class_rate": float(pos_cases / max(1, len(y_all))),

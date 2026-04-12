@@ -29,12 +29,12 @@ MIN_PRECISION = 0.20
 MIN_FEATURES = 8
 
 # ── Protected features (must match vajra_brain_train.py) ──
-PROTECTED_FEATURES = [
+PROTECTED_FEATURES = {
     "is_ttm_squeeze",
     "atr_expansion_rate",
     "cvd_acceleration",
     "displacement_bos_bull",
-]
+}
 
 
 # ==============================================================================
