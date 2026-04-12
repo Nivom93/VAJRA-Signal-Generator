@@ -33,19 +33,38 @@ try:
 except ImportError:
     FrozenEstimator = None
 
-# PROTECTED VOLATILITY FEATURES: These must survive RFE elimination.
-# Post-friction profitability requires explosive volatility expansion to clear
-# the fee spread instantly. Force the model to always see these signals.
-PROTECTED_FEATURES = {
+# Direction-agnostic features (informative regardless of long/short)
+_PROTECTED_AGNOSTIC = {
     "is_ttm_squeeze",
     "atr_expansion_rate",
     "cvd_acceleration",
-    "displacement_bos_bull",
     "is_london_open",
     "is_ny_open",
-    "struct_trend",
     "struct_strength",
 }
+
+# Direction-specific features (only force into matching-side brains)
+_PROTECTED_LONG_ONLY = {
+    "displacement_bos_bull",
+    "struct_trend",        # positive trend → long bias
+}
+
+_PROTECTED_SHORT_ONLY = {
+    "displacement_bos_bear",
+    "struct_trend",        # negative trend → short bias
+}
+
+def _direction_filtered_protected(side: str) -> set:
+    """Return the protected feature set appropriate for a given side."""
+    if side == "long":
+        return _PROTECTED_AGNOSTIC | _PROTECTED_LONG_ONLY
+    elif side == "short":
+        return _PROTECTED_AGNOSTIC | _PROTECTED_SHORT_ONLY
+    else:
+        return _PROTECTED_AGNOSTIC
+
+# Keep PROTECTED_FEATURES as the union for backward compat where it's referenced
+PROTECTED_FEATURES = _PROTECTED_AGNOSTIC | _PROTECTED_LONG_ONLY | _PROTECTED_SHORT_ONLY
 
 log = logging.getLogger("vajra.train.v8")
 if not log.handlers:
@@ -98,7 +117,11 @@ def is_feature_column(df: pd.DataFrame, col: str, extra_exclude: Set[str]) -> bo
 
         # --- STRING/NON-NUMERIC FIELDS ---
         "bull_confluence_reasons", "bear_confluence_reasons",
-        "market_regime"
+        "market_regime",
+
+        # --- TRAIN/SERVE SKEW: hardcoded to constants in export, vary in live → OOD on day one ---
+        "macro_sentiment",
+        "bid_ask_imbalance",
     }
     EXCLUDE_SUFFIXES = {"_dt", "_ts"}
 
@@ -204,6 +227,13 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str,
 
     if not rows: raise ValueError("No valid events found in files.")
     df = pd.DataFrame(rows)
+
+    if "exit_reason" not in df.columns:
+        raise RuntimeError(
+            "FATAL: exported events missing 'exit_reason' column. "
+            "Re-export with the latest vajra_export_events.py "
+            "(field was renamed from 'reason' to 'exit_reason')."
+        )
 
     if filter_side in ("long", "short") and "side" in df.columns:
         sv = 1.0 if filter_side == "long" else 0.0
@@ -321,6 +351,19 @@ def main(argv=None):
     # Run label threshold analysis before training begins
     analyse_label_thresholds(df)
 
+    # Safety: when label_mode='tp_only' is requested, verify the label column actually
+    # reflects exit_reason (not the silent fixed_r fallback).
+    if args.label_mode == "tp_only":
+        expected_pos = int((df["exit_reason"] == "tp").sum())
+        actual_pos = int(df["label"].sum())
+        if expected_pos != actual_pos:
+            raise RuntimeError(
+                f"Label sanity check failed: tp_only mode expected {expected_pos} positives "
+                f"(rows where exit_reason=='tp'), got {actual_pos}. "
+                f"Check the label-assignment block for silent fallbacks."
+            )
+        log.info(f"Label sanity check passed: {actual_pos} TP-labelled positives match exit_reason column.")
+
     out_dir = Path(args.brains_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -338,18 +381,19 @@ def main(argv=None):
             mask = (df["side"] == side_val) | (df["side"] == side) | (df["strategy"].str.endswith(side.upper()))
             subset = df[(df["strategy"].str.startswith(strat_clean)) & mask].copy()
 
-            # Minimum 100 samples for robust generalization — with feature cap
-            # of n/25, fewer samples means too few features to learn from.
-            if len(subset) < 100:
-                log.info(f"Skipping {strat_clean}_{side} - Not enough samples ({len(subset)})")
+            # Minimum sample guards — financial ML rule of thumb.
+            MIN_SAMPLES = 500          # was 100 — need enough for robust generalization
+            MIN_POSITIVE = 100         # was 20 — need real gradient signal
+            if len(subset) < MIN_SAMPLES:
+                log.info(f"Skipping {strat_clean}_{side}: only {len(subset)} samples (need >= {MIN_SAMPLES})")
                 continue
 
-            # Minimum positive-class guard: need at least 30 positive samples
-            # for meaningful gradient signal. With fewer, XGBoost learns noise.
             n_pos_subset = int(subset["label"].sum())
-            if n_pos_subset < 20:
-                log.warning(f"Skipping {strat_clean}_{side} - Not enough positive samples "
-                            f"({n_pos_subset} positive out of {len(subset)} total, need >= 20)")
+            if n_pos_subset < MIN_POSITIVE:
+                log.warning(
+                    f"Skipping {strat_clean}_{side}: only {n_pos_subset} positive samples "
+                    f"(need >= {MIN_POSITIVE})"
+                )
                 continue
 
             log.info(f"--- Training Isolated Brain: {strat_clean}_{side} ({len(subset)} samples) ---")
@@ -405,12 +449,31 @@ def main(argv=None):
                 selector = RFE(estimator_rfe, n_features_to_select=dynamic_n_features_fold, step=1)
                 selector = selector.fit(X_tr_full, y_tr)
 
-                # FORCE-PROTECT volatility expansion features from RFE elimination.
-                # Post-friction edge depends on explosive moves clearing fees instantly.
+                # Protected features replace the worst RFE picks, total count stays at the cap
+                fold_ranking = selector.ranking_
                 fold_support = selector.support_.copy()
-                for idx_f, feat_name in enumerate(base_feature_names):
-                    if feat_name in PROTECTED_FEATURES:
-                        fold_support[idx_f] = True
+
+                fold_selected_indices = np.where(fold_support)[0]
+                fold_selected_worst_first = sorted(
+                    fold_selected_indices,
+                    key=lambda i: -fold_ranking[i]
+                )
+
+                fold_needs_injection = [
+                    i for i, name in enumerate(base_feature_names)
+                    if name in _direction_filtered_protected(side) and not fold_support[i]
+                ]
+
+                for protected_idx in fold_needs_injection:
+                    if not fold_selected_worst_first:
+                        break
+                    worst_selected_idx = fold_selected_worst_first.pop(0)
+                    fold_support[worst_selected_idx] = False
+                    fold_support[protected_idx] = True
+                    log.info(
+                        f"  Fold {i+1}: Swapped out '{base_feature_names[worst_selected_idx]}' "
+                        f"for protected feature '{base_feature_names[protected_idx]}'"
+                    )
 
                 # Slice training and validation sets strictly to selected features
                 X_tr = X_tr_full[:, fold_support]
@@ -486,16 +549,34 @@ def main(argv=None):
 
             selector_final = selector_final.fit(X_all_for_rfe, y_all_for_rfe)
 
-            # FORCE-PROTECT volatility expansion features from RFE elimination.
-            # These features are mandatory inputs for clearing the fee spread.
+            # Protected features replace the worst RFE picks, total count stays at the cap
+            ranking = selector_final.ranking_  # 1 = selected, higher = worse
             final_support = selector_final.support_.copy()
-            protected_injected = []
-            for idx_f, feat_name in enumerate(base_feature_names):
-                if feat_name in PROTECTED_FEATURES and not final_support[idx_f]:
-                    final_support[idx_f] = True
-                    protected_injected.append(feat_name)
-            if protected_injected:
-                log.info(f"🛡️  Protected volatility features injected into final RFE: {protected_injected}")
+
+            # Rank-order the currently-selected features from worst to best
+            selected_indices = np.where(final_support)[0]
+            selected_ranked_worst_first = sorted(
+                selected_indices,
+                key=lambda i: -ranking[i]   # higher ranking = worse, kick first
+            )
+
+            # Find protected features that aren't already selected
+            needs_injection = [
+                i for i, name in enumerate(base_feature_names)
+                if name in _direction_filtered_protected(side) and not final_support[i]
+            ]
+
+            # Swap out the worst selected features for the protected ones
+            for protected_idx in needs_injection:
+                if not selected_ranked_worst_first:
+                    break
+                worst_selected_idx = selected_ranked_worst_first.pop(0)
+                final_support[worst_selected_idx] = False
+                final_support[protected_idx] = True
+                log.info(
+                    f"  Swapped out '{base_feature_names[worst_selected_idx]}' "
+                    f"for protected feature '{base_feature_names[protected_idx]}'"
+                )
 
             selected_features = [f for f, s in zip(base_feature_names, final_support) if s]
 
