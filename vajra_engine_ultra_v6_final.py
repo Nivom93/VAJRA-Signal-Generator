@@ -1690,9 +1690,22 @@ def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, b
     f['vol_ltf_accel_5_arr']=_roc(f['atr_pct_ltf_roc_5_arr'],5)
     f['trend_strength_ltf_ema20_50_arr']=(_ema_np(cl,20)-pExec.ema50)/(np.abs(cl)+eps)
     
-    htf_s = pd.Series(pMacro.atr14/pMacro.c*100, index=macro_tf.timestamp).shift(1).reindex(exec_tf.timestamp, method='ffill').fillna(0).values
+    # FIX: Use searchsorted for robust HTF→LTF alignment (prevents all-zero
+    # arrays when pd.reindex ffill fails on non-overlapping timestamp indices).
+    _macro_atr_pct = pMacro.atr14 / (np.abs(pMacro.c) + eps) * 100
+    _macro_ts = macro_tf.timestamp.values
+    _exec_ts = exec_tf.timestamp.values
+    _macro_idx = np.searchsorted(_macro_ts, _exec_ts, side='right') - 1
+    # shift(1) equivalent: use idx-1 to enforce one-candle lag (closed candle only)
+    _macro_idx_lagged = np.clip(_macro_idx - 1, 0, len(_macro_atr_pct) - 1)
+    htf_s = np.where(_macro_idx >= 1, _macro_atr_pct[_macro_idx_lagged], 0.0)
     f['atr_pct_htf_aligned']=htf_s
-    mtf_s = pd.Series(f['trend_strength_mtf_arr'], index=swing_tf.timestamp).shift(1).reindex(exec_tf.timestamp, method='ffill').fillna(0).values
+
+    # FIX: Same searchsorted alignment for MTF trend strength
+    _swing_ts = swing_tf.timestamp.values
+    _swing_idx = np.searchsorted(_swing_ts, _exec_ts, side='right') - 1
+    _swing_idx_lagged = np.clip(_swing_idx - 1, 0, len(f['trend_strength_mtf_arr']) - 1)
+    mtf_s = np.where(_swing_idx >= 1, f['trend_strength_mtf_arr'][_swing_idx_lagged], 0.0)
     f['trend_strength_mtf_aligned']=mtf_s
     
     # INJECT ALIGNED HTF/MTF FRACTAL SWINGS
