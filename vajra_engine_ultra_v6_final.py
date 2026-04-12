@@ -1761,12 +1761,20 @@ def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, b
     # ---------------------------------------------------------
     # DIRECTIVE 1: MULTI-TIMEFRAME VOLATILITY SQUEEZE
     # ---------------------------------------------------------
-    bbw_arr = pExec.bb_width
+    # FIX: pExec.bb_width is normalised by SMA (from _bb_bands_np), but the
+    # old kcw_arr was normalised by EMA.  The denominator mismatch (SMA vs
+    # EMA) caused the percentage-width comparison to diverge from the true
+    # TTM squeeze condition, producing all-zero is_ttm_squeeze arrays when
+    # the SMA-normalised BB width was marginally wider than the
+    # EMA-normalised KC width.  Fix: compare ABSOLUTE widths directly,
+    # eliminating the normalisation entirely.  This matches the canonical
+    # TTM squeeze definition (BB bands inside KC bands).
     kc_upper_arr, kc_lower_arr = _keltner_channels_np(cl, pExec.h, pExec.l, 20, 1.5)
-    ema20_arr = _ema_np(cl, 20)
-    kcw_arr = np.where(ema20_arr > 0, (kc_upper_arr - kc_lower_arr) / ema20_arr * 100.0, 0.0)
-
-    f['is_ttm_squeeze'] = np.where(bbw_arr < kcw_arr, 1.0, 0.0)
+    bb_abs_width = pExec.bb_upper - pExec.bb_lower
+    kc_abs_width = kc_upper_arr - kc_lower_arr
+    # Guard warmup: first 20 bars have bb_upper/bb_lower = 0 (not yet computed)
+    _bb_valid = np.arange(len(cl)) >= 20
+    f['is_ttm_squeeze'] = np.where(_bb_valid & (bb_abs_width < kc_abs_width), 1.0, 0.0)
 
     # Linear regression Z-score (squeeze_momentum)
     # y = mx + c -> regression over 20 periods
