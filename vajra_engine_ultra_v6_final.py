@@ -3017,9 +3017,13 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     logic_desc = ""
     side = None
 
-    # Volume confirmation gate — require BOTH spike AND elevated rvol for valid entries.
-    # OR gate was too permissive: rvol > 0.8 fires on every other bar in crypto.
-    has_vol_confirm = has_volume and has_elevated_vol
+    # Volume confirmation gate — require EITHER a recent volume spike OR elevated
+    # relative volume.  The AND gate (has_volume and has_elevated_vol) starved
+    # signal generation to ~0.01% of bars because both conditions rarely coincide
+    # within the same 5-bar window on 15m crypto data.  An OR gate restores
+    # volume-flexible signal flow while the confluence floor (>=2.0) and the
+    # downstream EV / risk-distance gates still filter low-quality setups.
+    has_vol_confirm = has_volume or has_elevated_vol
 
     # ==========================================================
     # PHASE 4A: STRUCTURAL CONFLUENCE SCORING
