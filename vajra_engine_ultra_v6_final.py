@@ -54,6 +54,7 @@ _p6_counters = {
     "risk_dist_too_small": 0,
     "strategy_cap_rejected": 0,
     "cooldown_rejected": 0,
+    "confluence_too_low": 0,
     "passed": 0,
     "specialist_prob_sum": 0.0,
     "specialist_prob_count": 0,
@@ -81,6 +82,7 @@ def log_p6_summary():
     log.info(f"  Risk distance too small:       {c['risk_dist_too_small']}")
     log.info(f"  Strategy cap rejected:         {c['strategy_cap_rejected']}")
     log.info(f"  Cooldown rejected:             {c['cooldown_rejected']}")
+    log.info(f"  Confluence too low (<2.0):      {c['confluence_too_low']}")
     log.info(f"  PASSED (trade generated):      {c['passed']}")
     if c['specialist_prob_count'] > 0:
         avg_sp = c['specialist_prob_sum'] / c['specialist_prob_count']
@@ -3186,8 +3188,10 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # ---- SETUP 1: STRUCTURE_LONG (Bullish structure + confluence) ----
     if can_long and _struct_trend > 0 and _struct_strength >= 1:
         if _htf_struct_trend >= 0 and has_vol_confirm:
-            sc = 0.0
-            desc_parts = []
+            sc = 1.0          # base score: 15m structural trend is confirmed
+            desc_parts = ["STRUCT_BULL"]
+            if _struct_strength >= 2:
+                sc += 0.5; desc_parts.append("STRUCT_STR")
             if macro_up > 0:
                 sc += 1.0; desc_parts.append("MACRO_UP")
             if swing_up > 0:
@@ -3197,7 +3201,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             if struct_align_bull >= 2:
                 sc += 1.0; desc_parts.append("STRUCT_ALIGN")
             if _is_discount > 0:
-                sc += 1.5; desc_parts.append("DISCOUNT")
+                sc += 1.0; desc_parts.append("DISCOUNT")
             if rvol > 1.5:
                 sc += 0.5; desc_parts.append("RVOL")
             candidates.append(("STRUCTURE_LONG", "long",
@@ -3206,8 +3210,10 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # ---- SETUP 2: STRUCTURE_SHORT (Bearish structure + confluence) ----
     if can_short and _struct_trend < 0 and _struct_strength >= 1:
         if _htf_struct_trend <= 0 and has_vol_confirm:
-            sc = 0.0
-            desc_parts = []
+            sc = 1.0
+            desc_parts = ["STRUCT_BEAR"]
+            if _struct_strength >= 2:
+                sc += 0.5; desc_parts.append("STRUCT_STR")
             if macro_down > 0:
                 sc += 1.0; desc_parts.append("MACRO_DN")
             if swing_down > 0:
@@ -3217,7 +3223,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             if struct_align_bear >= 2:
                 sc += 1.0; desc_parts.append("STRUCT_ALIGN")
             if _is_premium > 0:
-                sc += 1.5; desc_parts.append("PREMIUM")
+                sc += 1.0; desc_parts.append("PREMIUM")
             if rvol > 1.5:
                 sc += 0.5; desc_parts.append("RVOL")
             candidates.append(("STRUCTURE_SHORT", "short",
@@ -3225,8 +3231,10 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
     # ---- SETUP 3: BOS_PULLBACK_LONG (BOS up within 8 bars) ----
     if can_long and _bos_up_recent and _struct_trend >= 0 and has_vol_confirm:
-        sc = 1.0  # base: BOS occurred
+        sc = 1.5          # base: confirmed BOS up (strong structural event)
         desc_parts = ["BOS_UP"]
+        if _struct_trend > 0:
+            sc += 0.5; desc_parts.append("STRUCT_BULL")
         if _bos_pullback_long:
             sc += 0.5; desc_parts.append("PULLBACK")
         if htf_up > 0:
@@ -3236,16 +3244,18 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         if _disp_bos_bull > 0:
             sc += 1.0; desc_parts.append("DISP+BOS")
         if rvol > 1.5:
-            sc += 1.0; desc_parts.append("RVOL")
+            sc += 0.5; desc_parts.append("RVOL")
         if _is_discount > 0:
-            sc += 1.0; desc_parts.append("DISCOUNT")
+            sc += 0.5; desc_parts.append("DISCOUNT")
         candidates.append(("BOS_PULLBACK_LONG", "long",
             f"BOS up (last 8 bars) + vol. [{'+'.join(desc_parts)}]", sc))
 
     # ---- SETUP 4: BOS_PULLBACK_SHORT (BOS down within 8 bars) ----
     if can_short and _bos_down_recent and _struct_trend <= 0 and has_vol_confirm:
-        sc = 1.0
+        sc = 1.5
         desc_parts = ["BOS_DN"]
+        if _struct_trend < 0:
+            sc += 0.5; desc_parts.append("STRUCT_BEAR")
         if _bos_pullback_short:
             sc += 0.5; desc_parts.append("PULLBACK")
         if htf_down > 0:
@@ -3255,9 +3265,9 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         if _disp_bos_bear > 0:
             sc += 1.0; desc_parts.append("DISP+BOS")
         if rvol > 1.5:
-            sc += 1.0; desc_parts.append("RVOL")
+            sc += 0.5; desc_parts.append("RVOL")
         if _is_premium > 0:
-            sc += 1.0; desc_parts.append("PREMIUM")
+            sc += 0.5; desc_parts.append("PREMIUM")
         candidates.append(("BOS_PULLBACK_SHORT", "short",
             f"BOS down (last 8 bars) + vol. [{'+'.join(desc_parts)}]", sc))
 
@@ -3308,7 +3318,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
     # ---- SETUP 7: DISPLACEMENT_CONTINUATION_LONG ----
     if can_long and _disp_bos_bull > 0 and _struct_trend >= 0 and bullish_tf_count >= 1 and has_vol_confirm:
-        sc = 1.0  # base: displacement + BOS
+        sc = 1.5  # base: displacement + BOS
         desc_parts = ["DISP+BOS"]
         if macro_up > 0:
             sc += 1.0; desc_parts.append("MACRO_UP")
@@ -3325,7 +3335,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
     # ---- SETUP 8: DISPLACEMENT_CONTINUATION_SHORT ----
     if can_short and _disp_bos_bear > 0 and _struct_trend <= 0 and bearish_tf_count >= 1 and has_vol_confirm:
-        sc = 1.0
+        sc = 1.5
         desc_parts = ["DISP+BOS"]
         if macro_down > 0:
             sc += 1.0; desc_parts.append("MACRO_DN")
@@ -3360,6 +3370,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # the winning candidate to stack at least 2 structural factors (e.g. Order Block
     # + Sweep + Displacement) before the trade is even considered by the brain.
     if confluence < 2.0:
+        _p6_counters["confluence_too_low"] += 1
         return None
 
     # Enrich the logic description with structure context
