@@ -269,6 +269,27 @@ def run_backtest_with_brain(args, preloaded=None):
         base["timestamp"] = ts
         base["symbol"] = cfg.symbol
 
+        # Emit a sample of inference-time feature snapshots for drift detection.
+        # Only sample the bars where a plan would actually be considered (post-filter).
+        if not hasattr(run_backtest_with_brain, '_drift_snapshot'):
+            run_backtest_with_brain._drift_snapshot = []
+            run_backtest_with_brain._drift_count = 0
+        if run_backtest_with_brain._drift_count < 1000:
+            snap = {**base}
+            for k, v in adv_features.items():
+                if hasattr(v, '__getitem__') and not isinstance(v, (str, bytes)):
+                    try:
+                        if len(v) > iExec:
+                            val = v[iExec]
+                            if hasattr(val, 'item'):
+                                val = val.item()
+                            snap[k] = float(val) if np.isfinite(val) else 0.0
+                    except (TypeError, ValueError):
+                        pass
+            snap['timestamp'] = ts
+            run_backtest_with_brain._drift_snapshot.append(snap)
+            run_backtest_with_brain._drift_count += 1
+
         # Run parity diagnostic on first qualifying bar
         _run_parity_diagnostic(ts, iMacro, iSwing, iHtf, iExec, base, adv_features, pExec, brain)
 
@@ -309,6 +330,17 @@ def run_backtest_with_brain(args, preloaded=None):
             log.info(f"📊 Saved detailed trade report to: {report_path}")
         except Exception as e:
             log.error(f"Failed to export CSV trade report: {e}")
+
+    # Write inference feature snapshots for drift detection
+    if hasattr(run_backtest_with_brain, '_drift_snapshot') and run_backtest_with_brain._drift_snapshot:
+        drift_path = "backtest_inference_features.jsonl"
+        with open(drift_path, "w", encoding="utf-8") as f:
+            for snap in run_backtest_with_brain._drift_snapshot:
+                f.write(json.dumps({k: v for k, v in snap.items() if isinstance(v, (int, float, str, bool))}) + "\n")
+        log.info(f"Wrote {len(run_backtest_with_brain._drift_snapshot)} inference feature snapshots to: {drift_path}")
+        # reset for next call
+        delattr(run_backtest_with_brain, '_drift_snapshot')
+        delattr(run_backtest_with_brain, '_drift_count')
 
     return summary, all_closed
 

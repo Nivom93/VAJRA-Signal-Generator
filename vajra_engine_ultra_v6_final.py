@@ -56,19 +56,29 @@ _p6_counters = {
     "cooldown_rejected": 0,
     "confluence_too_low": 0,
     "passed": 0,
+    "filled": 0,                  # plan was triggered and entered a position
+    "expired_unfilled": 0,        # plan TTL expired with no fill
+    "stopped_pre_entry": 0,       # SL was breached before entry filled (limit-order race)
     "specialist_prob_sum": 0.0,
     "specialist_prob_count": 0,
     "meta_prob_sum": 0.0,
     "meta_prob_count": 0,
+    "per_strategy_passed": {},    # {strategy_base: count}
+    "per_strategy_filled": {},    # {strategy_base: count}
 }
 
 def reset_p6_counters():
     """Reset diagnostic counters (call before each backtest run)."""
     for k in _p6_counters:
-        _p6_counters[k] = 0 if isinstance(_p6_counters[k], int) else 0.0
+        if isinstance(_p6_counters[k], dict):
+            _p6_counters[k] = {}
+        elif isinstance(_p6_counters[k], int):
+            _p6_counters[k] = 0
+        else:
+            _p6_counters[k] = 0.0
 
 def log_p6_summary():
-    """Print a summary of Phase 6 gate rejections."""
+    """Print a summary of Phase 6 gate rejections and fill-rate honesty."""
     c = _p6_counters
     log.info("=" * 60)
     log.info("PHASE 6 AI GATE DIAGNOSTIC SUMMARY")
@@ -83,13 +93,26 @@ def log_p6_summary():
     log.info(f"  Strategy cap rejected:         {c['strategy_cap_rejected']}")
     log.info(f"  Cooldown rejected:             {c['cooldown_rejected']}")
     log.info(f"  Confluence too low (<2.0):      {c['confluence_too_low']}")
-    log.info(f"  PASSED (trade generated):      {c['passed']}")
+    log.info(f"  PLANS GENERATED (Phase 6 pass): {c['passed']}")
+    log.info(f"  --- of which ---")
+    log.info(f"  Plans FILLED (entered position): {c['filled']}")
+    log.info(f"  Plans EXPIRED unfilled:          {c['expired_unfilled']}")
+    log.info(f"  Plans STOPPED pre-entry:         {c['stopped_pre_entry']}")
+    if c['passed'] > 0:
+        fill_rate = 100.0 * c['filled'] / c['passed']
+        log.info(f"  → FILL RATE: {fill_rate:.1f}%  (anything below 30% indicates limit-order starvation)")
     if c['specialist_prob_count'] > 0:
-        avg_sp = c['specialist_prob_sum'] / c['specialist_prob_count']
-        log.info(f"  Avg specialist probability:    {avg_sp:.4f} (n={c['specialist_prob_count']})")
+        log.info(f"  Avg specialist probability: {c['specialist_prob_sum']/c['specialist_prob_count']:.4f}")
     if c['meta_prob_count'] > 0:
-        avg_mp = c['meta_prob_sum'] / c['meta_prob_count']
-        log.info(f"  Avg meta probability:          {avg_mp:.4f} (n={c['meta_prob_count']})")
+        log.info(f"  Avg meta probability:       {c['meta_prob_sum']/c['meta_prob_count']:.4f}")
+    # Per-strategy fill-rate breakdown
+    log.info("  --- PER-STRATEGY FILL RATE ---")
+    all_strats = set(c['per_strategy_passed'].keys()) | set(c['per_strategy_filled'].keys())
+    for s in sorted(all_strats):
+        p = c['per_strategy_passed'].get(s, 0)
+        f = c['per_strategy_filled'].get(s, 0)
+        rate = (100.0 * f / p) if p > 0 else 0.0
+        log.info(f"    {s:<20} passed={p:>5}  filled={f:>5}  rate={rate:>5.1f}%")
     log.info("=" * 60)
 
 
@@ -2761,6 +2784,7 @@ class TradeManager:
 
             order['ttl'] -= 1
             if order['ttl'] < 0:
+                _p6_counters["expired_unfilled"] += 1
                 continue
 
             side = order['side']
@@ -2772,6 +2796,7 @@ class TradeManager:
                 if side == 'long':
                     if o <= order.get('sl', -1.0):
                         order['ttl'] = -1
+                        _p6_counters["stopped_pre_entry"] += 1
                         continue
                     if l <= entry_target:
                         triggered = True
@@ -2779,6 +2804,7 @@ class TradeManager:
                 elif side == 'short':
                     if o >= order.get('sl', 99999999.0):
                         order['ttl'] = -1
+                        _p6_counters["stopped_pre_entry"] += 1
                         continue
                     if h >= entry_target:
                         triggered = True
@@ -2797,6 +2823,11 @@ class TradeManager:
                         fill_px = min(o, entry_target)
 
             if triggered:
+                _p6_counters["filled"] += 1
+                strat_base = order.get('strategy', 'UNKNOWN').split('_')[0]
+                _p6_counters["per_strategy_filled"][strat_base] = \
+                    _p6_counters["per_strategy_filled"].get(strat_base, 0) + 1
+
                 planned_risk = abs(order['entry'] - order['sl'])
                 if planned_risk < 1e-9:
                     planned_risk = order['entry'] * 0.01
@@ -3750,6 +3781,9 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         _p6_counters["no_brain"] += 1
 
     _p6_counters["passed"] += 1
+    strat_base_key = setup_type.split("_")[0] if setup_type else "UNKNOWN"
+    _p6_counters["per_strategy_passed"][strat_base_key] = \
+        _p6_counters["per_strategy_passed"].get(strat_base_key, 0) + 1
     # DIRECTIVE 2 — EXECUTION ROUTER FIX:
     # The order type MUST be dynamically inherited from the global config's
     # ``execution_style`` property via a single safe ``getattr`` fallback.
