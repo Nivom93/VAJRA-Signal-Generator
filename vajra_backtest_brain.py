@@ -145,6 +145,83 @@ def run_backtest_with_brain(args, preloaded=None):
         log.warning(f"Failed to fetch BTCDOM: {e}")
         btcd_aligned = np.zeros(len(exec_tf))
 
+    # ── DIAGNOSTIC: Feature parity assertion block ──────────────────────
+    # On the first qualifying bar, build the feature dict via BOTH the
+    # export path (_build_full_features) and the inference path
+    # (_build_vec), then log a side-by-side comparison for the 6
+    # historically-zero features.  This catches training/inference drift.
+    _PARITY_TARGET_FEATURES = [
+        "atr_pct_htf_aligned", "bars_since_ob_bull", "is_london_session",
+        "is_ttm_squeeze", "macro_struct_strength", "rel_strength_divergence",
+    ]
+    _parity_checked = False
+
+    def _run_parity_diagnostic(ts, iMacro, iSwing, iHtf, iExec, base, adv_features, pExec, brain):
+        """Log side-by-side: export-path value vs inference-path value."""
+        nonlocal _parity_checked
+        if _parity_checked:
+            return
+        _parity_checked = True
+
+        # --- Export-path reconstruction (mirrors _build_full_features) ---
+        from vajra_export_events import _build_full_features
+        export_feats = _build_full_features(
+            base, adv_features, iMacro, iSwing, iHtf, iExec,
+            len(macro_tf), len(swing_tf), len(htf), len(exec_tf), ts, pExec
+        )
+
+        # --- Inference-path reconstruction (mirrors _build_vec) ---
+        infer_d = {**base}
+        for k, v in adv_features.items():
+            if hasattr(v, '__getitem__') and not isinstance(v, (str, bytes)):
+                try:
+                    vlen = len(v)
+                except TypeError:
+                    infer_d[k] = float(v) if np.isfinite(float(v)) else 0.0
+                    continue
+                if vlen > iExec:
+                    val = v[iExec]
+                    infer_d[k] = float(val) if np.isfinite(val) else 0.0
+                else:
+                    if k not in base:
+                        infer_d[k] = 0.0
+            elif isinstance(v, (int, float, np.integer, np.floating)):
+                infer_d[k] = float(v) if np.isfinite(float(v)) else 0.0
+            else:
+                if k not in base:
+                    infer_d[k] = 0.0
+        # Session override (parity with _build_full_features)
+        try:
+            _dt = pd.to_datetime(int(ts), unit="ms", utc=True)
+            infer_d["is_london_session"] = 1.0 if 7 <= _dt.hour <= 16 else 0.0
+            infer_d["is_ny_session"] = 1.0 if 13 <= _dt.hour <= 22 else 0.0
+        except Exception:
+            pass
+
+        log.info("=" * 72)
+        log.info("FEATURE PARITY DIAGNOSTIC (bar ts=%d, iExec=%d)", ts, iExec)
+        log.info("%-30s  %12s  %12s  %s", "Feature", "Export", "Inference", "Match?")
+        log.info("-" * 72)
+        any_mismatch = False
+        for feat in _PARITY_TARGET_FEATURES:
+            exp_val = export_feats.get(feat, "MISSING")
+            inf_val = infer_d.get(feat, "MISSING")
+            if isinstance(exp_val, float) and isinstance(inf_val, float):
+                match = "OK" if abs(exp_val - inf_val) < 1e-9 else "MISMATCH"
+            else:
+                match = "OK" if exp_val == inf_val else "MISMATCH"
+            if match != "OK":
+                any_mismatch = True
+            log.info("%-30s  %12s  %12s  %s", feat,
+                     f"{exp_val:.6f}" if isinstance(exp_val, float) else str(exp_val),
+                     f"{inf_val:.6f}" if isinstance(inf_val, float) else str(inf_val),
+                     match)
+        if not any_mismatch:
+            log.info("ALL 6 TARGET FEATURES MATCH between export and inference paths.")
+        else:
+            log.warning("PARITY VIOLATION detected — see MISMATCH rows above.")
+        log.info("=" * 72)
+
     for row in exec_iter.itertuples():
         ts = int(row.timestamp)
         iMacro = np.searchsorted(macro_tf['timestamp'].values, ts, side='right') - 1
@@ -191,6 +268,9 @@ def run_backtest_with_brain(args, preloaded=None):
         # is_ny_session) via pd.to_datetime — matching _build_full_features.
         base["timestamp"] = ts
         base["symbol"] = cfg.symbol
+
+        # Run parity diagnostic on first qualifying bar
+        _run_parity_diagnostic(ts, iMacro, iSwing, iHtf, iExec, base, adv_features, pExec, brain)
 
         plan = plan_trade_with_brain(cfg, brain, base, adv_features, iExec, pExec)
         if plan: tm.submit_plan(plan, bar)
