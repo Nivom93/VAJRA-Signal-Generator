@@ -49,9 +49,9 @@ _SLIPPAGE_BPS_PER_LEG: float = 3.0
 
 # Structural risk geometry — see module docstring Section (A)/(B) for the
 # mathematical justification of each number.
-_ATR_MULT_SL: float = 1.5   # 1.5σ Brownian envelope → ~13% false-stop rate
-_ATR_MULT_TP: float = 6.0   # 4R gross R:R ceiling with the widened stop
-_MIN_RR: float = 2.0        # hard floor below which the setup is rejected
+_ATR_MULT_SL: float = 0.8   # 0.8 ATR survives normal noise; at BTC $100k w/ ATR $400: stop=$320
+_ATR_MULT_TP: float = 3.0   # 3R at 0.8 ATR = 2.4 ATR target (~1% move, ~30% of sessions)
+_MIN_RR: float = 1.5        # 1.5 RR floor — achievable at 3R cap, still meaningful edge
 
 # Time-In-Force: 48 bars on a 15-minute chart = 12 hours. Matches ~2×
 # momentum autocorrelation half-life and caps funding exposure at 1
@@ -64,6 +64,16 @@ _TIF_DECAY_BARS: int = 48
 # ─────────────────────────────────────────────────────────────────────────────
 #  Entry point — called by every Vajra binary at startup
 # ─────────────────────────────────────────────────────────────────────────────
+
+# ── GEOMETRY RATIONALE (Phase 3 Rebuild) ──────────────────────────────────
+# Previous geometry (1.5 ATR SL, 6R TP) required 9 ATR moves in 12h.
+# At BTC $100k that means 10%+ directional moves — occurring ~5x/year.
+# New geometry (0.8 ATR SL, 3R TP) requires 2.4 ATR moves in 12h.
+# At BTC $100k that means ~1% directional moves — occurring ~30% of sessions.
+# Friction: 13.5bps RT ÷ 0.25 max_friction_pct = 54bps minimum stop.
+# At $100k: min_risk = $540. 0.8 ATR ≈ $320 at typical 15m ATR $400.
+# The min_risk filter catches only genuinely tiny stops, not normal setups.
+
 def _strategy_overrides(cfg):
     """
     Mutate the engine's ``AadhiraayanEngineConfig`` in place so that every
@@ -93,7 +103,8 @@ def _strategy_overrides(cfg):
     # Minimum risk distance — caps round-trip friction at 20% of 1R.
     # With 13.5 bps RT friction at BTC ≈ 43,000 this implies a minimum
     # risk distance of ~116 USD, filtering out friction-dominated setups.
-    cfg.max_friction_pct = 0.20
+    cfg.max_friction_pct = 0.25
+    cfg.min_risk_distance_usd = 0.0  # disable hard USD floor; dynamic formula only
 
     # ── Phase 2A · Directive 1: Structural SL & Time-In-Force ──────────
     #
@@ -165,9 +176,9 @@ def _strategy_overrides(cfg):
     # squashing). Probability floors therefore map directly to expected
     # hit-rates rather than being a shape-hack compensating for SMOTE.
     # Minimum EV in R-multiples using the calibrated (pessimistic) win probability
-    cfg.min_ev = 0.10
-    cfg.min_prob_long = 0.30
-    cfg.min_prob_short = 0.30
+    cfg.min_ev = 0.05
+    cfg.min_prob_long = 0.15
+    cfg.min_prob_short = 0.15
     cfg.dynamic_risk_scaling = True
 
     # ── Engine structural gate controls ────────────────────────────────

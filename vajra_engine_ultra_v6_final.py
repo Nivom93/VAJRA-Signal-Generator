@@ -1474,6 +1474,35 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
         f["velocity_atr_3"] = float(pExec.velocity_atr_3[idx_Exec])
 
     f["vol_spike"] = float(pExec.vol_spike[idx_Exec])
+
+    # ── SESSION TIMING (high-liquidity windows produce 70% of directional moves) ──
+    try:
+        _bar_ts_ms = int(exec_tf.iloc[idx_Exec]['timestamp'])
+        _bar_dt = pd.to_datetime(_bar_ts_ms, unit='ms', utc=True)
+        _bar_hour = _bar_dt.hour
+    except Exception:
+        _bar_hour = 12  # neutral fallback
+    f["is_london_open"]    = 1.0 if 7  <= _bar_hour <= 10 else 0.0
+    f["is_ny_open"]        = 1.0 if 13 <= _bar_hour <= 16 else 0.0
+    f["is_high_liquidity"] = 1.0 if 7  <= _bar_hour <= 17 else 0.0
+    f["is_dead_zone"]      = 1.0 if (_bar_hour >= 22 or _bar_hour <= 5) else 0.0
+    f["is_asian_session"]  = 1.0 if 0  <= _bar_hour <= 6  else 0.0
+
+    # ── PRIOR CANDLE MOMENTUM (direction persistence feature) ──
+    _prev_idx = max(0, idx_Exec - 1)
+    _prev_c = float(pExec.c[_prev_idx])
+    _prev_o = float(pExec.o[_prev_idx])
+    _curr_atr_cf = float(pExec.atr14[idx_Exec]) if idx_Exec < len(pExec.atr14) else px * 0.003
+    f["prev_candle_bull"]      = 1.0 if _prev_c > _prev_o else 0.0
+    f["prev_candle_bear"]      = 1.0 if _prev_c < _prev_o else 0.0
+    f["prev_candle_size_atr"]  = abs(_prev_c - _prev_o) / max(_curr_atr_cf, 1e-9)
+    # Consecutive same-direction candles (momentum persistence)
+    _prev2_idx = max(0, idx_Exec - 2)
+    _prev2_c = float(pExec.c[_prev2_idx])
+    _prev2_o = float(pExec.o[_prev2_idx])
+    f["two_bull_consecutive"]  = 1.0 if (_prev_c > _prev_o and _prev2_c > _prev2_o) else 0.0
+    f["two_bear_consecutive"]  = 1.0 if (_prev_c < _prev_o and _prev2_c < _prev2_o) else 0.0
+
     f["kalman_vel"] = float(pExec.kalman_vel[idx_Exec]); f["hurst"] = float(pExec.hurst[idx_Exec])
     
     f["cvd"] = float(pExec.cvd[idx_Exec])
@@ -3176,6 +3205,19 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     # Each setup computes its own confluence score; Phase 4C picks the best.
     candidates = []
 
+    # ── Session and volatility context for confluence bonuses ──
+    _ts_base = base.get("timestamp", 0)
+    try:
+        _session_hour = pd.to_datetime(int(_ts_base), unit="ms", utc=True).hour if _ts_base else 12
+    except Exception:
+        _session_hour = 12
+    _in_prime_session = 1.0 if (7 <= _session_hour <= 10 or 13 <= _session_hour <= 16) else 0.0
+    _in_high_liq = 1.0 if 7 <= _session_hour <= 17 else 0.0
+    _is_squeeze = base.get("is_ttm_squeeze", 0)
+    _squeeze_fired = base.get("squeeze_fired", 0)
+    _orb_bull = base.get("orb_bull", 0)
+    _orb_bear = base.get("orb_bear", 0)
+
     # Pre-fetch structure features used across multiple setups
     _struct_trend = base.get("struct_trend", 0)
     _struct_strength = base.get("struct_strength", 0)
@@ -3219,6 +3261,10 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
                 sc += 1.0; desc_parts.append("DISCOUNT")
             if rvol > 1.5:
                 sc += 0.5; desc_parts.append("RVOL")
+            if _in_prime_session > 0:
+                sc += 1.0; desc_parts.append("SESSION")
+            if _is_squeeze > 0 or _squeeze_fired > 0:
+                sc += 1.0; desc_parts.append("SQUEEZE")
             candidates.append(("STRUCTURE_LONG", "long",
                 f"Bullish HH/HL structure (str={_struct_strength:.0f}) + vol. [{'+'.join(desc_parts)}]", sc))
 
@@ -3241,6 +3287,10 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
                 sc += 1.0; desc_parts.append("PREMIUM")
             if rvol > 1.5:
                 sc += 0.5; desc_parts.append("RVOL")
+            if _in_prime_session > 0:
+                sc += 1.0; desc_parts.append("SESSION")
+            if _is_squeeze > 0 or _squeeze_fired > 0:
+                sc += 1.0; desc_parts.append("SQUEEZE")
             candidates.append(("STRUCTURE_SHORT", "short",
                 f"Bearish LH/LL structure (str={_struct_strength:.0f}) + vol. [{'+'.join(desc_parts)}]", sc))
 
@@ -3262,6 +3312,12 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             sc += 0.5; desc_parts.append("RVOL")
         if _is_discount > 0:
             sc += 0.5; desc_parts.append("DISCOUNT")
+        if _in_prime_session > 0:
+            sc += 1.0; desc_parts.append("SESSION")
+        if _is_squeeze > 0 or _squeeze_fired > 0:
+            sc += 1.0; desc_parts.append("SQUEEZE")
+        if _orb_bull > 0:
+            sc += 0.5; desc_parts.append("ORB")
         candidates.append(("BOS_PULLBACK_LONG", "long",
             f"BOS up (last 8 bars) + vol. [{'+'.join(desc_parts)}]", sc))
 
@@ -3283,6 +3339,12 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             sc += 0.5; desc_parts.append("RVOL")
         if _is_premium > 0:
             sc += 0.5; desc_parts.append("PREMIUM")
+        if _in_prime_session > 0:
+            sc += 1.0; desc_parts.append("SESSION")
+        if _is_squeeze > 0 or _squeeze_fired > 0:
+            sc += 1.0; desc_parts.append("SQUEEZE")
+        if _orb_bear > 0:
+            sc += 0.5; desc_parts.append("ORB")
         candidates.append(("BOS_PULLBACK_SHORT", "short",
             f"BOS down (last 8 bars) + vol. [{'+'.join(desc_parts)}]", sc))
 
@@ -3306,6 +3368,10 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
                 sc += 1.0; desc_parts.append("SPRING")
             if _is_discount > 0:
                 sc += 1.0; desc_parts.append("DISCOUNT")
+            if _in_prime_session > 0:
+                sc += 1.0; desc_parts.append("SESSION")
+            if _is_squeeze > 0 or _squeeze_fired > 0:
+                sc += 1.0; desc_parts.append("SQUEEZE")
             candidates.append(("CHOCH_LONG", "long",
                 f"Change of Character bullish + {bull_reversal_evidence} reversal signals + vol. [{'+'.join(desc_parts)}]", sc))
 
@@ -3328,6 +3394,10 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
                 sc += 1.0; desc_parts.append("UPTHRUST")
             if _is_premium > 0:
                 sc += 1.0; desc_parts.append("PREMIUM")
+            if _in_prime_session > 0:
+                sc += 1.0; desc_parts.append("SESSION")
+            if _is_squeeze > 0 or _squeeze_fired > 0:
+                sc += 1.0; desc_parts.append("SQUEEZE")
             candidates.append(("CHOCH_SHORT", "short",
                 f"Change of Character bearish + {bear_reversal_evidence} reversal signals + vol. [{'+'.join(desc_parts)}]", sc))
 
@@ -3345,6 +3415,10 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             sc += 1.0; desc_parts.append("STRUCT_ALIGN")
         if _adx > 25:
             sc += 0.5; desc_parts.append("ADX")
+        if _in_prime_session > 0:
+            sc += 1.0; desc_parts.append("SESSION")
+        if _is_squeeze > 0 or _squeeze_fired > 0:
+            sc += 1.0; desc_parts.append("SQUEEZE")
         candidates.append(("DISPLACEMENT_CONT_LONG", "long",
             f"Displacement candle + BOS bullish + {bullish_tf_count}TF trend + vol. [{'+'.join(desc_parts)}]", sc))
 
@@ -3362,6 +3436,10 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             sc += 1.0; desc_parts.append("STRUCT_ALIGN")
         if _adx > 25:
             sc += 0.5; desc_parts.append("ADX")
+        if _in_prime_session > 0:
+            sc += 1.0; desc_parts.append("SESSION")
+        if _is_squeeze > 0 or _squeeze_fired > 0:
+            sc += 1.0; desc_parts.append("SQUEEZE")
         candidates.append(("DISPLACEMENT_CONT_SHORT", "short",
             f"Displacement candle + BOS bearish + {bearish_tf_count}TF trend + vol. [{'+'.join(desc_parts)}]", sc))
 

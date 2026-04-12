@@ -414,7 +414,13 @@ def main():
             # iMacro-1, iSwing-1, iHtf-1 prevents lookahead. Only uses completely closed prior candles
             base = confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, max(0, iMacro-1), max(0, iSwing-1), max(0, iHtf-1), iExec, pre_map, extras=extras)
             base["symbol"] = cfg.symbol
+            # Temporarily disable risk distance filter for export — we want training
+            # examples from ALL price levels, not just those above the minimum risk floor.
+            # The filter applies correctly at backtest/live inference time.
+            _saved_max_friction_pct = cfg.max_friction_pct
+            cfg.max_friction_pct = 9999.0  # disables the filter (min_risk approaches 0)
             plan = plan_trade_with_brain(cfg, None, base, adv_features, iExec, pExec)
+            cfg.max_friction_pct = _saved_max_friction_pct  # restore
 
             if plan:
                 plan['key'] = f"{plan['side']}-{ts}"

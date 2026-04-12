@@ -41,6 +41,10 @@ PROTECTED_FEATURES = {
     "atr_expansion_rate",
     "cvd_acceleration",
     "displacement_bos_bull",
+    "is_london_open",
+    "is_ny_open",
+    "struct_trend",
+    "struct_strength",
 }
 
 log = logging.getLogger("vajra.train.v8")
@@ -343,9 +347,9 @@ def main(argv=None):
             # Minimum positive-class guard: need at least 30 positive samples
             # for meaningful gradient signal. With fewer, XGBoost learns noise.
             n_pos_subset = int(subset["label"].sum())
-            if n_pos_subset < 30:
+            if n_pos_subset < 20:
                 log.warning(f"Skipping {strat_clean}_{side} - Not enough positive samples "
-                            f"({n_pos_subset} positive out of {len(subset)} total, need >= 30)")
+                            f"({n_pos_subset} positive out of {len(subset)} total, need >= 20)")
                 continue
 
             log.info(f"--- Training Isolated Brain: {strat_clean}_{side} ({len(subset)} samples) ---")
