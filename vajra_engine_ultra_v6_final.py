@@ -2287,13 +2287,37 @@ class BrainLearningManager:
 
     def _build_vec(self, side, b, a, iExec, px, pExec, fnames):
         d = {**b}
+        # FIX: Match _build_full_features semantics — do NOT blindly overwrite
+        # base (confluence_features) values with 0.0 when an adv_features entry
+        # is not a valid array or is shorter than iExec.  The training export
+        # path uses `else: continue` which preserves base values; the old
+        # `else: d[k] = 0.0` destroyed base features like bars_since_ob_bull,
+        # macro_struct_strength, and any other key that happened to collide or
+        # that the brain expected from the base dict.
         for k, v in a.items():
-            if hasattr(v, '__getitem__') and len(v) > iExec:
-                val = v[iExec]
-                d[k] = float(val) if np.isfinite(val) else 0.0
-                if d[k] > 1e10: d[k] = 1e10
-                elif d[k] < -1e10: d[k] = -1e10
-            else: d[k] = 0.0
+            if hasattr(v, '__getitem__') and not isinstance(v, (str, bytes)):
+                try:
+                    vlen = len(v)
+                except TypeError:
+                    # numpy scalar — treat as direct value
+                    d[k] = float(v) if np.isfinite(float(v)) else 0.0
+                    continue
+                if vlen > iExec:
+                    val = v[iExec]
+                    d[k] = float(val) if np.isfinite(val) else 0.0
+                    if d[k] > 1e10: d[k] = 1e10
+                    elif d[k] < -1e10: d[k] = -1e10
+                else:
+                    # Array too short — only set if key is NOT already populated
+                    # from the base dict (preserve confluence_features values).
+                    if k not in b:
+                        d[k] = 0.0
+            elif isinstance(v, (int, float, np.integer, np.floating)):
+                d[k] = float(v) if np.isfinite(float(v)) else 0.0
+            else:
+                # Non-numeric / non-array — skip, preserving base value
+                if k not in b:
+                    d[k] = 0.0
 
         # ALIGNMENT FIX
         d.update({
@@ -2302,6 +2326,18 @@ class BrainLearningManager:
             "dist_to_mtf_ema200_pct": (px-a['mtf_ema200_arr'][iExec])/px*100 if px and 'mtf_ema200_arr' in a else 0.0,
             "side": 1.0 if side=="long" else 0.0
         })
+
+        # SESSION FLAG PARITY FIX: The training export (_build_full_features)
+        # explicitly overrides session flags with pd.to_datetime at the end.
+        # Replicate that here so inference matches training exactly.
+        _ts = b.get("timestamp")
+        if _ts is not None:
+            try:
+                _dt = pd.to_datetime(int(_ts), unit="ms", utc=True)
+                d["is_london_session"] = 1.0 if 7 <= _dt.hour <= 16 else 0.0
+                d["is_ny_session"] = 1.0 if 13 <= _dt.hour <= 22 else 0.0
+            except Exception:
+                pass  # keep confluence_features values
 
         # Neutralize leaked features in old models (use XGBoost missing-value
         # sentinel so trees route via the default direction, not the 0-branch).
