@@ -172,10 +172,10 @@ def _strategy_overrides(cfg):
     cfg.filter_adx_chop = True
     cfg.adx_chop_threshold = 10.0
     cfg.reversal_evidence_min = 2
-    cfg.wick_rejection_pct = 0.30
+    cfg.wick_rejection_pct = 0.15  # restore to engine default
     cfg.vol_confirm_rvol = 1.2
     cfg.vol_spike_lookback = 5
-    cfg.ob_freshness_bars = 64
+    cfg.ob_freshness_bars = 192  # 48h on 15m — was incorrectly set to 64
     cfg.fvg_tolerance_atr = 0.5
     cfg.mtf_alignment_min = 1
 
