@@ -1255,6 +1255,27 @@ class Precomp:
             self.o, self.h, self.l, self.c, self.swing_hi, self.swing_lo, self.last_sh, self.last_sl
         )
 
+        # Track last UNFILLED FVG — carry forward until price fills it
+        n = len(self.c)
+        last_fvg_bull = np.zeros(n)
+        last_fvg_bear = np.zeros(n)
+        curr_bull = 0.0
+        curr_bear = 0.0
+        for i in range(n):
+            if self.fvg_bull_p[i] > 0:
+                curr_bull = self.fvg_bull_p[i]
+            if curr_bull > 0 and self.c[i] > curr_bull:
+                curr_bull = 0.0  # filled — invalidate
+            last_fvg_bull[i] = curr_bull
+
+            if self.fvg_bear_p[i] > 0:
+                curr_bear = self.fvg_bear_p[i]
+            if curr_bear > 0 and self.c[i] < curr_bear:
+                curr_bear = 0.0  # filled — invalidate
+            last_fvg_bear[i] = curr_bear
+        self.last_fvg_bull = last_fvg_bull
+        self.last_fvg_bear = last_fvg_bear
+
         # SYNTHETIC MICRO-STRUCTURE UPDATES
         self.kc_upper, self.kc_lower = _keltner_channels_np(self.c, self.h, self.l, 20, 1.5)
         self.is_squeezed = (self.bb_upper < self.kc_upper) & (self.bb_lower > self.kc_lower)
@@ -1464,6 +1485,13 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
 
     f["dist_bb_upper_pct"] = (px - f["bb_upper"]) / px_safe * 100
     f["dist_bb_lower_pct"] = (px - f["bb_lower"]) / px_safe * 100
+
+    f["vwap_z_score"] = float((px - pExec.rolling_vwap_20[idx_Exec]) / max(pExec.atr14[idx_Exec], 1e-9))
+    kc_up = pExec.kc_upper[idx_Exec]
+    kc_lo = pExec.kc_lower[idx_Exec]
+    f["dist_to_kc_upper_pct"] = float((px - kc_up) / kc_up * 100.0) if kc_up > 0 else 0.0
+    f["dist_to_kc_lower_pct"] = float((px - kc_lo) / kc_lo * 100.0) if kc_lo > 0 else 0.0
+
     f["rsi_14"] = float(pExec.rsi14[idx_Exec])
     
     # STRICT GOD-TIER FEATURES
@@ -1474,10 +1502,11 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
 
     f["w_pattern"] = float(pExec.w_pattern[idx_Exec])
     f["m_pattern"] = float(pExec.m_pattern[idx_Exec])
-    f["fvg_bull"] = float(pExec.fvg_bull_p[idx_Exec])
-    f["fvg_bear"] = float(pExec.fvg_bear_p[idx_Exec])
-    f["sweep_bull_p"] = float(pExec.sweep_bull_p[idx_Exec])
-    f["sweep_bear_p"] = float(pExec.sweep_bear_p[idx_Exec])
+    f["fvg_bull"] = float(pExec.last_fvg_bull[idx_Exec])
+    f["fvg_bear"] = float(pExec.last_fvg_bear[idx_Exec])
+    # Carry sweep signal 3 bars forward — entry confirmation takes 1-2 bars
+    f["sweep_bull_p"] = float(np.any(pExec.sweep_bull_p[max(0, idx_Exec-2):idx_Exec+1] > 0))
+    f["sweep_bear_p"] = float(np.any(pExec.sweep_bear_p[max(0, idx_Exec-2):idx_Exec+1] > 0))
 
     # MICRO-STRUCTURE EXTRACTION
     f["avwap_bull"] = float(pExec.avwap_bull[idx_Exec])
@@ -1648,6 +1677,14 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
     hour = (int(ts) // 3600000) % 24
     f["is_london_session"] = 1.0 if 7 <= hour <= 16 else 0.0
     f["is_ny_session"] = 1.0 if 13 <= hour <= 22 else 0.0
+
+    # ORB breakout flags — scalar for plan_trade_with_brain (LAMBDA strategy)
+    asian_h = float(pExec.asian_high[idx_Exec])
+    asian_l = float(pExec.asian_low[idx_Exec])
+    prev_c = float(pExec.c[max(0, idx_Exec - 1)])
+    _is_active = 7 <= hour <= 16
+    f["orb_bull"] = 1.0 if (_is_active and asian_h > 0 and px > asian_h and prev_c <= asian_h) else 0.0
+    f["orb_bear"] = 1.0 if (_is_active and asian_l > 0 and px < asian_l and prev_c >= asian_l) else 0.0
 
     if extras:
         f["funding_rate"] = float(extras.get("funding_rate", 0.0))
@@ -3332,6 +3369,11 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
                     selected_tp = t
                 break
 
+        # ATR fallback when structural TPs exist but none met min_rr
+        if selected_tp is None and risk_distance > 0:
+            atr_tp_mult = getattr(cfg, 'atr_mult_tp', 4.0)
+            selected_tp = entry_target + (risk_distance * atr_tp_mult)
+
         if selected_tp is None: return None
         tp = selected_tp
         rr = (tp - entry_target) / risk_distance
@@ -3368,6 +3410,11 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
                 else:
                     selected_tp = t
                 break
+
+        # ATR fallback when structural TPs exist but none met min_rr
+        if selected_tp is None and risk_distance > 0:
+            atr_tp_mult = getattr(cfg, 'atr_mult_tp', 4.0)
+            selected_tp = entry_target - (risk_distance * atr_tp_mult)
 
         if selected_tp is None: return None
         tp = selected_tp
