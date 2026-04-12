@@ -2726,6 +2726,12 @@ class TradeManager:
             other_side = t.get('side', '')
             if not other_sym or not other_side:
                 continue
+            # Skip same-symbol: single-symbol concentration is already capped by
+            # max_trades_per_strategy and max_concurrent. Correlation sizing exists
+            # for CROSS-symbol concentration (e.g. BTC+ETH+SOL all long = one
+            # correlated crypto-beta bet sized as multiple independent trades).
+            if other_sym == new_symbol:
+                continue
             corr = _get_correlation(new_symbol, other_sym)
             # Same-side correlation adds risk; opposite-side correlation hedges it
             if other_side == new_side:
@@ -2741,7 +2747,7 @@ class TradeManager:
         order['risk_factor'] = original_rf * correlation_scalar
 
         if correlation_scalar < 0.95:
-            log.info(
+            log.debug(
                 f"[{new_symbol}] Correlation-adjusted risk: {original_rf:.2f} -> "
                 f"{order['risk_factor']:.2f} (scalar={correlation_scalar:.2f}, "
                 f"correlated_exposure={correlated_exposure:.2f})"
