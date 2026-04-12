@@ -298,7 +298,7 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str,
         df[c] = s
 
     log.info(f"Selected {len(keep)} Normalized Features. Total Samples: {len(df)}")
-    meta_cols = [c for c in ["side", "strategy"] if c in df.columns]
+    meta_cols = [c for c in ["side", "strategy", "exit_reason"] if c in df.columns]
     return df[keep + ["label", "entry_ts_dt", "pnl_r"] + meta_cols].copy(), sorted(keep)
 
 def _sanitize_data(X: np.ndarray) -> np.ndarray:
