@@ -30,7 +30,9 @@ Every value below is commented with its mathematical rationale so that
 future calibrators can re-derive the choice from first principles.
 """
 from __future__ import annotations
+import logging
 
+_log = logging.getLogger("vajra.overrides")
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Microstructure constants
@@ -181,3 +183,11 @@ def _strategy_overrides(cfg):
 
     # ── Meta-Brain threshold (two-gate with specialist) ────────────────
     cfg.min_meta_prob = 0.22
+
+    # ── Startup confirmation log ──────────────────────────────────────
+    _log.info(
+        "Overrides applied: adx_chop_threshold=%.1f, filter_adx_chop=%s, "
+        "atr_mult_sl=%.2f, time_in_force_decay=%d",
+        cfg.adx_chop_threshold, cfg.filter_adx_chop,
+        cfg.atr_mult_sl, cfg.time_in_force_decay,
+    )

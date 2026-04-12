@@ -3183,9 +3183,9 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     _bos_pullback_long = _fib_pos < 50.0   # price in lower half = pullback after up-BOS
     _bos_pullback_short = _fib_pos > 50.0  # price in upper half = pullback after down-BOS
 
-    # ---- SETUP 1: STRUCTURE_LONG (Bullish structure + pullback into discount) ----
-    if can_long and _struct_trend > 0 and _struct_strength >= 2:
-        if _htf_struct_trend >= 0 and _is_discount > 0 and has_vol_confirm:
+    # ---- SETUP 1: STRUCTURE_LONG (Bullish structure + confluence) ----
+    if can_long and _struct_trend > 0 and _struct_strength >= 1:
+        if _htf_struct_trend >= 0 and has_vol_confirm:
             sc = 0.0
             desc_parts = []
             if macro_up > 0:
@@ -3197,15 +3197,15 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             if struct_align_bull >= 2:
                 sc += 1.0; desc_parts.append("STRUCT_ALIGN")
             if _is_discount > 0:
-                sc += 1.0; desc_parts.append("DISCOUNT")
+                sc += 1.5; desc_parts.append("DISCOUNT")
             if rvol > 1.5:
                 sc += 0.5; desc_parts.append("RVOL")
             candidates.append(("STRUCTURE_LONG", "long",
-                f"Bullish HH/HL structure (str={_struct_strength:.0f}) + discount pullback + vol. [{'+'.join(desc_parts)}]", sc))
+                f"Bullish HH/HL structure (str={_struct_strength:.0f}) + vol. [{'+'.join(desc_parts)}]", sc))
 
-    # ---- SETUP 2: STRUCTURE_SHORT (Bearish structure + pullback into premium) ----
-    if can_short and _struct_trend < 0 and _struct_strength >= 2:
-        if _htf_struct_trend <= 0 and _is_premium > 0 and has_vol_confirm:
+    # ---- SETUP 2: STRUCTURE_SHORT (Bearish structure + confluence) ----
+    if can_short and _struct_trend < 0 and _struct_strength >= 1:
+        if _htf_struct_trend <= 0 and has_vol_confirm:
             sc = 0.0
             desc_parts = []
             if macro_down > 0:
@@ -3217,16 +3217,18 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
             if struct_align_bear >= 2:
                 sc += 1.0; desc_parts.append("STRUCT_ALIGN")
             if _is_premium > 0:
-                sc += 1.0; desc_parts.append("PREMIUM")
+                sc += 1.5; desc_parts.append("PREMIUM")
             if rvol > 1.5:
                 sc += 0.5; desc_parts.append("RVOL")
             candidates.append(("STRUCTURE_SHORT", "short",
-                f"Bearish LH/LL structure (str={_struct_strength:.0f}) + premium pullback + vol. [{'+'.join(desc_parts)}]", sc))
+                f"Bearish LH/LL structure (str={_struct_strength:.0f}) + vol. [{'+'.join(desc_parts)}]", sc))
 
-    # ---- SETUP 3: BOS_PULLBACK_LONG (BOS up within 8 bars + pullback) ----
-    if can_long and _bos_up_recent and _bos_pullback_long and _struct_trend > 0 and has_vol_confirm:
+    # ---- SETUP 3: BOS_PULLBACK_LONG (BOS up within 8 bars) ----
+    if can_long and _bos_up_recent and _struct_trend >= 0 and has_vol_confirm:
         sc = 1.0  # base: BOS occurred
         desc_parts = ["BOS_UP"]
+        if _bos_pullback_long:
+            sc += 0.5; desc_parts.append("PULLBACK")
         if htf_up > 0:
             sc += 1.0; desc_parts.append("HTF_UP")
         if macro_up > 0:
@@ -3238,12 +3240,14 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         if _is_discount > 0:
             sc += 1.0; desc_parts.append("DISCOUNT")
         candidates.append(("BOS_PULLBACK_LONG", "long",
-            f"BOS up (last 8 bars) + pullback to fib {_fib_pos:.0f}% + vol. [{'+'.join(desc_parts)}]", sc))
+            f"BOS up (last 8 bars) + vol. [{'+'.join(desc_parts)}]", sc))
 
-    # ---- SETUP 4: BOS_PULLBACK_SHORT (BOS down within 8 bars + pullback) ----
-    if can_short and _bos_down_recent and _bos_pullback_short and _struct_trend < 0 and has_vol_confirm:
+    # ---- SETUP 4: BOS_PULLBACK_SHORT (BOS down within 8 bars) ----
+    if can_short and _bos_down_recent and _struct_trend <= 0 and has_vol_confirm:
         sc = 1.0
         desc_parts = ["BOS_DN"]
+        if _bos_pullback_short:
+            sc += 0.5; desc_parts.append("PULLBACK")
         if htf_down > 0:
             sc += 1.0; desc_parts.append("HTF_DN")
         if macro_down > 0:
@@ -3255,7 +3259,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         if _is_premium > 0:
             sc += 1.0; desc_parts.append("PREMIUM")
         candidates.append(("BOS_PULLBACK_SHORT", "short",
-            f"BOS down (last 8 bars) + pullback to fib {_fib_pos:.0f}% + vol. [{'+'.join(desc_parts)}]", sc))
+            f"BOS down (last 8 bars) + vol. [{'+'.join(desc_parts)}]", sc))
 
     # ---- SETUP 5: CHOCH_LONG (Change of Character — reversal) ----
     # Exempt from regime gate: ChoCH is inherently counter-trend.
