@@ -2114,20 +2114,33 @@ def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, b
     return f
 
 class BrainLearningManager:
-    # ── Canonical list of all specialist brain keys the Meta-Brain expects ──
-    ALL_SPECIALIST_KEYS = [
-        ("ALPHA", "long"), ("ALPHA", "short"),
-        ("BETA", "long"), ("BETA", "short"),
-        ("GAMMA", "long"), ("GAMMA", "short"),
-        ("DELTA", "long"), ("DELTA", "short"),
-        ("EPSILON", "long"), ("EPSILON", "short"),
-        ("ZETA", "long"), ("ZETA", "short"),
-        ("ETA", "long"), ("ETA", "short"),
-        ("THETA", "long"), ("THETA", "short"),
-        ("IOTA", "long"), ("IOTA", "short"),
-        ("KAPPA", "long"), ("KAPPA", "short"),
-        ("LAMBDA", "long"), ("LAMBDA", "short"),
-    ]
+
+    @property
+    def ALL_SPECIALIST_KEYS(self):
+        """Derive specialist keys dynamically from meta-brain metadata or loaded brains.
+
+        Priority: meta-brain saved keys (exact training alignment) > loaded brain keys.
+        """
+        if not hasattr(self, '_specialist_keys_cache'):
+            self._specialist_keys_cache = None
+        if self._specialist_keys_cache is not None:
+            return self._specialist_keys_cache
+
+        # 1. Prefer specialist_keys saved by the meta-brain trainer
+        if self.meta_brain and "specialist_keys" in self.meta_brain:
+            self._specialist_keys_cache = self.meta_brain["specialist_keys"]
+            return self._specialist_keys_cache
+
+        # 2. Fallback: derive from actually loaded specialist brains
+        if self.brains:
+            self._specialist_keys_cache = sorted(self.brains.keys())
+            return self._specialist_keys_cache
+
+        # 3. Empty — no brains loaded at all
+        return []
+
+    def _invalidate_specialist_keys_cache(self):
+        self._specialist_keys_cache = None
 
     def __init__(self, cfg, brains_dir=None):
         global log
@@ -2141,6 +2154,7 @@ class BrainLearningManager:
         self.cfg = cfg
         self.brains = {} # Format: {(strategy, side): model}
         self.meta_brain = None  # Unified Meta-Brain
+        self._specialist_keys_cache = None
         if not joblib: return
         self.load_brains(brains_dir)
 
@@ -2221,6 +2235,7 @@ class BrainLearningManager:
                     booster.load_model(str(xgb_path))
                     meta_data["booster"] = booster
                 self.meta_brain = meta_data
+                self._invalidate_specialist_keys_cache()
                 log.info(f"Loaded Meta-Brain (unified) with {len(meta_data.get('feature_names', []))} features")
             except Exception as e:
                 log.error(f"Meta-Brain load error: {e}")
@@ -2349,7 +2364,7 @@ class BrainLearningManager:
             # Step 3: Build meta-brain feature vector
             meta_features = {}
 
-            # 3a: All specialist probabilities (22 features)
+            # 3a: All specialist probabilities
             meta_features.update(specialist_probs)
 
             # 3b: Count how many specialists are active (have loaded brains)
