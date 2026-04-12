@@ -3152,134 +3152,189 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     base["bear_confluence_reasons"] = "+".join(bear_struct_reasons) if bear_struct_reasons else ""
 
     # ==========================================================
-    # PHASE 4B: SETUP DETECTION (highest confluence wins)
+    # PHASE 4B: STRUCTURE-FIRST SETUP DETECTION
     # ==========================================================
-    # Collect ALL qualifying setups, then pick the one with highest confluence.
+    # Philosophy: Market structure events ARE the signal. Geometry (OBs, FVGs)
+    # is used downstream in Phase 5 for stop placement, NOT as a trigger here.
+    # Each setup computes its own confluence score; Phase 4C picks the best.
     candidates = []
 
-    # ---- LONG CANDIDATES ----
-    if can_long:
-        # ALPHA_LONG: OB CE
-        if ob_bull_ce > 0 and ob_bull_fresh and low <= ob_bull_ce and px > ob_bull_bot:
-            if is_bull_rejection and has_vol_confirm:
-                candidates.append(("ALPHA_LONG", "long", "OB CE mitigation + rejection wick + volume.", bull_struct_score))
+    # Pre-fetch structure features used across multiple setups
+    _struct_trend = base.get("struct_trend", 0)
+    _struct_strength = base.get("struct_strength", 0)
+    _htf_struct_trend = base.get("htf_struct_trend", 0)
+    _is_discount = base.get("is_discount_zone", 0)
+    _is_premium = base.get("is_premium_zone", 0)
+    _choch_up = base.get("choch_up", 0)
+    _choch_down = base.get("choch_down", 0)
+    _disp_bos_bull = base.get("displacement_bos_bull", 0)
+    _disp_bos_bear = base.get("displacement_bos_bear", 0)
+    _wyckoff_spring = base.get("wyckoff_spring", 0)
+    _wyckoff_upthrust = base.get("wyckoff_upthrust", 0)
+    _adx = base.get("adx", 0)
 
-        # BETA_LONG: Divergence + BOS
-        div_count = int(bull_ewo) + int(bull_obv) + int(bull_cvd) + int(bull_rsi_div)
-        if div_count >= 2 and base.get("bos_up", 0) > 0 and has_vol_confirm:
-            candidates.append(("BETA_LONG", "long", f"Divergence confluence ({div_count} divs) + structural BOS + volume.", bull_struct_score))
+    # BOS lookback: check if BOS occurred within last 8 bars
+    _bos_up_recent = any(pExec.bos_up[max(0, iExec - 7):iExec + 1] > 0) if hasattr(pExec, 'bos_up') else False
+    _bos_down_recent = any(pExec.bos_down[max(0, iExec - 7):iExec + 1] > 0) if hasattr(pExec, 'bos_down') else False
 
-        # GAMMA_LONG: QM retest
-        if (base.get("qm_bull", 0) > 0 and low <= (base.get("qm_bull", 0) + qm_zone)
-                and px > base.get("qm_bull", 0) and is_bull_rejection and has_vol_confirm):
-            candidates.append(("GAMMA_LONG", "long", "QM structural retest + rejection wick + volume.", bull_struct_score))
+    # Pullback detection for BOS setups: price retraced toward BOS area
+    # (price is in lower half of recent range = pulled back after bullish BOS)
+    _fib_pos = base.get("fib_position_pct", 50.0)
+    _bos_pullback_long = _fib_pos < 50.0   # price in lower half = pullback after up-BOS
+    _bos_pullback_short = _fib_pos > 50.0  # price in upper half = pullback after down-BOS
 
-        # DELTA_LONG: FVG mitigation
-        if (fvg_bull > 0 and low <= (fvg_bull + fvg_tol)
-                and px > (fvg_bull - fvg_tol) and is_bull_rejection and has_vol_confirm):
-            candidates.append(("DELTA_LONG", "long", "FVG CE mitigation + rejection wick + volume.", bull_struct_score))
+    # ---- SETUP 1: STRUCTURE_LONG (Bullish structure + pullback into discount) ----
+    if can_long and _struct_trend > 0 and _struct_strength >= 2:
+        if _htf_struct_trend >= 0 and _is_discount > 0 and has_vol_confirm:
+            sc = 0.0
+            desc_parts = []
+            if macro_up > 0:
+                sc += 1.0; desc_parts.append("MACRO_UP")
+            if swing_up > 0:
+                sc += 1.0; desc_parts.append("SWING_UP")
+            if htf_up > 0:
+                sc += 1.0; desc_parts.append("HTF_UP")
+            if struct_align_bull >= 2:
+                sc += 1.0; desc_parts.append("STRUCT_ALIGN")
+            if _is_discount > 0:
+                sc += 1.0; desc_parts.append("DISCOUNT")
+            if rvol > 1.5:
+                sc += 0.5; desc_parts.append("RVOL")
+            candidates.append(("STRUCTURE_LONG", "long",
+                f"Bullish HH/HL structure (str={_struct_strength:.0f}) + discount pullback + vol. [{'+'.join(desc_parts)}]", sc))
 
-        # EPSILON_LONG: Wyckoff Spring
-        if has_spring and has_vol_confirm:
-            candidates.append(("EPSILON_LONG", "long", "Wyckoff spring: liquidity sweep + reclaim + volume.", bull_struct_score))
+    # ---- SETUP 2: STRUCTURE_SHORT (Bearish structure + pullback into premium) ----
+    if can_short and _struct_trend < 0 and _struct_strength >= 2:
+        if _htf_struct_trend <= 0 and _is_premium > 0 and has_vol_confirm:
+            sc = 0.0
+            desc_parts = []
+            if macro_down > 0:
+                sc += 1.0; desc_parts.append("MACRO_DN")
+            if swing_down > 0:
+                sc += 1.0; desc_parts.append("SWING_DN")
+            if htf_down > 0:
+                sc += 1.0; desc_parts.append("HTF_DN")
+            if struct_align_bear >= 2:
+                sc += 1.0; desc_parts.append("STRUCT_ALIGN")
+            if _is_premium > 0:
+                sc += 1.0; desc_parts.append("PREMIUM")
+            if rvol > 1.5:
+                sc += 0.5; desc_parts.append("RVOL")
+            candidates.append(("STRUCTURE_SHORT", "short",
+                f"Bearish LH/LL structure (str={_struct_strength:.0f}) + premium pullback + vol. [{'+'.join(desc_parts)}]", sc))
 
-        # ZETA_LONG: EMA Pullback
-        ema20_val = base.get("ema20_dist_pct", 0)
-        htf_bullish = base.get("htf_up", 0) > 0
-        if htf_bullish and bullish_tf_count >= 2:
-            if -0.5 < ema20_val < 0.3 and is_bull_rejection and has_vol_confirm:
-                candidates.append(("ZETA_LONG", "long", "EMA pullback entry in confirmed uptrend + rejection wick.", bull_struct_score))
+    # ---- SETUP 3: BOS_PULLBACK_LONG (BOS up within 8 bars + pullback) ----
+    if can_long and _bos_up_recent and _bos_pullback_long and _struct_trend > 0 and has_vol_confirm:
+        sc = 1.0  # base: BOS occurred
+        desc_parts = ["BOS_UP"]
+        if htf_up > 0:
+            sc += 1.0; desc_parts.append("HTF_UP")
+        if macro_up > 0:
+            sc += 1.0; desc_parts.append("MACRO_UP")
+        if _disp_bos_bull > 0:
+            sc += 1.0; desc_parts.append("DISP+BOS")
+        if rvol > 1.5:
+            sc += 1.0; desc_parts.append("RVOL")
+        if _is_discount > 0:
+            sc += 1.0; desc_parts.append("DISCOUNT")
+        candidates.append(("BOS_PULLBACK_LONG", "long",
+            f"BOS up (last 8 bars) + pullback to fib {_fib_pos:.0f}% + vol. [{'+'.join(desc_parts)}]", sc))
 
-        # ETA_LONG: Liquidity Sweep + Reclaim
-        if sweep_bull > 0 and is_bull_rejection and has_vol_confirm:
-            candidates.append(("ETA_LONG", "long", "Liquidity sweep below support + price reclaim + volume.", bull_struct_score))
+    # ---- SETUP 4: BOS_PULLBACK_SHORT (BOS down within 8 bars + pullback) ----
+    if can_short and _bos_down_recent and _bos_pullback_short and _struct_trend < 0 and has_vol_confirm:
+        sc = 1.0
+        desc_parts = ["BOS_DN"]
+        if htf_down > 0:
+            sc += 1.0; desc_parts.append("HTF_DN")
+        if macro_down > 0:
+            sc += 1.0; desc_parts.append("MACRO_DN")
+        if _disp_bos_bear > 0:
+            sc += 1.0; desc_parts.append("DISP+BOS")
+        if rvol > 1.5:
+            sc += 1.0; desc_parts.append("RVOL")
+        if _is_premium > 0:
+            sc += 1.0; desc_parts.append("PREMIUM")
+        candidates.append(("BOS_PULLBACK_SHORT", "short",
+            f"BOS down (last 8 bars) + pullback to fib {_fib_pos:.0f}% + vol. [{'+'.join(desc_parts)}]", sc))
 
-        # THETA_LONG: Keltner/BB Mean Reversion
-        kc_lower_dist = base.get("dist_to_kc_lower_pct", 0)
-        vwap_z = base.get("vwap_z_score", 0)
-        if kc_lower_dist < -0.5 and vwap_z < -1.5 and is_bull_rejection and has_vol_confirm:
-            candidates.append(("THETA_LONG", "long", "Mean reversion from Keltner lower band + VWAP extreme.", bull_struct_score))
+    # ---- SETUP 5: CHOCH_LONG (Change of Character — reversal) ----
+    # Exempt from regime gate: ChoCH is inherently counter-trend.
+    if _choch_up > 0 and bull_reversal_evidence >= 1 and has_vol_confirm:
+        _choch_long_allowed = can_long or (bull_reversal_evidence >= 1)  # bypass regime gate for reversals
+        if _choch_long_allowed:
+            is_reversal_context = True
+            sc = 1.0  # base: ChoCH confirmed
+            desc_parts = ["CHOCH_UP"]
+            if bull_ewo:
+                sc += 1.0; desc_parts.append("EWO_DIV")
+            if bull_obv:
+                sc += 1.0; desc_parts.append("OBV_DIV")
+            if bull_cvd:
+                sc += 1.0; desc_parts.append("CVD_DIV")
+            if bull_rsi_div:
+                sc += 1.0; desc_parts.append("RSI_DIV")
+            if _wyckoff_spring > 0 or has_spring:
+                sc += 1.0; desc_parts.append("SPRING")
+            if _is_discount > 0:
+                sc += 1.0; desc_parts.append("DISCOUNT")
+            candidates.append(("CHOCH_LONG", "long",
+                f"Change of Character bullish + {bull_reversal_evidence} reversal signals + vol. [{'+'.join(desc_parts)}]", sc))
 
-        # IOTA_LONG: ICT OTE
-        in_ote = base.get("in_ote_zone_long", 0)
-        is_discount = base.get("is_discount_zone", 0)
-        has_disp = base.get("recent_displacement_bull", 0)
-        has_choch = base.get("choch_up", 0)
-        if in_ote > 0 and is_discount > 0 and bullish_tf_count >= 1:
-            if (has_disp > 0 or has_choch > 0) and is_bull_rejection and has_vol_confirm:
-                candidates.append(("IOTA_LONG", "long", "ICT OTE zone entry (62-79% retrace) + displacement + trend.", bull_struct_score))
+    # ---- SETUP 6: CHOCH_SHORT (Change of Character — reversal) ----
+    if _choch_down > 0 and bear_reversal_evidence >= 1 and has_vol_confirm:
+        _choch_short_allowed = can_short or (bear_reversal_evidence >= 1)
+        if _choch_short_allowed:
+            is_reversal_context = True
+            sc = 1.0
+            desc_parts = ["CHOCH_DN"]
+            if bear_ewo:
+                sc += 1.0; desc_parts.append("EWO_DIV")
+            if bear_obv:
+                sc += 1.0; desc_parts.append("OBV_DIV")
+            if bear_cvd:
+                sc += 1.0; desc_parts.append("CVD_DIV")
+            if bear_rsi_div:
+                sc += 1.0; desc_parts.append("RSI_DIV")
+            if _wyckoff_upthrust > 0 or has_upthrust:
+                sc += 1.0; desc_parts.append("UPTHRUST")
+            if _is_premium > 0:
+                sc += 1.0; desc_parts.append("PREMIUM")
+            candidates.append(("CHOCH_SHORT", "short",
+                f"Change of Character bearish + {bear_reversal_evidence} reversal signals + vol. [{'+'.join(desc_parts)}]", sc))
 
-        # KAPPA_LONG: Accumulation Spring
-        has_accum = base.get("wyckoff_accum", 0)
-        if has_accum > 0 and has_spring and has_vol_confirm:
-            candidates.append(("KAPPA_LONG", "long", "Wyckoff accumulation phase + spring + volume confirmation.", bull_struct_score))
+    # ---- SETUP 7: DISPLACEMENT_CONTINUATION_LONG ----
+    if can_long and _disp_bos_bull > 0 and _struct_trend >= 0 and bullish_tf_count >= 1 and has_vol_confirm:
+        sc = 1.0  # base: displacement + BOS
+        desc_parts = ["DISP+BOS"]
+        if macro_up > 0:
+            sc += 1.0; desc_parts.append("MACRO_UP")
+        if swing_up > 0:
+            sc += 1.0; desc_parts.append("SWING_UP")
+        if htf_up > 0:
+            sc += 1.0; desc_parts.append("HTF_UP")
+        if struct_align_bull >= 2:
+            sc += 1.0; desc_parts.append("STRUCT_ALIGN")
+        if _adx > 25:
+            sc += 0.5; desc_parts.append("ADX")
+        candidates.append(("DISPLACEMENT_CONT_LONG", "long",
+            f"Displacement candle + BOS bullish + {bullish_tf_count}TF trend + vol. [{'+'.join(desc_parts)}]", sc))
 
-        # LAMBDA_LONG: ORB Breakout
-        orb_b = base.get("orb_bull", 0) if "orb_bull" in base else 0
-        if orb_b > 0 and bullish_tf_count >= 1 and has_vol_confirm:
-            candidates.append(("LAMBDA_LONG", "long", "Asian range breakout (ORB) during active session + volume.", bull_struct_score))
-
-    # ---- SHORT CANDIDATES ----
-    if can_short:
-        # ALPHA_SHORT: OB CE
-        if ob_bear_ce > 0 and ob_bear_fresh and high >= ob_bear_ce and px < ob_bear_top:
-            if is_bear_rejection and has_vol_confirm:
-                candidates.append(("ALPHA_SHORT", "short", "OB CE mitigation + rejection wick + volume.", bear_struct_score))
-
-        # BETA_SHORT: Divergence + BOS
-        div_count = int(bear_ewo) + int(bear_obv) + int(bear_cvd) + int(bear_rsi_div)
-        if div_count >= 2 and base.get("bos_down", 0) > 0 and has_vol_confirm:
-            candidates.append(("BETA_SHORT", "short", f"Divergence confluence ({div_count} divs) + structural BOS + volume.", bear_struct_score))
-
-        # GAMMA_SHORT: QM retest
-        if (base.get("qm_bear", 0) > 0 and high >= (base.get("qm_bear", 0) - qm_zone)
-                and px < base.get("qm_bear", 0) and is_bear_rejection and has_vol_confirm):
-            candidates.append(("GAMMA_SHORT", "short", "QM structural retest + rejection wick + volume.", bear_struct_score))
-
-        # DELTA_SHORT: FVG mitigation
-        if (fvg_bear > 0 and high >= (fvg_bear - fvg_tol)
-                and px < (fvg_bear + fvg_tol) and is_bear_rejection and has_vol_confirm):
-            candidates.append(("DELTA_SHORT", "short", "FVG CE mitigation + rejection wick + volume.", bear_struct_score))
-
-        # EPSILON_SHORT: Wyckoff Upthrust
-        if has_upthrust and has_vol_confirm:
-            candidates.append(("EPSILON_SHORT", "short", "Wyckoff upthrust: liquidity sweep + reclaim + volume.", bear_struct_score))
-
-        # ZETA_SHORT: EMA Pullback
-        ema20_val = base.get("ema20_dist_pct", 0)
-        htf_bearish = base.get("htf_down", 0) > 0
-        if htf_bearish and bearish_tf_count >= 2:
-            if -0.3 < ema20_val < 0.5 and is_bear_rejection and has_vol_confirm:
-                candidates.append(("ZETA_SHORT", "short", "EMA pullback entry in confirmed downtrend + rejection wick.", bear_struct_score))
-
-        # ETA_SHORT: Liquidity Sweep + Rejection
-        if sweep_bear > 0 and is_bear_rejection and has_vol_confirm:
-            candidates.append(("ETA_SHORT", "short", "Liquidity sweep above resistance + price rejection + volume.", bear_struct_score))
-
-        # THETA_SHORT: Keltner/BB Mean Reversion
-        kc_upper_dist = base.get("dist_to_kc_upper_pct", 0)
-        vwap_z = base.get("vwap_z_score", 0)
-        if kc_upper_dist > 0.5 and vwap_z > 1.5 and is_bear_rejection and has_vol_confirm:
-            candidates.append(("THETA_SHORT", "short", "Mean reversion from Keltner upper band + VWAP extreme.", bear_struct_score))
-
-        # IOTA_SHORT: ICT OTE
-        in_ote = base.get("in_ote_zone_short", 0)
-        is_premium = base.get("is_premium_zone", 0)
-        has_disp = base.get("recent_displacement_bear", 0)
-        has_choch = base.get("choch_down", 0)
-        if in_ote > 0 and is_premium > 0 and bearish_tf_count >= 1:
-            if (has_disp > 0 or has_choch > 0) and is_bear_rejection and has_vol_confirm:
-                candidates.append(("IOTA_SHORT", "short", "ICT OTE zone entry (62-79% retrace) + displacement + trend.", bear_struct_score))
-
-        # KAPPA_SHORT: Distribution Upthrust
-        has_distrib = base.get("wyckoff_distrib", 0)
-        if has_distrib > 0 and has_upthrust and has_vol_confirm:
-            candidates.append(("KAPPA_SHORT", "short", "Wyckoff distribution phase + upthrust + volume confirmation.", bear_struct_score))
-
-        # LAMBDA_SHORT: ORB Breakdown
-        orb_br = base.get("orb_bear", 0) if "orb_bear" in base else 0
-        if orb_br > 0 and bearish_tf_count >= 1 and has_vol_confirm:
-            candidates.append(("LAMBDA_SHORT", "short", "Asian range breakdown (ORB) during active session + volume.", bear_struct_score))
+    # ---- SETUP 8: DISPLACEMENT_CONTINUATION_SHORT ----
+    if can_short and _disp_bos_bear > 0 and _struct_trend <= 0 and bearish_tf_count >= 1 and has_vol_confirm:
+        sc = 1.0
+        desc_parts = ["DISP+BOS"]
+        if macro_down > 0:
+            sc += 1.0; desc_parts.append("MACRO_DN")
+        if swing_down > 0:
+            sc += 1.0; desc_parts.append("SWING_DN")
+        if htf_down > 0:
+            sc += 1.0; desc_parts.append("HTF_DN")
+        if struct_align_bear >= 2:
+            sc += 1.0; desc_parts.append("STRUCT_ALIGN")
+        if _adx > 25:
+            sc += 0.5; desc_parts.append("ADX")
+        candidates.append(("DISPLACEMENT_CONT_SHORT", "short",
+            f"Displacement candle + BOS bearish + {bearish_tf_count}TF trend + vol. [{'+'.join(desc_parts)}]", sc))
 
     if not candidates: return None
 
@@ -3292,8 +3347,7 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     htf_struct = base.get("htf_struct_trend", 0)
 
     # Pick the candidate with the highest confluence score.
-    _struct_priority = {"ALPHA": 10, "GAMMA": 9, "IOTA": 8, "DELTA": 7, "KAPPA": 6,
-                        "EPSILON": 5, "BETA": 4, "ETA": 3, "ZETA": 2, "THETA": 1, "LAMBDA": 0}
+    _struct_priority = {"CHOCH": 10, "DISPLACEMENT": 9, "BOS": 8, "STRUCTURE": 7}
     candidates.sort(key=lambda c: (c[3], _struct_priority.get(c[0].split("_")[0], 0)), reverse=True)
     setup_type, side, logic_desc, confluence = candidates[0]
 
@@ -3315,10 +3369,13 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     if not setup_type: return None
 
     # ==========================================================
-    # PHASE 5: SETUP-SPECIFIC PRECISE SL (Invalidation Point)
+    # PHASE 5: GEOMETRIC ENTRY REFINEMENT + PRECISE SL
     # ==========================================================
-    pullback_dist = current_atr * getattr(cfg, 'pullback_atr_mult', 0.0)
-    entry_target = px - pullback_dist if side == 'long' else px + pullback_dist
+    # Structure triggered the signal in Phase 4B. Now use geometric
+    # levels (OBs, FVGs, OTE) for two things:
+    #   1. Entry precision — snap entry_target to the nearest geometric
+    #      level that improves fill price (within 1 ATR of current price).
+    #   2. Stop placement — anchor SL at the structural invalidation point.
 
     swing_high = pExec.last_sh[iExec]
     swing_low = pExec.last_sl[iExec]
@@ -3334,19 +3391,71 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
     strat_base = setup_type.split("_")[0]
 
+    # ---- Geometric entry refinement ----
+    # Collect nearby geometric levels that improve fill price.
+    # For longs: lower price = better fill. For shorts: higher = better.
+    # Only consider levels within 1 ATR of current price (reachable on
+    # a pullback within the next few bars).
+    geo_snap_range = current_atr * getattr(cfg, 'geo_entry_snap_atr', 1.0)
+
     if side == 'long':
-        # Setup-specific SL: use the tightest structural invalidation
-        if strat_base == "ALPHA" and ob_bull_bot > 0:
-            sl = ob_bull_bot - sl_buffer
-        elif strat_base == "GAMMA" and base.get("qm_bull", 0) > 0:
-            sl = base.get("qm_bull", 0) - sl_buffer
-        elif strat_base == "DELTA" and fvg_bull > 0:
-            fvg_low = fvg_bull - fvg_tol
-            sl = fvg_low - sl_buffer
-        elif strat_base == "THETA":
-            sl = low - current_atr - sl_buffer
+        # Candidate entry levels below current price (better fills for longs)
+        geo_entries = []
+        if ob_bull_ce > 0 and ob_bull_fresh and (px - geo_snap_range) <= ob_bull_ce <= px:
+            geo_entries.append(ob_bull_ce)
+        if fvg_bull > 0 and (px - geo_snap_range) <= fvg_bull <= px:
+            geo_entries.append(fvg_bull)
+        if base.get("qm_bull", 0) > 0 and (px - geo_snap_range) <= base["qm_bull"] <= px:
+            geo_entries.append(base["qm_bull"])
+        # OTE midpoint (70.5% retrace) as entry magnet
+        ote_mid = base.get("ote_mid_long", 0)
+        if ote_mid > 0 and (px - geo_snap_range) <= ote_mid <= px:
+            geo_entries.append(ote_mid)
+
+        if geo_entries:
+            # Pick the geometric level closest to current price (most likely to fill)
+            entry_target = max(geo_entries)  # highest of the below-price levels = tightest
+            logic_desc += f" GEO_ENTRY={entry_target:.1f}."
         else:
-            sl = min(swing_low, low) - sl_buffer
+            pullback_dist = current_atr * getattr(cfg, 'pullback_atr_mult', 0.0)
+            entry_target = px - pullback_dist
+
+    else:  # short
+        geo_entries = []
+        if ob_bear_ce > 0 and ob_bear_fresh and px <= ob_bear_ce <= (px + geo_snap_range):
+            geo_entries.append(ob_bear_ce)
+        if fvg_bear > 0 and px <= fvg_bear <= (px + geo_snap_range):
+            geo_entries.append(fvg_bear)
+        if base.get("qm_bear", 0) > 0 and px <= base["qm_bear"] <= (px + geo_snap_range):
+            geo_entries.append(base["qm_bear"])
+        ote_mid = base.get("ote_mid_short", 0)
+        if ote_mid > 0 and px <= ote_mid <= (px + geo_snap_range):
+            geo_entries.append(ote_mid)
+
+        if geo_entries:
+            entry_target = min(geo_entries)  # lowest of the above-price levels = tightest
+            logic_desc += f" GEO_ENTRY={entry_target:.1f}."
+        else:
+            pullback_dist = current_atr * getattr(cfg, 'pullback_atr_mult', 0.0)
+            entry_target = px + pullback_dist
+
+    # ---- Geometric stop placement ----
+    # Use the best available structural invalidation point.
+    # Priority: OB edge > FVG edge > QM level > swing level > bar extreme.
+    if side == 'long':
+        sl_candidates = []
+        if ob_bull_bot > 0 and ob_bull_fresh:
+            sl_candidates.append(ob_bull_bot - sl_buffer)
+        if fvg_bull > 0:
+            sl_candidates.append((fvg_bull - fvg_tol) - sl_buffer)
+        if base.get("qm_bull", 0) > 0:
+            sl_candidates.append(base["qm_bull"] - sl_buffer)
+        # Always include swing low as fallback
+        sl_candidates.append(min(swing_low, low) - sl_buffer)
+
+        # Pick the tightest SL that is still below entry (maximizes R:R)
+        valid_sls = [s for s in sl_candidates if s < entry_target]
+        sl = max(valid_sls) if valid_sls else min(swing_low, low) - sl_buffer
 
         if sl >= entry_target: return None
         risk_distance = entry_target - sl
@@ -3379,17 +3488,17 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         rr = (tp - entry_target) / risk_distance
 
     else:  # short
-        if strat_base == "ALPHA" and ob_bear_top > 0:
-            sl = ob_bear_top + sl_buffer
-        elif strat_base == "GAMMA" and base.get("qm_bear", 0) > 0:
-            sl = base.get("qm_bear", 0) + sl_buffer
-        elif strat_base == "DELTA" and fvg_bear > 0:
-            fvg_high = fvg_bear + fvg_tol
-            sl = fvg_high + sl_buffer
-        elif strat_base == "THETA":
-            sl = high + current_atr + sl_buffer
-        else:
-            sl = max(swing_high, high) + sl_buffer
+        sl_candidates = []
+        if ob_bear_top > 0 and ob_bear_fresh:
+            sl_candidates.append(ob_bear_top + sl_buffer)
+        if fvg_bear > 0:
+            sl_candidates.append((fvg_bear + fvg_tol) + sl_buffer)
+        if base.get("qm_bear", 0) > 0:
+            sl_candidates.append(base["qm_bear"] + sl_buffer)
+        sl_candidates.append(max(swing_high, high) + sl_buffer)
+
+        valid_sls = [s for s in sl_candidates if s > entry_target]
+        sl = min(valid_sls) if valid_sls else max(swing_high, high) + sl_buffer
 
         if sl <= entry_target: return None
         risk_distance = sl - entry_target
