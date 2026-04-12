@@ -1747,14 +1747,29 @@ def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, b
     f['div_bull_arr'] = pExec.div_bull
     f['div_bear_arr'] = pExec.div_bear
     
-    if btc_close_arr is not None and len(btc_close_arr) == len(cl):
+    # FIX: Flatten btc_close_arr to 1-D and coerce length to guard against
+    # shape mismatches (e.g. (n,1) from DataFrame slicing) that silently
+    # pushed execution into the all-zeros else branch.
+    _btc_ok = False
+    if btc_close_arr is not None:
+        btc_close_arr = np.asarray(btc_close_arr).ravel()
+        if len(btc_close_arr) != len(cl):
+            # Trim or pad to exact exec_tf length so the branch always fires
+            if len(btc_close_arr) > len(cl):
+                btc_close_arr = btc_close_arr[:len(cl)]
+            else:
+                btc_close_arr = np.pad(btc_close_arr, (0, len(cl) - len(btc_close_arr)),
+                                       mode='edge')
+        _btc_ok = True
+
+    if _btc_ok:
         safe_btc = np.where(btc_close_arr == 0, 1.0, btc_close_arr)
         eth_btc_ratio = cl / safe_btc
         f['eth_btc_rsi'] = _rsi14_np(eth_btc_ratio)
         ema20_ratio = _ema_np(eth_btc_ratio, 20)
         ema100_ratio = _ema_np(eth_btc_ratio, 100)
-        f['eth_btc_trend_score'] = (ema20_ratio - ema100_ratio) / (ema100_ratio + eps) * 1000.0 
-        price_weak = cl < f['ema50_L']
+        f['eth_btc_trend_score'] = (ema20_ratio - ema100_ratio) / (ema100_ratio + eps) * 1000.0
+        price_weak = cl < pExec.ema50   # use pExec directly (ema50_L may be dropped later)
         ratio_strong = eth_btc_ratio > _ema_np(eth_btc_ratio, 50)
         f['rel_strength_divergence'] = np.where(price_weak & ratio_strong, 1.0, 0.0)
     else:
