@@ -52,6 +52,8 @@ _p6_counters = {
     "meta_below_thresh": 0,
     "ev_too_low": 0,
     "risk_dist_too_small": 0,
+    "strategy_cap_rejected": 0,
+    "cooldown_rejected": 0,
     "passed": 0,
     "specialist_prob_sum": 0.0,
     "specialist_prob_count": 0,
@@ -77,6 +79,8 @@ def log_p6_summary():
     log.info(f"  Meta-Brain below threshold:    {c['meta_below_thresh']}")
     log.info(f"  EV too low:                    {c['ev_too_low']}")
     log.info(f"  Risk distance too small:       {c['risk_dist_too_small']}")
+    log.info(f"  Strategy cap rejected:         {c['strategy_cap_rejected']}")
+    log.info(f"  Cooldown rejected:             {c['cooldown_rejected']}")
     log.info(f"  PASSED (trade generated):      {c['passed']}")
     if c['specialist_prob_count'] > 0:
         avg_sp = c['specialist_prob_sum'] / c['specialist_prob_count']
@@ -85,6 +89,18 @@ def log_p6_summary():
         avg_mp = c['meta_prob_sum'] / c['meta_prob_count']
         log.info(f"  Avg meta probability:          {avg_mp:.4f} (n={c['meta_prob_count']})")
     log.info("=" * 60)
+
+
+_TF_MS_UNIT = {"m": 60_000, "h": 3_600_000, "d": 86_400_000, "w": 7 * 86_400_000}
+
+def _tf_to_ms(tf: str) -> int:
+    """Convert a timeframe string like '15m' or '4h' to milliseconds."""
+    tf = tf.strip().lower()
+    if tf.endswith("ms"):
+        return int(tf[:-2])
+    num = int("".join(ch for ch in tf if ch.isdigit()))
+    unit = "".join(ch for ch in tf if ch.isalpha())
+    return num * _TF_MS_UNIT.get(unit, 60_000)
 
 
 def compute_min_risk_distance(cfg, entry_price: float) -> float:
@@ -716,6 +732,8 @@ class AadhiraayanEngineConfig:
     account_notional: float = 1000.0; db_path: str = "vajra.sqlite"
     verbose: bool = True; dynamic_confluence: bool = True; dvol_enable: bool = False
     skip_log_throttle: int = 50; paper_mode: bool = True
+    max_trades_per_strategy: int = 0    # 0 = unlimited
+    strategy_cooldown_bars: int = 0     # 0 = no cooldown
 
 EngineConfig = AadhiraayanEngineConfig
 
@@ -2414,6 +2432,8 @@ class TradeManager:
         self.last_signal_time = {}
         self.current_bar_index = {}
         self.last_processed_ts = {}
+        self.strategy_trade_counts: Dict[str, int] = {}
+        self.strategy_last_exit_ts: Dict[str, int] = {}
 
     def can_open(self, side):
         total_active = len(self.open_trades) + len(self.pending_orders)
@@ -2434,6 +2454,32 @@ class TradeManager:
             return None
 
         self.last_signal_time[signal_key] = curr_idx
+
+        # ── Per-strategy trade cap & cooldown gate ────────────────────────
+        strategy_base = plan.get('strategy', '').split('_')[0]
+        if strategy_base:
+            max_per_strat = getattr(self.cfg, 'max_trades_per_strategy', 0)
+            if max_per_strat > 0:
+                strat_count = sum(
+                    1 for t in self.open_trades
+                    if t.get('strategy', '').split('_')[0] == strategy_base
+                ) + sum(
+                    1 for p in self.pending_orders
+                    if p.get('strategy', '').split('_')[0] == strategy_base
+                )
+                if strat_count >= max_per_strat:
+                    _p6_counters["strategy_cap_rejected"] += 1
+                    return None
+
+            cooldown_bars = getattr(self.cfg, 'strategy_cooldown_bars', 0)
+            if cooldown_bars > 0:
+                exec_tf_ms = _tf_to_ms(getattr(self.cfg, 'exec_tf', '15m'))
+                cooldown_ms = cooldown_bars * exec_tf_ms
+                current_ts = bar.get('timestamp', 0) if isinstance(bar, dict) else 0
+                last_exit = self.strategy_last_exit_ts.get(strategy_base, 0)
+                if last_exit > 0 and (current_ts - last_exit) < cooldown_ms:
+                    _p6_counters["cooldown_rejected"] += 1
+                    return None
 
         adx = plan.get('features', {}).get('adx', 25.0)
 
@@ -2729,6 +2775,10 @@ class TradeManager:
 
                 closed.append(t)
                 self.mem.record_exit(t)
+                # Track last exit timestamp per strategy base for cooldown gate
+                exit_strat_base = t.get('strategy', '').split('_')[0]
+                if exit_strat_base:
+                    self.strategy_last_exit_ts[exit_strat_base] = current_ts
                 continue
 
             still_open.append(t)
