@@ -1358,7 +1358,11 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
 
     # Macro structure (daily)
     f["macro_struct_trend"] = float(pMacro.struct_trend[idx_Macro])
-    f["macro_struct_strength"] = float(pMacro.struct_strength[idx_Macro])
+    # FIX: Clamp to finite float — pMacro.struct_strength can be np.int64 which
+    # np.isfinite handles but float() conversion must be explicit to survive
+    # the _build_vec pipeline (which checks np.isfinite on the float cast).
+    _mss = pMacro.struct_strength[idx_Macro]
+    f["macro_struct_strength"] = float(_mss) if np.isfinite(float(_mss)) else 0.0
 
     # Multi-TF structure alignment (price-action based, not EMA-based)
     f["struct_align_bull"] = float(
@@ -1690,9 +1694,22 @@ def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, b
     f['vol_ltf_accel_5_arr']=_roc(f['atr_pct_ltf_roc_5_arr'],5)
     f['trend_strength_ltf_ema20_50_arr']=(_ema_np(cl,20)-pExec.ema50)/(np.abs(cl)+eps)
     
-    htf_s = pd.Series(pMacro.atr14/pMacro.c*100, index=macro_tf.timestamp).shift(1).reindex(exec_tf.timestamp, method='ffill').fillna(0).values
+    # FIX: Use searchsorted for robust HTF→LTF alignment (prevents all-zero
+    # arrays when pd.reindex ffill fails on non-overlapping timestamp indices).
+    _macro_atr_pct = pMacro.atr14 / (np.abs(pMacro.c) + eps) * 100
+    _macro_ts = macro_tf.timestamp.values
+    _exec_ts = exec_tf.timestamp.values
+    _macro_idx = np.searchsorted(_macro_ts, _exec_ts, side='right') - 1
+    # shift(1) equivalent: use idx-1 to enforce one-candle lag (closed candle only)
+    _macro_idx_lagged = np.clip(_macro_idx - 1, 0, len(_macro_atr_pct) - 1)
+    htf_s = np.where(_macro_idx >= 1, _macro_atr_pct[_macro_idx_lagged], 0.0)
     f['atr_pct_htf_aligned']=htf_s
-    mtf_s = pd.Series(f['trend_strength_mtf_arr'], index=swing_tf.timestamp).shift(1).reindex(exec_tf.timestamp, method='ffill').fillna(0).values
+
+    # FIX: Same searchsorted alignment for MTF trend strength
+    _swing_ts = swing_tf.timestamp.values
+    _swing_idx = np.searchsorted(_swing_ts, _exec_ts, side='right') - 1
+    _swing_idx_lagged = np.clip(_swing_idx - 1, 0, len(f['trend_strength_mtf_arr']) - 1)
+    mtf_s = np.where(_swing_idx >= 1, f['trend_strength_mtf_arr'][_swing_idx_lagged], 0.0)
     f['trend_strength_mtf_aligned']=mtf_s
     
     # INJECT ALIGNED HTF/MTF FRACTAL SWINGS
@@ -1730,14 +1747,29 @@ def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, b
     f['div_bull_arr'] = pExec.div_bull
     f['div_bear_arr'] = pExec.div_bear
     
-    if btc_close_arr is not None and len(btc_close_arr) == len(cl):
+    # FIX: Flatten btc_close_arr to 1-D and coerce length to guard against
+    # shape mismatches (e.g. (n,1) from DataFrame slicing) that silently
+    # pushed execution into the all-zeros else branch.
+    _btc_ok = False
+    if btc_close_arr is not None:
+        btc_close_arr = np.asarray(btc_close_arr).ravel()
+        if len(btc_close_arr) != len(cl):
+            # Trim or pad to exact exec_tf length so the branch always fires
+            if len(btc_close_arr) > len(cl):
+                btc_close_arr = btc_close_arr[:len(cl)]
+            else:
+                btc_close_arr = np.pad(btc_close_arr, (0, len(cl) - len(btc_close_arr)),
+                                       mode='edge')
+        _btc_ok = True
+
+    if _btc_ok:
         safe_btc = np.where(btc_close_arr == 0, 1.0, btc_close_arr)
         eth_btc_ratio = cl / safe_btc
         f['eth_btc_rsi'] = _rsi14_np(eth_btc_ratio)
         ema20_ratio = _ema_np(eth_btc_ratio, 20)
         ema100_ratio = _ema_np(eth_btc_ratio, 100)
-        f['eth_btc_trend_score'] = (ema20_ratio - ema100_ratio) / (ema100_ratio + eps) * 1000.0 
-        price_weak = cl < f['ema50_L']
+        f['eth_btc_trend_score'] = (ema20_ratio - ema100_ratio) / (ema100_ratio + eps) * 1000.0
+        price_weak = cl < pExec.ema50   # use pExec directly (ema50_L may be dropped later)
         ratio_strong = eth_btc_ratio > _ema_np(eth_btc_ratio, 50)
         f['rel_strength_divergence'] = np.where(price_weak & ratio_strong, 1.0, 0.0)
     else:
@@ -1748,12 +1780,20 @@ def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, b
     # ---------------------------------------------------------
     # DIRECTIVE 1: MULTI-TIMEFRAME VOLATILITY SQUEEZE
     # ---------------------------------------------------------
-    bbw_arr = pExec.bb_width
+    # FIX: pExec.bb_width is normalised by SMA (from _bb_bands_np), but the
+    # old kcw_arr was normalised by EMA.  The denominator mismatch (SMA vs
+    # EMA) caused the percentage-width comparison to diverge from the true
+    # TTM squeeze condition, producing all-zero is_ttm_squeeze arrays when
+    # the SMA-normalised BB width was marginally wider than the
+    # EMA-normalised KC width.  Fix: compare ABSOLUTE widths directly,
+    # eliminating the normalisation entirely.  This matches the canonical
+    # TTM squeeze definition (BB bands inside KC bands).
     kc_upper_arr, kc_lower_arr = _keltner_channels_np(cl, pExec.h, pExec.l, 20, 1.5)
-    ema20_arr = _ema_np(cl, 20)
-    kcw_arr = np.where(ema20_arr > 0, (kc_upper_arr - kc_lower_arr) / ema20_arr * 100.0, 0.0)
-
-    f['is_ttm_squeeze'] = np.where(bbw_arr < kcw_arr, 1.0, 0.0)
+    bb_abs_width = pExec.bb_upper - pExec.bb_lower
+    kc_abs_width = kc_upper_arr - kc_lower_arr
+    # Guard warmup: first 20 bars have bb_upper/bb_lower = 0 (not yet computed)
+    _bb_valid = np.arange(len(cl)) >= 20
+    f['is_ttm_squeeze'] = np.where(_bb_valid & (bb_abs_width < kc_abs_width), 1.0, 0.0)
 
     # Linear regression Z-score (squeeze_momentum)
     # y = mx + c -> regression over 20 periods
@@ -2274,13 +2314,37 @@ class BrainLearningManager:
 
     def _build_vec(self, side, b, a, iExec, px, pExec, fnames):
         d = {**b}
+        # FIX: Match _build_full_features semantics — do NOT blindly overwrite
+        # base (confluence_features) values with 0.0 when an adv_features entry
+        # is not a valid array or is shorter than iExec.  The training export
+        # path uses `else: continue` which preserves base values; the old
+        # `else: d[k] = 0.0` destroyed base features like bars_since_ob_bull,
+        # macro_struct_strength, and any other key that happened to collide or
+        # that the brain expected from the base dict.
         for k, v in a.items():
-            if hasattr(v, '__getitem__') and len(v) > iExec:
-                val = v[iExec]
-                d[k] = float(val) if np.isfinite(val) else 0.0
-                if d[k] > 1e10: d[k] = 1e10
-                elif d[k] < -1e10: d[k] = -1e10
-            else: d[k] = 0.0
+            if hasattr(v, '__getitem__') and not isinstance(v, (str, bytes)):
+                try:
+                    vlen = len(v)
+                except TypeError:
+                    # numpy scalar — treat as direct value
+                    d[k] = float(v) if np.isfinite(float(v)) else 0.0
+                    continue
+                if vlen > iExec:
+                    val = v[iExec]
+                    d[k] = float(val) if np.isfinite(val) else 0.0
+                    if d[k] > 1e10: d[k] = 1e10
+                    elif d[k] < -1e10: d[k] = -1e10
+                else:
+                    # Array too short — only set if key is NOT already populated
+                    # from the base dict (preserve confluence_features values).
+                    if k not in b:
+                        d[k] = 0.0
+            elif isinstance(v, (int, float, np.integer, np.floating)):
+                d[k] = float(v) if np.isfinite(float(v)) else 0.0
+            else:
+                # Non-numeric / non-array — skip, preserving base value
+                if k not in b:
+                    d[k] = 0.0
 
         # ALIGNMENT FIX
         d.update({
@@ -2289,6 +2353,18 @@ class BrainLearningManager:
             "dist_to_mtf_ema200_pct": (px-a['mtf_ema200_arr'][iExec])/px*100 if px and 'mtf_ema200_arr' in a else 0.0,
             "side": 1.0 if side=="long" else 0.0
         })
+
+        # SESSION FLAG PARITY FIX: The training export (_build_full_features)
+        # explicitly overrides session flags with pd.to_datetime at the end.
+        # Replicate that here so inference matches training exactly.
+        _ts = b.get("timestamp")
+        if _ts is not None:
+            try:
+                _dt = pd.to_datetime(int(_ts), unit="ms", utc=True)
+                d["is_london_session"] = 1.0 if 7 <= _dt.hour <= 16 else 0.0
+                d["is_ny_session"] = 1.0 if 13 <= _dt.hour <= 22 else 0.0
+            except Exception:
+                pass  # keep confluence_features values
 
         # Neutralize leaked features in old models (use XGBoost missing-value
         # sentinel so trees route via the default direction, not the 0-branch).
