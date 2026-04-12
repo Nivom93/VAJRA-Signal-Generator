@@ -2336,7 +2336,21 @@ class BrainLearningManager:
                 raw = float(self.meta_brain['booster'].predict(dmat, output_margin=True)[0])
                 meta_prob = 1.0 / (1.0 + math.exp(-raw))
             else:
+                raw = None
                 meta_prob = self.meta_brain['classifier'].predict_proba(vec)[0][1]
+
+            # One-time meta-brain diagnostic (guarded by _meta_diag_done flag)
+            if not getattr(self, '_meta_diag_done', False):
+                self._meta_diag_done = True
+                n_loaded = sum(1 for k in self.ALL_SPECIALIST_KEYS if k in self.brains)
+                n_expected = len(self.ALL_SPECIALIST_KEYS)
+                log.info(f"META-BRAIN DIAGNOSTIC: {n_loaded} specialist brains loaded vs "
+                         f"{n_expected} expected slots")
+                log.info(f"  Meta feature vector length: {len(meta_fnames)}")
+                if raw is not None:
+                    log.info(f"  Meta raw log-odds: {raw:.6f}, sigmoid output: {meta_prob:.6f}")
+                else:
+                    log.info(f"  Meta probability output: {meta_prob:.6f}")
 
             return meta_prob, specialist_prob
 
