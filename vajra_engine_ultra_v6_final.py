@@ -51,6 +51,7 @@ _p6_counters = {
     "specialist_below_thresh": 0,
     "meta_below_thresh": 0,
     "ev_too_low": 0,
+    "risk_dist_too_small": 0,
     "passed": 0,
     "specialist_prob_sum": 0.0,
     "specialist_prob_count": 0,
@@ -75,6 +76,7 @@ def log_p6_summary():
     log.info(f"  Specialist below threshold:    {c['specialist_below_thresh']}")
     log.info(f"  Meta-Brain below threshold:    {c['meta_below_thresh']}")
     log.info(f"  EV too low:                    {c['ev_too_low']}")
+    log.info(f"  Risk distance too small:       {c['risk_dist_too_small']}")
     log.info(f"  PASSED (trade generated):      {c['passed']}")
     if c['specialist_prob_count'] > 0:
         avg_sp = c['specialist_prob_sum'] / c['specialist_prob_count']
@@ -83,6 +85,31 @@ def log_p6_summary():
         avg_mp = c['meta_prob_sum'] / c['meta_prob_count']
         log.info(f"  Avg meta probability:          {avg_mp:.4f} (n={c['meta_prob_count']})")
     log.info("=" * 60)
+
+
+def compute_min_risk_distance(cfg, entry_price: float) -> float:
+    """Return the minimum allowable stop distance (in price units) such that
+    round-trip friction never exceeds ``cfg.max_friction_pct`` of 1R.
+
+    Formula:  min_risk = (entry_price × round_trip_bps / 10_000) / max_friction_pct
+
+    If ``cfg.min_risk_distance_usd > 0`` it acts as a hard override, bypassing
+    the dynamic calculation entirely.
+    """
+    hard_floor = getattr(cfg, "min_risk_distance_usd", 0.0)
+    if hard_floor > 0:
+        return hard_floor
+
+    maker_bps = getattr(cfg, "maker_fee_bps", 0.0)
+    taker_bps = getattr(cfg, "taker_fee_bps", 0.0)
+    slip_bps = getattr(cfg, "slippage_bps", 0.0)
+    # Round-trip: maker entry + taker exit + slippage both legs
+    round_trip_bps = maker_bps + taker_bps + 2.0 * slip_bps
+    max_fric = getattr(cfg, "max_friction_pct", 0.20)
+    if max_fric <= 0:
+        return 0.0
+    return (entry_price * round_trip_bps / 10_000.0) / max_fric
+
 
 # ==============================================================================
 # 1. BASE MATHEMATICAL HELPERS (JIT COMPILED)
@@ -684,6 +711,8 @@ class AadhiraayanEngineConfig:
     min_prob_long: float = 0.51; min_prob_short: float = 0.55
     max_concurrent: int = 3; max_concurrent_buy: int = 0; max_concurrent_sell: int = 0
     maker_fee_bps: float = 0.0; taker_fee_bps: float = 0.0; slippage_bps: float = 0.0
+    max_friction_pct: float = 0.20
+    min_risk_distance_usd: float = 0.0
     account_notional: float = 1000.0; db_path: str = "vajra.sqlite"
     verbose: bool = True; dynamic_confluence: bool = True; dvol_enable: bool = False
     skip_log_throttle: int = 50; paper_mode: bool = True
@@ -3246,6 +3275,23 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
     # Minimum target distance gate
     if abs(tp - entry_target) / entry_target * 100.0 < getattr(cfg, 'min_target_dist_pct', 0.15):
+        return None
+
+    # ----------------------------------------------------------
+    # MINIMUM RISK DISTANCE FILTER (friction-dominance guard)
+    # Reject setups where round-trip friction would consume an
+    # unacceptable fraction of 1R, making the trade structurally
+    # unprofitable regardless of directional accuracy.
+    # ----------------------------------------------------------
+    min_risk = compute_min_risk_distance(cfg, entry_target)
+    if risk_distance < min_risk:
+        log.debug(
+            "SKIP %s %s: risk_distance %.2f < min_risk %.2f "
+            "(friction would exceed %.0f%% of 1R)",
+            setup_type, side, risk_distance, min_risk,
+            getattr(cfg, "max_friction_pct", 0.20) * 100,
+        )
+        _p6_counters["risk_dist_too_small"] += 1
         return None
 
     # ==========================================================
