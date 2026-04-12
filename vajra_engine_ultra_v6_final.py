@@ -3369,10 +3369,13 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     if not setup_type: return None
 
     # ==========================================================
-    # PHASE 5: SETUP-SPECIFIC PRECISE SL (Invalidation Point)
+    # PHASE 5: GEOMETRIC ENTRY REFINEMENT + PRECISE SL
     # ==========================================================
-    pullback_dist = current_atr * getattr(cfg, 'pullback_atr_mult', 0.0)
-    entry_target = px - pullback_dist if side == 'long' else px + pullback_dist
+    # Structure triggered the signal in Phase 4B. Now use geometric
+    # levels (OBs, FVGs, OTE) for two things:
+    #   1. Entry precision — snap entry_target to the nearest geometric
+    #      level that improves fill price (within 1 ATR of current price).
+    #   2. Stop placement — anchor SL at the structural invalidation point.
 
     swing_high = pExec.last_sh[iExec]
     swing_low = pExec.last_sl[iExec]
@@ -3388,19 +3391,71 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
 
     strat_base = setup_type.split("_")[0]
 
+    # ---- Geometric entry refinement ----
+    # Collect nearby geometric levels that improve fill price.
+    # For longs: lower price = better fill. For shorts: higher = better.
+    # Only consider levels within 1 ATR of current price (reachable on
+    # a pullback within the next few bars).
+    geo_snap_range = current_atr * getattr(cfg, 'geo_entry_snap_atr', 1.0)
+
     if side == 'long':
-        # Setup-specific SL: use the tightest structural invalidation
-        if strat_base == "ALPHA" and ob_bull_bot > 0:
-            sl = ob_bull_bot - sl_buffer
-        elif strat_base == "GAMMA" and base.get("qm_bull", 0) > 0:
-            sl = base.get("qm_bull", 0) - sl_buffer
-        elif strat_base == "DELTA" and fvg_bull > 0:
-            fvg_low = fvg_bull - fvg_tol
-            sl = fvg_low - sl_buffer
-        elif strat_base == "THETA":
-            sl = low - current_atr - sl_buffer
+        # Candidate entry levels below current price (better fills for longs)
+        geo_entries = []
+        if ob_bull_ce > 0 and ob_bull_fresh and (px - geo_snap_range) <= ob_bull_ce <= px:
+            geo_entries.append(ob_bull_ce)
+        if fvg_bull > 0 and (px - geo_snap_range) <= fvg_bull <= px:
+            geo_entries.append(fvg_bull)
+        if base.get("qm_bull", 0) > 0 and (px - geo_snap_range) <= base["qm_bull"] <= px:
+            geo_entries.append(base["qm_bull"])
+        # OTE midpoint (70.5% retrace) as entry magnet
+        ote_mid = base.get("ote_mid_long", 0)
+        if ote_mid > 0 and (px - geo_snap_range) <= ote_mid <= px:
+            geo_entries.append(ote_mid)
+
+        if geo_entries:
+            # Pick the geometric level closest to current price (most likely to fill)
+            entry_target = max(geo_entries)  # highest of the below-price levels = tightest
+            logic_desc += f" GEO_ENTRY={entry_target:.1f}."
         else:
-            sl = min(swing_low, low) - sl_buffer
+            pullback_dist = current_atr * getattr(cfg, 'pullback_atr_mult', 0.0)
+            entry_target = px - pullback_dist
+
+    else:  # short
+        geo_entries = []
+        if ob_bear_ce > 0 and ob_bear_fresh and px <= ob_bear_ce <= (px + geo_snap_range):
+            geo_entries.append(ob_bear_ce)
+        if fvg_bear > 0 and px <= fvg_bear <= (px + geo_snap_range):
+            geo_entries.append(fvg_bear)
+        if base.get("qm_bear", 0) > 0 and px <= base["qm_bear"] <= (px + geo_snap_range):
+            geo_entries.append(base["qm_bear"])
+        ote_mid = base.get("ote_mid_short", 0)
+        if ote_mid > 0 and px <= ote_mid <= (px + geo_snap_range):
+            geo_entries.append(ote_mid)
+
+        if geo_entries:
+            entry_target = min(geo_entries)  # lowest of the above-price levels = tightest
+            logic_desc += f" GEO_ENTRY={entry_target:.1f}."
+        else:
+            pullback_dist = current_atr * getattr(cfg, 'pullback_atr_mult', 0.0)
+            entry_target = px + pullback_dist
+
+    # ---- Geometric stop placement ----
+    # Use the best available structural invalidation point.
+    # Priority: OB edge > FVG edge > QM level > swing level > bar extreme.
+    if side == 'long':
+        sl_candidates = []
+        if ob_bull_bot > 0 and ob_bull_fresh:
+            sl_candidates.append(ob_bull_bot - sl_buffer)
+        if fvg_bull > 0:
+            sl_candidates.append((fvg_bull - fvg_tol) - sl_buffer)
+        if base.get("qm_bull", 0) > 0:
+            sl_candidates.append(base["qm_bull"] - sl_buffer)
+        # Always include swing low as fallback
+        sl_candidates.append(min(swing_low, low) - sl_buffer)
+
+        # Pick the tightest SL that is still below entry (maximizes R:R)
+        valid_sls = [s for s in sl_candidates if s < entry_target]
+        sl = max(valid_sls) if valid_sls else min(swing_low, low) - sl_buffer
 
         if sl >= entry_target: return None
         risk_distance = entry_target - sl
@@ -3433,17 +3488,17 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
         rr = (tp - entry_target) / risk_distance
 
     else:  # short
-        if strat_base == "ALPHA" and ob_bear_top > 0:
-            sl = ob_bear_top + sl_buffer
-        elif strat_base == "GAMMA" and base.get("qm_bear", 0) > 0:
-            sl = base.get("qm_bear", 0) + sl_buffer
-        elif strat_base == "DELTA" and fvg_bear > 0:
-            fvg_high = fvg_bear + fvg_tol
-            sl = fvg_high + sl_buffer
-        elif strat_base == "THETA":
-            sl = high + current_atr + sl_buffer
-        else:
-            sl = max(swing_high, high) + sl_buffer
+        sl_candidates = []
+        if ob_bear_top > 0 and ob_bear_fresh:
+            sl_candidates.append(ob_bear_top + sl_buffer)
+        if fvg_bear > 0:
+            sl_candidates.append((fvg_bear + fvg_tol) + sl_buffer)
+        if base.get("qm_bear", 0) > 0:
+            sl_candidates.append(base["qm_bear"] + sl_buffer)
+        sl_candidates.append(max(swing_high, high) + sl_buffer)
+
+        valid_sls = [s for s in sl_candidates if s > entry_target]
+        sl = min(valid_sls) if valid_sls else max(swing_high, high) + sl_buffer
 
         if sl <= entry_target: return None
         risk_distance = sl - entry_target
