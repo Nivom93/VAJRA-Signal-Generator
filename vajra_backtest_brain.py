@@ -22,7 +22,8 @@ from vajra_engine_ultra_v6_final import (
     precompute_v6_features,
     BrainLearningManager,
     _ema_np,
-    reset_p6_counters, log_p6_summary
+    reset_p6_counters, log_p6_summary,
+    _p6_counters
 )
 import vajra_backtest_optimized as bt_helpers
 
@@ -35,6 +36,22 @@ log = logging.getLogger("vajra.bt.brain")
 if not log.handlers:
     log.setLevel(logging.INFO)
     log.addHandler(logging.StreamHandler())
+
+def _bar_imbalance_proxy(bar_o, bar_h, bar_l, bar_c, bar_v):
+    """
+    Approximate bid/ask imbalance from a single bar.
+    Bullish bar with high volume -> high imbalance (bids dominant).
+    Bearish bar with high volume -> low imbalance (asks dominant).
+    Returns value in [0, 1].
+    """
+    bar_range = bar_h - bar_l
+    if bar_range < 1e-9:
+        return 0.5
+    body = bar_c - bar_o
+    body_pct = body / bar_range  # in [-1, 1]
+    # Map [-1, 1] -> [0.2, 0.8] (avoid extremes — single-bar inference is noisy)
+    imb = 0.5 + 0.3 * body_pct
+    return float(np.clip(imb, 0.2, 0.8))
 
 def run_backtest_with_brain(args, preloaded=None):
     start_t = time.perf_counter()
@@ -246,7 +263,8 @@ def run_backtest_with_brain(args, preloaded=None):
             "dxy_trend": float(dxy_aligned[iExec]) if iExec < len(dxy_aligned) else 0.0,
             "spx_trend": float(spx_aligned[iExec]) if iExec < len(spx_aligned) else 0.0,
             "delta_oi": float(oi_aligned[iExec]) if iExec < len(oi_aligned) else 0.0,
-            "bid_ask_imbalance": 0.5,
+            "bid_ask_imbalance": _bar_imbalance_proxy(row.open, row.high, row.low, row.close,
+                                                       row.volume if hasattr(row, 'volume') else 0),
             "macro_sentiment": 0.0
         }
 
@@ -282,6 +300,22 @@ def run_backtest_with_brain(args, preloaded=None):
         _run_parity_diagnostic(ts, iMacro, iSwing, iHtf, iExec, base, adv_features, pExec, brain)
 
         plan = plan_trade_with_brain(cfg, brain, base, adv_features, iExec, pExec)
+
+        # SPOOFING DEFENSE PARITY: Apply the same spoofing rejection the live bot uses.
+        # Without this, backtest takes trades that live would block, inflating expectations.
+        if plan and getattr(cfg, 'spoofing_defense_enabled', True):
+            bid_ask_imb = base.get('bid_ask_imbalance', 0.5)
+            plan_type = plan.get('type', getattr(cfg, 'execution_style', 'limit'))
+            if plan_type == 'limit':
+                if plan['side'] == 'long' and bid_ask_imb < 0.25:
+                    _p6_counters.setdefault("spoofing_rejected", 0)
+                    _p6_counters["spoofing_rejected"] += 1
+                    plan = None
+                elif plan['side'] == 'short' and bid_ask_imb > 0.75:
+                    _p6_counters.setdefault("spoofing_rejected", 0)
+                    _p6_counters["spoofing_rejected"] += 1
+                    plan = None
+
         if plan: tm.submit_plan(plan, bar)
 
     dur = time.perf_counter() - start_t

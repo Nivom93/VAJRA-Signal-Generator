@@ -219,6 +219,92 @@ class RealExecutionManager:
         log.info(f"📝 SIMULATION: Order Filled @ {final_px:.2f}")
         return final_px
 
+# --- STARTUP STATE RECONCILIATION ---
+
+async def reconcile_open_positions(ex, tm, cfg, log):
+    """
+    On startup, fetch the exchange's current position state and sync local TradeManager.
+
+    Three cases:
+      A) Exchange has a position; local has nothing -> REGISTER as a recovered trade
+      B) Local has a trade; exchange has nothing -> CLEAR local (assume already closed)
+      C) Both agree -> no action
+
+    Without this, a crash mid-trade leaves the bot blind to the exchange's actual position.
+    """
+    log.info("Reconciling open positions with exchange...")
+    try:
+        positions = await asyncio.to_thread(ex.client.fetch_positions)
+        active_positions = [
+            p for p in (positions or [])
+            if abs(float(p.get('contracts', 0) or 0)) > 1e-9
+            and float(p.get('notional', 0) or 0) != 0
+        ]
+        log.info(f"  Exchange reports {len(active_positions)} active positions")
+
+        # Group by symbol for matching
+        local_by_symbol = {t.get('symbol'): t for t in tm.open_trades}
+        exchange_by_symbol = {p['symbol']: p for p in active_positions}
+
+        all_symbols = set(local_by_symbol.keys()) | set(exchange_by_symbol.keys())
+
+        for sym in all_symbols:
+            local = local_by_symbol.get(sym)
+            exch = exchange_by_symbol.get(sym)
+
+            if exch and not local:
+                # Case A: exchange has it, local doesn't -> recover
+                log.warning(
+                    f"  RECOVERED orphan position on {sym}: side={exch.get('side')}, "
+                    f"size={exch.get('contracts')}, entry={exch.get('entryPrice')}. "
+                    "Adding to local tracker without SL/TP — manual intervention required."
+                )
+                # Inject a minimal trade record. NOTE: SL/TP are unknown post-restart;
+                # a human operator must restore them via exchange UI or this will only
+                # exit on TIF or manual close.
+                recovered = {
+                    "symbol": sym,
+                    "side": exch.get('side', 'long').lower(),
+                    "avg_price": float(exch.get('entryPrice', 0)),
+                    "entry": float(exch.get('entryPrice', 0)),
+                    "total_size": abs(float(exch.get('contracts', 0))),
+                    "sl": 0.0,           # UNKNOWN — must be set manually
+                    "tp": 0.0,
+                    "initial_risk_unit": float(exch.get('entryPrice', 0)) * 0.01,
+                    "status": "OPEN_RECOVERED",
+                    "fill_ts": int(time.time() * 1000),
+                    "bars_open": 0,
+                    "strategy": "RECOVERED",
+                    "type": "market",
+                    "can_tp_this_bar": True,
+                    "RECOVERED_NEEDS_MANUAL_SLTP": True,
+                }
+                tm.open_trades.append(recovered)
+
+            elif local and not exch:
+                # Case B: local has it, exchange doesn't -> already closed externally
+                log.warning(
+                    f"  CLEARING stale local trade on {sym}: exchange shows no position. "
+                    "Likely closed manually or via SL/TP order outside the bot."
+                )
+                tm.open_trades = [t for t in tm.open_trades if t.get('symbol') != sym]
+
+            elif local and exch:
+                # Case C: both — verify size/side match
+                local_size = float(local.get('total_size', 0))
+                exch_size = abs(float(exch.get('contracts', 0)))
+                if abs(local_size - exch_size) > 1e-6:
+                    log.warning(
+                        f"  SIZE MISMATCH on {sym}: local={local_size}, "
+                        f"exchange={exch_size}. Updating local."
+                    )
+                    local['total_size'] = exch_size
+
+        log.info(f"  Reconciliation complete. Local open trades: {len(tm.open_trades)}")
+    except Exception as e:
+        log.error(f"  Reconciliation FAILED: {e}. Continuing with empty local state.")
+        # Don't crash the bot — but operator should be alerted via Discord
+
 # --- MAIN BOT LOGIC ---
 
 def send_discord_signal_alert(plan, webhook_url, symbol):
@@ -342,6 +428,57 @@ def drop_forming_candle(df, timeframe_str, exchange_time_ms=None):
         return df.iloc[:-1].copy()
     return df
 
+def _pre_deploy_safety_check(cfg, args, brain):
+    """Enforce critical safety checks before live trading."""
+    issues = []
+    warnings = []
+
+    # 1. Brain quality — refuse to deploy with all-noise brains
+    if brain and brain.brains:
+        median_roc = np.median([
+            b.get('wfa_roc_auc', 0.0)
+            for b in brain.brains.values()
+        ])
+        if median_roc < 0.55:
+            issues.append(
+                f"Median brain ROC-AUC = {median_roc:.3f} < 0.55. "
+                "Brains have no demonstrated edge. Refusing live deploy."
+            )
+
+    # 2. Calibration must be present
+    uncalibrated = [
+        f"{strat}_{side}" for (strat, side), b in (brain.brains.items() if brain else [])
+        if b.get('calibration_method', 'none') == 'none'
+    ]
+    if uncalibrated:
+        warnings.append(f"Uncalibrated brains: {uncalibrated}. EV may be biased.")
+
+    # 3. Macro caches present
+    try:
+        from vajra_macro_data import sanity_check_macro_caches
+        if not sanity_check_macro_caches():
+            warnings.append("Macro data caches stale or missing.")
+    except ImportError:
+        warnings.append("vajra_macro_data not available — macro cache check skipped.")
+
+    # 4. paper_mode flag must match operator intent
+    if not getattr(cfg, 'paper_mode', True):
+        log.critical("LIVE MODE — REAL CAPITAL AT RISK. Sleeping 10s for cancellation.")
+        time.sleep(10)
+
+    if issues:
+        log.critical("PRE-DEPLOY CHECK FAILED:")
+        for i in issues:
+            log.critical(f"  - {i}")
+        raise SystemExit(1)
+
+    if warnings:
+        log.warning("PRE-DEPLOY CHECK WARNINGS:")
+        for w in warnings:
+            log.warning(f"  - {w}")
+
+    log.info("Pre-deploy safety check passed.")
+
 async def run_bot(args):
     """Main Bot Loop"""
     
@@ -384,8 +521,29 @@ async def run_bot(args):
 
     executor = RealExecutionManager(ex.client, cfg)
     brain = BrainLearningManager(cfg, args.brains_dir)
+
+    # PHASE 6: PRE-DEPLOYMENT SAFETY CHECK
+    _pre_deploy_safety_check(cfg, args, brain)
+
     tm = TradeManager(cfg, ex, mem, brain)
-    
+
+    # PHASE 6: STARTUP STATE RECONCILIATION
+    await reconcile_open_positions(ex, tm, cfg, log)
+
+    # If any recovered trades have RECOVERED_NEEDS_MANUAL_SLTP flag, alert immediately
+    recovered_needing_sltp = [t for t in tm.open_trades if t.get('RECOVERED_NEEDS_MANUAL_SLTP')]
+    if recovered_needing_sltp:
+        msg = (
+            f"STARTUP: {len(recovered_needing_sltp)} recovered position(s) need manual SL/TP. "
+            "Open Bybit and set protective orders immediately."
+        )
+        log.critical(msg)
+        if args.discord_webhook:
+            send_discord_signal_alert({"side": "ALERT", "strategy": "RECOVERY",
+                                         "entry": 0, "sl": 0, "tp": 0, "rr": 0,
+                                         "features": {"reason": msg}},
+                                        args.discord_webhook, "SYSTEM")
+
     # 3. Init Background Tasks
     retrainer = AutoRetrainer(brain, args.brains_dir)
     macro_fetcher = MacroFetcher(cfg)
@@ -488,21 +646,46 @@ async def bot_loop(cfg, ex, tm, executor, brain, market_cache, global_cache, mac
                     continue
                 last_processed_ts[symbol] = curr_ts
 
-                # LEVEL 30 SPOOFING DEFENSE (L2 ORDERBOOK FETCH)
+                # LEVEL 30 SPOOFING DEFENSE (L2 ORDERBOOK FETCH) — PARALLEL
+                async def _fetch_orderbook():
+                    try:
+                        return await asyncio.to_thread(ex.client.fetch_order_book, symbol, limit=20)
+                    except Exception as e:
+                        log.debug(f"[{symbol}] L2 Orderbook fetch failed: {e}")
+                        return None
+
+                async def _fetch_oi():
+                    if not getattr(cfg, 'use_macro_data', False):
+                        return 0.0
+                    try:
+                        oi_arr = await asyncio.to_thread(fetch_delta_oi, ex, symbol, cfg.exec_tf, exec_tf["timestamp"])
+                        return float(oi_arr[-1]) if len(oi_arr) > 0 else 0.0
+                    except Exception:
+                        return 0.0
+
+                async def _fetch_funding():
+                    try:
+                        return await asyncio.to_thread(ex.fetch_funding_rate, symbol)
+                    except Exception as e:
+                        log.debug(f"[{symbol}] funding fetch failed: {e}")
+                        return 0.0
+
+                # Execute all three network calls in parallel (O(1) latency vs O(3))
+                ob, oi_val, funding_rate = await asyncio.gather(
+                    _fetch_orderbook(), _fetch_oi(), _fetch_funding()
+                )
+
+                # Process orderbook result
                 bid_ask_imbalance = 0.5
-                try:
-                    ob = await asyncio.to_thread(ex.client.fetch_order_book, symbol, limit=20)
-                    if ob and 'bids' in ob and 'asks' in ob:
-                        total_bids = sum((v for p, v in ob['bids']))
-                        total_asks = sum((v for p, v in ob['asks']))
-                        if (total_bids + total_asks) > 0:
-                            bid_ask_imbalance = total_bids / (total_bids + total_asks)
-                except Exception as e:
-                    log.debug(f"[{symbol}] L2 Orderbook fetch failed: {e}")
+                if ob and 'bids' in ob and 'asks' in ob:
+                    total_bids = sum(v for p, v in ob['bids'])
+                    total_asks = sum(v for p, v in ob['asks'])
+                    if (total_bids + total_asks) > 0:
+                        bid_ask_imbalance = total_bids / (total_bids + total_asks)
 
                 pMacro, pSwing, pHtf, pExec = Precomp(macro_tf), Precomp(swing_tf), Precomp(htf), Precomp(exec_tf)
                 pre_map = {"macro_tf": pMacro, "swing_tf": pSwing, "htf": pHtf, "exec_tf": pExec}
-                
+
                 btc_close_aligned = None
                 if not btc_exec_tf.empty and not exec_tf.empty:
                     btc_s_close = pd.Series(btc_exec_tf.close.values, index=btc_exec_tf["timestamp"])
@@ -513,14 +696,6 @@ async def bot_loop(cfg, ex, tm, executor, brain, market_cache, global_cache, mac
                     btc_close_arr=btc_close_aligned
                 )
 
-                oi_val = 0.0
-                if getattr(cfg, 'use_macro_data', False):
-                    try: 
-                        oi_arr = fetch_delta_oi(ex, symbol, cfg.exec_tf, exec_tf["timestamp"])
-                        oi_val = float(oi_arr[-1]) if len(oi_arr) > 0 else 0.0
-                    except: pass
-
-                funding_rate = await asyncio.to_thread(ex.fetch_funding_rate, symbol)
                 extras = {
                     "btc_bullish": btc_bullish,
                     "funding_rate": funding_rate,
