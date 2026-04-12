@@ -123,6 +123,8 @@ def run_backtest_with_brain(args, preloaded=None):
     spx_aligned = fetch_macro_trend("ES=F", exec_tf["timestamp"])
     oi_aligned = fetch_delta_oi(exw_bt, cfg.symbol, cfg.exec_tf, exec_tf["timestamp"])
     funding_aligned = fetch_historical_funding_rates(exw_bt, cfg.symbol, exec_tf["timestamp"])
+    tm.set_funding_lookup(exec_tf["timestamp"].values, funding_aligned)
+    log.info(f"Loaded {len(funding_aligned)} funding rate samples into TradeManager")
 
     # BTC Dominance trend (same logic as export pipeline)
     try:

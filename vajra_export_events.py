@@ -339,12 +339,15 @@ def main():
                 specialist_brain = None
 
         tm = TradeManager(cfg, exw, mem, brain=None)
-        
+        tm.set_funding_lookup(exec_tf["timestamp"].values, funding_aligned)
+        log.info(f"Loaded {len(funding_aligned)} funding rate samples into TradeManager (export)")
+
         open_meta = []
         
         since_ms, until_ms = _parse_date_or_ms(args.since), _parse_date_or_ms(args.until)
         exec_iter = exec_tf[(exec_tf["timestamp"] >= since_ms) & (exec_tf["timestamp"] < until_ms)]
 
+        log.info(f"Funding-window filter active: skip entries within {getattr(cfg, 'funding_buffer_minutes', 30)} min of funding")
         log.info(f"Processing {len(exec_iter)} bars for {sym}...")
         
         len_macro = len(macro_tf); len_swing = len(swing_tf); len_htf = len(htf); len_exec = len(exec_tf)
