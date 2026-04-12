@@ -135,6 +135,16 @@ def _strategy_overrides(cfg):
     cfg.trailing_stop_trigger_r = 0.0
     cfg.dynamic_tp_enabled = False
 
+    # ── Per-Strategy Concentration Limits ─────────────────────────────
+    # 3 concurrent max per strategy base prevents single-strategy
+    # dominance (e.g. DELTA_SHORT generating 34.5% of all trades and
+    # 52.7% of total drawdown in the 502-trade backtest).
+    cfg.max_trades_per_strategy = 3
+    # 8 bars on a 15m chart = 2h cooldown after a strategy's last exit,
+    # preventing cluster entries after a loss when the same structural
+    # pattern re-fires on consecutive bars.
+    cfg.strategy_cooldown_bars = 8
+
     # ── Risk & Concurrency ─────────────────────────────────────────────
     cfg.risk_per_trade = 0.01
     cfg.max_concurrent = 6

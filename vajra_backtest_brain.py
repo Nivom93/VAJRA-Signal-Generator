@@ -312,6 +312,61 @@ def run_backtest_with_brain(args, preloaded=None):
 
     return summary, all_closed
 
+def strategy_concentration_report(trades_csv_path: str) -> None:
+    """Read a backtest CSV and print per-strategy concentration diagnostics.
+
+    Outputs:
+        - Trade count per strategy
+        - PnL (R) per strategy
+        - Herfindahl-Hirschman Index (HHI) of trade-count concentration
+        - Warning if any single strategy exceeds 25% of total trades
+    """
+    df = pd.read_csv(trades_csv_path)
+    if "strategy" not in df.columns or "pnl_r" not in df.columns:
+        print("ERROR: CSV must contain 'strategy' and 'pnl_r' columns.")
+        return
+
+    total_trades = len(df)
+    if total_trades == 0:
+        print("No trades found in CSV.")
+        return
+
+    trades_per = df.groupby("strategy").size().sort_values(ascending=False)
+    pnl_per = df.groupby("strategy")["pnl_r"].sum().sort_values()
+
+    print("=" * 64)
+    print("STRATEGY CONCENTRATION REPORT")
+    print("=" * 64)
+    print(f"{'Strategy':<25} {'Trades':>8} {'%':>7} {'PnL (R)':>10}")
+    print("-" * 64)
+    for strat in trades_per.index:
+        n = trades_per[strat]
+        pct = 100.0 * n / total_trades
+        pnl = pnl_per.get(strat, 0.0)
+        print(f"{strat:<25} {n:>8d} {pct:>6.1f}% {pnl:>+10.2f}")
+    print("-" * 64)
+    print(f"{'TOTAL':<25} {total_trades:>8d} {'100.0%':>7} {df['pnl_r'].sum():>+10.2f}")
+
+    # HHI: sum of squared market shares (0-10000 scale)
+    shares = trades_per.values / total_trades
+    hhi = float(np.sum(shares ** 2) * 10000)
+    print(f"\nHerfindahl-Hirschman Index (HHI): {hhi:.0f}")
+    if hhi > 2500:
+        print("  >> HIGH concentration (HHI > 2500) — portfolio dominated by few strategies")
+    elif hhi > 1500:
+        print("  >> MODERATE concentration (HHI 1500-2500)")
+    else:
+        print("  >> LOW concentration (HHI < 1500)")
+
+    # Single-strategy dominance warning
+    for strat in trades_per.index:
+        pct = trades_per[strat] / total_trades
+        if pct > 0.25:
+            print(f"\n  WARNING: {strat} accounts for {pct*100:.1f}% of trades (>{25}% threshold)")
+
+    print("=" * 64)
+
+
 def main():
     p = bt_helpers.build_arg_parser()
     p.add_argument("--brain-long-path", required=False, default=None, help="(Deprecated) Use --brains-dir instead")
