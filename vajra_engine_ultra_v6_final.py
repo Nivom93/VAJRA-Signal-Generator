@@ -1765,6 +1765,7 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
     asian_h = float(pExec.asian_high[idx_Exec])
     asian_l = float(pExec.asian_low[idx_Exec])
     prev_c = float(pExec.c[max(0, idx_Exec - 1)])
+    hour = pd.to_datetime(int(ts), unit="ms", utc=True).hour
     _is_active = 7 <= hour <= 16
     f["orb_bull"] = 1.0 if (_is_active and asian_h > 0 and px > asian_h and prev_c <= asian_h) else 0.0
     f["orb_bear"] = 1.0 if (_is_active and asian_l > 0 and px < asian_l and prev_c >= asian_l) else 0.0
