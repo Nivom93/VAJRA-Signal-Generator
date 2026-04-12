@@ -126,26 +126,13 @@ def run_backtest_with_brain(args, preloaded=None):
     tm.set_funding_lookup(exec_tf["timestamp"].values, funding_aligned)
     log.info(f"Loaded {len(funding_aligned)} funding rate samples into TradeManager")
 
-    # BTC Dominance trend (same logic as export pipeline)
-    try:
-        import ccxt
-        binance_ex = ccxt.binance({'options': {'defaultType': 'swap'}})
-        btcd_raw = binance_ex.fetch_ohlcv("BTCDOM/USDT:USDT", timeframe="4h", limit=1000)
-        btcd_df = pd.DataFrame(btcd_raw, columns=["timestamp","open","high","low","close","volume"])
-        if not btcd_df.empty:
-            btcd_c = btcd_df['close'].values
-            btcd_trend = np.zeros_like(btcd_c)
-            for i in range(5, len(btcd_c)):
-                slope = (btcd_c[i] - btcd_c[i-5]) / btcd_c[i-5] * 100.0
-                if slope > 0.5: btcd_trend[i] = 1.0
-                elif slope < -0.5: btcd_trend[i] = -1.0
-            btcd_series = pd.Series(btcd_trend, index=pd.to_datetime(btcd_df['timestamp'], unit='ms', utc=True))
-            btcd_aligned = btcd_series.shift(1).reindex(pd.to_datetime(exec_tf["timestamp"], unit='ms', utc=True), method='ffill').fillna(0.0).values
-        else:
-            btcd_aligned = np.zeros(len(exec_tf))
-    except Exception as e:
-        log.warning(f"Failed to fetch BTCDOM: {e}")
-        btcd_aligned = np.zeros(len(exec_tf))
+    # BTC Dominance — use real dominance cache instead of BTCDOM perpetual proxy
+    from vajra_macro_data import fetch_btc_dominance_series
+    btcd_aligned = fetch_btc_dominance_series(
+        start_ms=int(exec_tf["timestamp"].iloc[0]),
+        end_ms=int(exec_tf["timestamp"].iloc[-1]),
+        exec_timestamps=exec_tf["timestamp"],
+    )
 
     # ── DIAGNOSTIC: Feature parity assertion block ──────────────────────
     # On the first qualifying bar, build the feature dict via BOTH the
@@ -192,11 +179,10 @@ def run_backtest_with_brain(args, preloaded=None):
             else:
                 if k not in base:
                     infer_d[k] = 0.0
-        # Session override (parity with _build_full_features)
+        # Session override (parity with _build_full_features) — timezone-correct
         try:
-            _dt = pd.to_datetime(int(ts), unit="ms", utc=True)
-            infer_d["is_london_session"] = 1.0 if 7 <= _dt.hour <= 16 else 0.0
-            infer_d["is_ny_session"] = 1.0 if 13 <= _dt.hour <= 22 else 0.0
+            from vajra_macro_data import compute_session_flags
+            infer_d.update(compute_session_flags(int(ts)))
         except Exception:
             pass
 

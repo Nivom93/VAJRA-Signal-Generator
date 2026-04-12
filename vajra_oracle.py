@@ -89,21 +89,13 @@ def get_llm_sentiment(titles):
                 raw_fg = float(fg_data['data'][0]['value']) # 0 to 100
                 fg_score = (raw_fg - 50.0) / 50.0 # Map to -1.0 to 1.0
 
-        # 2. Basic Keyword NLP on RSS Titles
-        bull_words = {'surge', 'rally', 'bull', 'high', 'gain', 'jump', 'soar', 'approve', 'adoption', 'up', 'buy', 'long'}
-        bear_words = {'crash', 'plunge', 'bear', 'low', 'loss', 'drop', 'dive', 'reject', 'ban', 'down', 'sell', 'short', 'hack', 'scam', 'sec'}
-
-        nlp_score = 0.0
-        if titles:
-            bull_count = sum(1 for t in titles for w in bull_words if w in t.lower())
-            bear_count = sum(1 for t in titles for w in bear_words if w in t.lower())
-            total = bull_count + bear_count
-            if total > 0:
-                nlp_score = (bull_count - bear_count) / total
-
-        # 3. Blended Sentiment (Weighted 70% F&G, 30% NLP)
-        final_sentiment = (0.7 * fg_score) + (0.3 * nlp_score)
-        return max(-1.0, min(1.0, final_sentiment))
+        # NLP keyword scoring was removed due to substring-match false positives
+        # ('sec' matches 'second', 'low' matches 'below', 'short' matches
+        # 'short-term', etc.) and lack of negation handling.  The 30% NLP
+        # weight was injecting pure noise into the sentiment score.
+        # Until proper sentiment NLP is integrated (e.g. FinBERT or similar),
+        # rely entirely on the calibrated Fear & Greed Index.
+        return max(-1.0, min(1.0, fg_score))
 
     except Exception as fallback_e:
         log.error(f"Free Oracle Fallback completely failed: {fallback_e}")
