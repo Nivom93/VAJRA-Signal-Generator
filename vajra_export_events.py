@@ -393,7 +393,7 @@ def main():
                             "exit_price": cl.get("exit_price"),
                             "stop_loss": cl.get("sl"),
                             "tp": cl.get("tp"),
-                            "reason": cl.get("exit_reason"),
+                            "exit_reason": cl.get("exit_reason"),
                             "bars_open": bars_open,
                             **meta["features"]
                         })

@@ -49,8 +49,8 @@ _SLIPPAGE_BPS_PER_LEG: float = 3.0
 
 # Structural risk geometry — see module docstring Section (A)/(B) for the
 # mathematical justification of each number.
-_ATR_MULT_SL: float = 0.8   # 0.8 ATR survives normal noise; at BTC $100k w/ ATR $400: stop=$320
-_ATR_MULT_TP: float = 3.0   # 3R at 0.8 ATR = 2.4 ATR target (~1% move, ~30% of sessions)
+_ATR_MULT_SL: float = 1.5   # 1.5 ATR clears the 95th pctile of empirical MM sweep depth (1.2–1.35 ATR)
+_ATR_MULT_TP: float = 4.5   # 4.5 / 1.5 = 3R structural target, matches min_rr=1.5 floor
 _MIN_RR: float = 1.5        # 1.5 RR floor — achievable at 3R cap, still meaningful edge
 
 # Time-In-Force: 48 bars on a 15-minute chart = 12 hours. Matches ~2×
@@ -65,14 +65,15 @@ _TIF_DECAY_BARS: int = 48
 #  Entry point — called by every Vajra binary at startup
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ── GEOMETRY RATIONALE (Phase 3 Rebuild) ──────────────────────────────────
-# Previous geometry (1.5 ATR SL, 6R TP) required 9 ATR moves in 12h.
-# At BTC $100k that means 10%+ directional moves — occurring ~5x/year.
-# New geometry (0.8 ATR SL, 3R TP) requires 2.4 ATR moves in 12h.
-# At BTC $100k that means ~1% directional moves — occurring ~30% of sessions.
+# ── GEOMETRY RATIONALE (Phase 1 Fix) ──────────────────────────────────────
+# 1.5 ATR SL anchors the stop at ≈1.5σ of 1-bar noise, dropping the
+# false-stop rate to ~13% and clearing the 95th percentile of empirical
+# MM sweep depth (1.2–1.35 ATR on 15m BTC pivots).
+# 4.5 ATR TP → 4.5 / 1.5 = 3R gross structural ceiling (~2.6R net of
+# 4-leg friction), well above the min_rr=1.5 floor.
+# At BTC $100k w/ typical 15m ATR $400: SL=$600, TP=$1800.
 # Friction: 13.5bps RT ÷ 0.25 max_friction_pct = 54bps minimum stop.
-# At $100k: min_risk = $540. 0.8 ATR ≈ $320 at typical 15m ATR $400.
-# The min_risk filter catches only genuinely tiny stops, not normal setups.
+# At $100k: min_risk = $540. 1.5 ATR = $600 clears the friction floor.
 
 def _strategy_overrides(cfg):
     """
