@@ -42,6 +42,32 @@ except Exception:
         return decorator
 
 # ==============================================================================
+# PHASE 6: CORRELATION-AWARE POSITION SIZING
+# ==============================================================================
+# Approximate 4h correlation matrix for major crypto perps (2023-2024 average).
+# Conservative estimates — refresh quarterly from your own analysis.
+# Used to scale risk_factor when multiple correlated positions are open simultaneously.
+_CORRELATION_MATRIX = {
+    ("BTC", "ETH"): 0.85,
+    ("BTC", "SOL"): 0.78,
+    ("BTC", "AVAX"): 0.75,
+    ("BTC", "MATIC"): 0.72,
+    ("ETH", "SOL"): 0.82,
+    ("ETH", "AVAX"): 0.80,
+    ("ETH", "MATIC"): 0.85,
+    ("SOL", "AVAX"): 0.85,
+    # Add more pairs as you trade them
+}
+
+def _get_correlation(sym_a: str, sym_b: str) -> float:
+    """Symmetric correlation lookup. Returns 0.7 default for unknown pairs (conservative)."""
+    if sym_a == sym_b:
+        return 1.0
+    a = sym_a.split('/')[0].upper()
+    b = sym_b.split('/')[0].upper()
+    return _CORRELATION_MATRIX.get((a, b), _CORRELATION_MATRIX.get((b, a), 0.7))
+
+# ==============================================================================
 # PHASE 6 DIAGNOSTIC COUNTERS — Track why trades are rejected
 # ==============================================================================
 _p6_counters = {
@@ -2684,10 +2710,43 @@ class TradeManager:
             "dca_level": 0,
             "risk_factor": plan.get('risk_factor', 1.0),
             "created_ts": bar.get("timestamp", 0),
-            "ttl": ttl, 
-            "status": "PENDING" 
+            "ttl": ttl,
+            "status": "PENDING"
         }
-        
+
+        # ── Correlation-adjusted risk factor ──────────────────────────────
+        # If you already have N open positions correlated with this new one, the
+        # effective leverage is sum(corr_i). To keep total portfolio risk constant,
+        # scale this trade's risk by 1/sqrt(1 + sum(corr_i)).
+        new_symbol = order.get('symbol', self.cfg.symbol)
+        new_side = plan['side']
+        correlated_exposure = 0.0
+        for t in self.open_trades + self.pending_orders:
+            other_sym = t.get('symbol', '')
+            other_side = t.get('side', '')
+            if not other_sym or not other_side:
+                continue
+            corr = _get_correlation(new_symbol, other_sym)
+            # Same-side correlation adds risk; opposite-side correlation hedges it
+            if other_side == new_side:
+                correlated_exposure += corr
+            else:
+                correlated_exposure -= 0.5 * corr   # half-credit hedge
+
+        correlated_exposure = max(0.0, correlated_exposure)
+        correlation_scalar = 1.0 / math.sqrt(1.0 + correlated_exposure)
+
+        # Apply scalar to the order's risk_factor BEFORE order creation
+        original_rf = order.get('risk_factor', 1.0)
+        order['risk_factor'] = original_rf * correlation_scalar
+
+        if correlation_scalar < 0.95:
+            log.info(
+                f"[{new_symbol}] Correlation-adjusted risk: {original_rf:.2f} -> "
+                f"{order['risk_factor']:.2f} (scalar={correlation_scalar:.2f}, "
+                f"correlated_exposure={correlated_exposure:.2f})"
+            )
+
         if force_open and fill_price is not None:
             # Bypass PENDING and go straight to OPEN (Execution Desync Fix)
             planned_risk = abs(order['entry'] - order['sl'])
