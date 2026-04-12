@@ -1358,7 +1358,11 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
 
     # Macro structure (daily)
     f["macro_struct_trend"] = float(pMacro.struct_trend[idx_Macro])
-    f["macro_struct_strength"] = float(pMacro.struct_strength[idx_Macro])
+    # FIX: Clamp to finite float — pMacro.struct_strength can be np.int64 which
+    # np.isfinite handles but float() conversion must be explicit to survive
+    # the _build_vec pipeline (which checks np.isfinite on the float cast).
+    _mss = pMacro.struct_strength[idx_Macro]
+    f["macro_struct_strength"] = float(_mss) if np.isfinite(float(_mss)) else 0.0
 
     # Multi-TF structure alignment (price-action based, not EMA-based)
     f["struct_align_bull"] = float(
