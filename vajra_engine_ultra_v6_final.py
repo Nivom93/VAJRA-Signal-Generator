@@ -734,6 +734,7 @@ class AadhiraayanEngineConfig:
     skip_log_throttle: int = 50; paper_mode: bool = True
     max_trades_per_strategy: int = 0    # 0 = unlimited
     strategy_cooldown_bars: int = 0     # 0 = no cooldown
+    strict_brain_validation: bool = False  # If True, raise RuntimeError when ALL brains are noise-tier
 
 EngineConfig = AadhiraayanEngineConfig
 
@@ -2184,6 +2185,37 @@ class BrainLearningManager:
                 log.info(f"Loaded Meta-Brain (unified) with {len(meta_data.get('feature_names', []))} features")
             except Exception as e:
                 log.error(f"Meta-Brain load error: {e}")
+
+        # ── Post-load deployment readiness check ──
+        self.validate_deployment_readiness()
+
+    def validate_deployment_readiness(self):
+        """Check brain quality distribution and warn/block if too many are noise-tier."""
+        if not self.brains:
+            return
+
+        total = len(self.brains)
+        below_050 = sum(
+            1 for b in self.brains.values()
+            if b.get("wfa_roc_auc", 0) < 0.50
+        )
+        all_noise = all(
+            b.get("wfa_roc_auc", 0) <= 0.50 for b in self.brains.values()
+        )
+
+        if below_050 > total * 0.50:
+            log.warning(
+                f"DEPLOYMENT READINESS: {below_050}/{total} brains have ROC < 0.50 "
+                f"(noise-tier). Recommend retraining with more data or relaxed "
+                f"feature selection before live deployment."
+            )
+
+        if all_noise and getattr(self.cfg, "strict_brain_validation", False):
+            raise RuntimeError(
+                f"strict_brain_validation is enabled and ALL {total} brains are "
+                f"noise-tier (ROC <= 0.50). Refusing to deploy. Retrain brains "
+                f"or set strict_brain_validation=False to override."
+            )
 
     def get_threshold_adj(self, strategy, side):
         """Return the threshold adjustment for a brain based on its quality tier."""
