@@ -644,8 +644,8 @@ def _donchian_channels_np(high, low, window=20):
 class AadhiraayanEngineConfig:
     exchange_id: str = "bybit"; market_type: str = "swap"; symbol: str = "BTC/USDT"
     macro_tf: str = "1d"; swing_tf: str = "4h"; htf: str = "1h"; exec_tf: str = "15m"
-    risk_per_trade: float = 0.01; min_rr: float = 1.0; rr: float = 2.0
-    atr_mult_sl: float = 0.0; atr_mult_tp: float = 2.0; scalper_rr: float = 2.0
+    risk_per_trade: float = 0.01; min_rr: float = 2.5; rr: float = 2.0
+    atr_mult_sl: float = 0.0; atr_mult_tp: float = 3.0; scalper_rr: float = 2.0
     pullback_atr_mult: float = 0.0
     use_dca: bool = False; dca_max_safety_orders: int = 1
     dca_step_scale: float = 1.0; dca_volume_scale: float = 2.0; dca_tp_scale: float = 1.5
@@ -666,8 +666,9 @@ class AadhiraayanEngineConfig:
     allow_mean_reversion: bool = True
     entry_style: str = "limit"
     
-    execution_style: str = "limit"  
-    pullback_atr_mult: float = 0.0     
+    # Strict Maker-only execution on entries: saves ~0.05% per trade vs Taker fees.
+    execution_style: str = "limit"
+    pullback_atr_mult: float = 0.0
     
     strat_alpha_enabled: bool = True
     strat_omega_enabled: bool = True
@@ -3054,11 +3055,12 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
     candidates.sort(key=lambda c: (c[3], _struct_priority.get(c[0].split("_")[0], 0)), reverse=True)
     setup_type, side, logic_desc, confluence = candidates[0]
 
-    # NOTE: Confluence gate was removed. Pre-filtering by confluence score created
-    # a feedback loop — brains trained on a harder distribution had lower ROC
-    # (0.51 vs 0.59 baseline), weaker brains → worse filtering → -47R vs +77R.
-    # The bull/bear_struct_score is already passed as a feature via the base dict,
-    # so the brain can learn to use confluence itself on the full signal distribution.
+    # HARD CONFLUENCE GATE: Only emit structurally pristine setups.
+    # Post-friction physics make marginal 1-factor setups unprofitable. We require
+    # the winning candidate to stack at least 2 structural factors (e.g. Order Block
+    # + Sweep + Displacement) before the trade is even considered by the brain.
+    if confluence < 2.0:
+        return None
 
     # Enrich the logic description with structure context
     conf_reasons = bull_struct_reasons if side == "long" else bear_struct_reasons

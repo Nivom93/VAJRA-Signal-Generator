@@ -33,6 +33,16 @@ try:
 except ImportError:
     FrozenEstimator = None
 
+# PROTECTED VOLATILITY FEATURES: These must survive RFE elimination.
+# Post-friction profitability requires explosive volatility expansion to clear
+# the fee spread instantly. Force the model to always see these signals.
+PROTECTED_FEATURES = {
+    "is_ttm_squeeze",
+    "atr_expansion_rate",
+    "cvd_acceleration",
+    "displacement_bos_bull",
+}
+
 log = logging.getLogger("vajra.train.v8")
 if not log.handlers:
     log.setLevel(logging.INFO)
@@ -120,10 +130,14 @@ def load_events_df(paths: List[str], min_win_r: float, filter_side: str, extra_e
     df["pnl_r"] = pd.to_numeric(df["pnl_r"], errors='coerce')
     df.dropna(subset=["pnl_r"], inplace=True)
 
-    # 🟢 DIRECTIVE 2: STRICT R-MULTIPLE TARGETING (NO MORE FRACTIONAL WINS)
+    # DIRECTIVE 2 (post-friction relaxation): Physical friction (fees + slippage)
+    # makes 1.0R a very noisy label on training data. Relaxing to 0.5R lets the
+    # model learn the FEATURES of a winning direction on a denser positive class.
+    # The live execution engine still holds trades to the full 2.5R target (min_rr),
+    # so this only affects supervised learning, not live position management.
     if "pnl_r" in df.columns:
-        df["label"] = (df["pnl_r"] >= 1.0).astype(int)
-        log.info("🎯 Institutional Binary Target: Net pnl_r >= 1.0R.")
+        df["label"] = (df["pnl_r"] >= 0.5).astype(int)
+        log.info("🎯 Binary Target (Relaxed): Net pnl_r >= 0.5R (exec still targets 2.5R).")
     else:
         df["label"] = 0
 
@@ -268,9 +282,16 @@ def main(argv=None):
                 selector = RFE(estimator_rfe, n_features_to_select=dynamic_n_features_fold, step=1)
                 selector = selector.fit(X_tr_full, y_tr)
 
+                # FORCE-PROTECT volatility expansion features from RFE elimination.
+                # Post-friction edge depends on explosive moves clearing fees instantly.
+                fold_support = selector.support_.copy()
+                for idx_f, feat_name in enumerate(base_feature_names):
+                    if feat_name in PROTECTED_FEATURES:
+                        fold_support[idx_f] = True
+
                 # Slice training and validation sets strictly to selected features
-                X_tr = X_tr_full[:, selector.support_]
-                X_te = X_te_full[:, selector.support_]
+                X_tr = X_tr_full[:, fold_support]
+                X_te = X_te_full[:, fold_support]
 
                 # 🟢 DIRECTIVE 3: SMOTE ERADICATED (Rely strictly on scale_pos_weight)
                 fold_scale_weight = scale_weight
@@ -329,10 +350,22 @@ def main(argv=None):
             selector_final = RFE(estimator_rfe_final, n_features_to_select=dynamic_n_features_final, step=1)
 
             selector_final = selector_final.fit(X_all_for_rfe, y_all_for_rfe)
-            selected_features = [f for f, s in zip(base_feature_names, selector_final.support_) if s]
 
-            X_all_sel = X_all[:, selector_final.support_]
-            log.info(f"Final RFE selected {len(selected_features)} features.")
+            # FORCE-PROTECT volatility expansion features from RFE elimination.
+            # These features are mandatory inputs for clearing the fee spread.
+            final_support = selector_final.support_.copy()
+            protected_injected = []
+            for idx_f, feat_name in enumerate(base_feature_names):
+                if feat_name in PROTECTED_FEATURES and not final_support[idx_f]:
+                    final_support[idx_f] = True
+                    protected_injected.append(feat_name)
+            if protected_injected:
+                log.info(f"🛡️  Protected volatility features injected into final RFE: {protected_injected}")
+
+            selected_features = [f for f, s in zip(base_feature_names, final_support) if s]
+
+            X_all_sel = X_all[:, final_support]
+            log.info(f"Final RFE selected {len(selected_features)} features (incl. protected).")
 
             log.info("Training and Calibrating Final Production Model on FULL dataset...")
 
