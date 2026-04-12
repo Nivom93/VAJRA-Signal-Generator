@@ -152,7 +152,8 @@ def _strategy_overrides(cfg):
     # so raw XGBoost outputs are properly calibrated (no extreme
     # squashing). Probability floors therefore map directly to expected
     # hit-rates rather than being a shape-hack compensating for SMOTE.
-    cfg.min_ev = 0.01
+    # Minimum EV in R-multiples using the calibrated (pessimistic) win probability
+    cfg.min_ev = 0.10
     cfg.min_prob_long = 0.30
     cfg.min_prob_short = 0.30
     cfg.dynamic_risk_scaling = True

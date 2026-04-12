@@ -3352,8 +3352,19 @@ def plan_trade_with_brain(cfg, brain, base, adv, iExec, pExec):
                 _p6_counters["specialist_below_thresh"] += 1
                 return None
 
-        ev = (win_prob * rr) - ((1.0 - win_prob) * 1.0)
-        if ev <= getattr(cfg, 'min_ev', 0.0):
+        # ── Calibrated EV: shrink win_prob toward base_rate using WFA ROC ──
+        brain_data = brain.brains.get((strat, side)) or {}
+        wfa_roc_auc = brain_data.get("wfa_roc_auc", 0.5)
+        base_rate = brain_data.get("positive_class_rate", 0.35)
+        calibrated_p = base_rate + (wfa_roc_auc - 0.5) * (2.0 * base_rate)
+        ev_input_prob = min(win_prob, calibrated_p)
+        ev = (ev_input_prob * rr) - ((1.0 - ev_input_prob) * 1.0)
+        min_ev = getattr(cfg, 'min_ev', 0.0)
+        log.debug(
+            f"EV: raw_prob={win_prob:.3f} calib_prob={ev_input_prob:.3f} "
+            f"roc={wfa_roc_auc:.3f} ev={ev:.3f} threshold={min_ev:.3f}"
+        )
+        if ev <= min_ev:
             _p6_counters["ev_too_low"] += 1
             return None
 

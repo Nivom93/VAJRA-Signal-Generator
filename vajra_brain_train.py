@@ -568,6 +568,7 @@ def main(argv=None):
                 "n_features_selected": len(selected_features),
                 "n_samples_total": n_samples_all,
                 "pos_neg_ratio": f"{pos_cases}/{neg_cases}",
+                "positive_class_rate": float(pos_cases / len(y_all)),
             }
 
             out_file = out_dir / f"brain_{strat_clean}_{side}.joblib"
