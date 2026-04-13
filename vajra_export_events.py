@@ -443,9 +443,24 @@ def main():
         for row in exec_iter.itertuples():
             _process_bar(row, row.Index)
 
+    # Don't pollute the events JSONL with absolute-price features that
+    # legitimately drift between train ($43k BTC) and inference ($108k BTC).
+    # These are excluded from training anyway via BASE_EXCLUDE_COLS, but
+    # writing them to JSONL trips the drift detector with cosmetic noise.
+    _ABS_PRICE_FEATURES = {
+        "poc", "vah", "val", "kc_lower", "kc_upper",
+        "asian_high", "asian_low", "last_swing_high", "last_swing_low",
+        "rolling_vwap_20", "avwap_bull", "avwap_bear",
+        "macro_ema50", "macro_ema200", "dc_low_20", "dc_high_20",
+        "fib_382_long", "fib_500_long", "fib_618_long", "fib_786_long", "fib_886_long",
+        "fib_382_short", "fib_500_short", "fib_618_short", "fib_786_short", "fib_886_short",
+        "price", "entry_price", "exit_price", "stop_loss", "tp",
+    }
+
     with _open_out(args.out) as f:
         for ev in events:
-            clean_ev = {k: (float(v) if isinstance(v, (float, np.floating)) and np.isfinite(v) else v) for k,v in ev.items()}
+            clean_ev = {k: (float(v) if isinstance(v, (float, np.floating)) and np.isfinite(v) else v)
+                        for k, v in ev.items() if k not in _ABS_PRICE_FEATURES}
             f.write(json.dumps(clean_ev) + "\n")
             
     log.info(f"Exported {len(events)} sanitized Meta-Label events.")

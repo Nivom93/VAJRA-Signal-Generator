@@ -94,7 +94,13 @@ def _strategy_overrides(cfg):
     # wired dynamic inheritance in ``plan_trade_with_brain``, so a single
     # setting now drives backtest, export and live execution.
     cfg.execution_style = "limit"
-    cfg.pullback_atr_mult = 0.30   # require price to pull back 0.3 ATR before the limit fills
+    # Phase 4B — Fill-rate calibration after isotonic compression
+    # Previous values (0.30 pullback + 0.10 buffer) caused 99.1% of plans to
+    # expire unfilled. Loosen to 0.10 ATR pullback + 0.03 ATR buffer so price
+    # only needs to move ~0.13 ATR against entry direction to fill, vs the
+    # previous ~0.40 ATR. Holds the realism principle (limit ≠ market) but
+    # stops starving the engine of fills.
+    cfg.pullback_atr_mult = 0.10        # was 0.30 — too restrictive after isotonic crush
 
     # Real friction — previously zero (illusion of profitability).
     cfg.maker_fee_bps = _BYBIT_MAKER_BPS
@@ -117,7 +123,7 @@ def _strategy_overrides(cfg):
     # Require the bar to penetrate the limit by 0.10 ATR to count as
     # a fill. Proxies FIFO queue position and wick-depth effects that
     # cause 40–70% of touches to NOT fill in practice.
-    cfg.limit_fill_buffer_atr = 0.10
+    cfg.limit_fill_buffer_atr = 0.03    # was 0.10 — proxies queue/wick effects more reasonably
 
     # ── Phase 2A · Directive 1: Structural SL & Time-In-Force ──────────
     #
@@ -190,8 +196,13 @@ def _strategy_overrides(cfg):
     # hit-rates rather than being a shape-hack compensating for SMOTE.
     # Minimum EV in R-multiples using the calibrated (pessimistic) win probability
     cfg.min_ev = 0.05
-    cfg.min_prob_long = 0.15
-    cfg.min_prob_short = 0.15
+    # Phase 3B — Gate calibrated to the new isotonic distribution
+    # Isotonic calibration typically crushes XGBoost outputs to 0.05–0.30,
+    # so a 0.15 gate rejects ~70% of valid setups. Lower to 0.08 to match
+    # the new distribution; meta-brain at 0.22 still acts as the conviction
+    # filter on top.
+    cfg.min_prob_long = 0.08            # was 0.15
+    cfg.min_prob_short = 0.08           # was 0.15
     cfg.dynamic_risk_scaling = True
 
     # ── Engine structural gate controls ────────────────────────────────

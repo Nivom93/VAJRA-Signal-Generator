@@ -171,6 +171,15 @@ def calibration_report(trades_csv_path: str) -> None:
             outcome_col = candidate
             break
 
+    # Fallback: derive a binary _win column from pnl_r or exit_reason
+    if outcome_col is None:
+        if "pnl_r" in df.columns:
+            df["_derived_win"] = (pd.to_numeric(df["pnl_r"], errors="coerce") > 0).astype(int)
+            outcome_col = "_derived_win"
+        elif "exit_reason" in df.columns:
+            df["_derived_win"] = (df["exit_reason"].astype(str).str.lower() == "tp").astype(int)
+            outcome_col = "_derived_win"
+
     strategy_col = None
     for candidate in ("strategy", "strat", "reason", "entry_kind"):
         if candidate in df.columns:
