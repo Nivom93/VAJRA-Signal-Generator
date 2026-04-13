@@ -1828,6 +1828,23 @@ def confluence_features(cfg, macro_tf, swing_tf, htf, exec_tf, iMacro, iSwing, i
     )
     f["sentient_regime_score"] = float(np.tanh(regime_raw))
 
+    # ──────────────────────────────────────────────────────────────────────
+    # NUMERICAL SANITIZATION — prevent inf/-inf/nan from corrupting brains
+    # ──────────────────────────────────────────────────────────────────────
+    # Several rate-of-change and acceleration features can overflow at extreme
+    # price levels (BTC went from $43k→$108k between train and inference).
+    # We clip every numeric value to a sane bounded range.  Any value that's
+    # inf/-inf/nan becomes 0.0; anything outside ±1e6 is clipped to the bound.
+    import math
+    for _k, _v in list(f.items()):
+        if isinstance(_v, (int, float)):
+            if not math.isfinite(_v):
+                f[_k] = 0.0
+            elif _v > 1e6:
+                f[_k] = 1e6
+            elif _v < -1e6:
+                f[_k] = -1e6
+
     return f
 
 def precompute_v6_features(pMacro, pSwing, pExec, macro_tf, swing_tf, exec_tf, btc_close_arr=None):
